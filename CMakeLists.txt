@@ -18,18 +18,41 @@ else()
 	set(REGOLITH_FP_FLAGS -ffp-contract=off -fno-fast-math)
 endif()
 
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+
 add_library(regolith_core STATIC
+	core/src/codec.cpp
 	core/src/cube.cpp
+	core/src/pack.cpp
 	core/src/patch.cpp
 )
 target_include_directories(regolith_core PUBLIC core/include)
+target_link_libraries(regolith_core PUBLIC PkgConfig::ZSTD)
 target_compile_options(regolith_core PRIVATE ${REGOLITH_FP_FLAGS})
+
+option(REGOLITH_BUILD_BAKER "Build the regolith_bake tool" ON)
+if(REGOLITH_BUILD_BAKER)
+	add_executable(regolith_bake
+		bake/areoid.cpp
+		bake/catalog.cpp
+		bake/main.cpp
+		bake/mars_dem.cpp
+		bake/phobos_icq.cpp
+		bake/samplers.cpp
+		bake/tile_bake.cpp
+	)
+	target_link_libraries(regolith_bake PRIVATE regolith_core)
+	target_compile_options(regolith_bake PRIVATE ${REGOLITH_FP_FLAGS})
+endif()
 
 if(REGOLITH_BUILD_TESTS)
 	enable_testing()
 	add_executable(regolith_core_tests
 		tests/test_main.cpp
+		tests/test_codec.cpp
 		tests/test_cube.cpp
+		tests/test_fold.cpp
 		tests/test_patch.cpp
 	)
 	target_link_libraries(regolith_core_tests PRIVATE regolith_core)

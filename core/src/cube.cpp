@@ -64,6 +64,35 @@ int lattice_faces(const IVec3 &p_point, int64_t p_m, FaceSample r_out[3]) {
 	return count;
 }
 
+IVec3 fold_lattice(int p_face, int64_t p_gi, int64_t p_gj, int64_t p_m) {
+	const FaceAxes &a = AXES[p_face];
+	int64_t cu = 2 * p_gi - p_m;
+	int64_t cv = 2 * p_gj - p_m;
+	int64_t cf = p_m;
+	auto fold = [&](int64_t &r_c) {
+		if (r_c > p_m) {
+			cf -= r_c - p_m;
+			r_c = p_m;
+		} else if (r_c < -p_m) {
+			cf -= -p_m - r_c;
+			r_c = -p_m;
+		}
+	};
+	fold(cu);
+	fold(cv);
+	return a.f * cf + a.u * cu + a.v * cv;
+}
+
+FaceSample canonical_sample(const IVec3 &p_point, int64_t p_m) {
+	for (int face = 0; face < FACE_COUNT; ++face) {
+		const FaceAxes &a = AXES[face];
+		if (dot(a.f, p_point) == p_m) {
+			return { face, (dot(a.u, p_point) + p_m) / 2, (dot(a.v, p_point) + p_m) / 2 };
+		}
+	}
+	return {};
+}
+
 DVec3 face_dir(const FaceCoord &p_coord) {
 	const FaceAxes &a = AXES[p_coord.face];
 	const DVec3 q = cast<double>(a.f) + cast<double>(a.u) * warp(p_coord.s) + cast<double>(a.v) * warp(p_coord.t);

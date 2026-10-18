@@ -44,6 +44,13 @@ DVec3 lattice_dir(const IVec3 &p_point, int64_t p_m);
 // corner. Returns the count written to r_out.
 int lattice_faces(const IVec3 &p_point, int64_t p_m, FaceSample r_out[3]);
 
+// Lattice point for indices that may run past the face edge
+// (by less than m): the overshoot folds onto the neighbour.
+IVec3 fold_lattice(int p_face, int64_t p_gi, int64_t p_gj, int64_t p_m);
+
+// The lowest-index face holding the point, with its indices.
+FaceSample canonical_sample(const IVec3 &p_point, int64_t p_m);
+
 // Continuous face parameters, s and t in [-1, 1].
 struct FaceCoord {
 	int face = 0;
