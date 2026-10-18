@@ -555,8 +555,13 @@ void RegolithBody::update_collision() {
 		const DVec3 here = regolith::to_d(anchor->get_global_position());
 		for (double t : { 0.0, 0.5, 1.0 }) {
 			const DVec3 centre = regolith::to_body_point(f, here + regolith::to_d(vel) * (t * c->get_lookahead()));
-			const regolith::RenderFrame tangent = regolith::RenderFrame::at(centre);
 			const double reach = c->get_radius();
+			// High above the ground there is nothing to touch yet.
+			const double clearance = regolith::length(centre) - surface_radius(regolith::normalize(centre), false);
+			if (clearance > reach) {
+				continue;
+			}
+			const regolith::RenderFrame tangent = regolith::RenderFrame::at(centre);
 			const int steps = int(std::ceil(reach / (0.5 * patch_edge)));
 			for (int b = -steps; b <= steps; ++b) {
 				for (int a = -steps; a <= steps; ++a) {
