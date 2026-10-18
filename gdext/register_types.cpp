@@ -4,6 +4,8 @@
 #include <godot_cpp/core/defs.hpp>
 #include <godot_cpp/godot.hpp>
 
+#include "regolith_body.hpp"
+#include "regolith_collider.hpp"
 #include "regolith_system.hpp"
 
 using namespace godot;
@@ -15,6 +17,8 @@ void initialize_regolith(ModuleInitializationLevel p_level) {
 		return;
 	}
 	GDREGISTER_CLASS(RegolithSystem);
+	GDREGISTER_CLASS(RegolithBody);
+	GDREGISTER_CLASS(RegolithCollider);
 }
 
 void uninitialize_regolith(ModuleInitializationLevel p_level) {

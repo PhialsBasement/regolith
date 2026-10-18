@@ -2,6 +2,12 @@
 
 #include <algorithm>
 #include <cstring>
+#include <mutex>
+
+#ifndef _WIN32
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include "regolith/codec.hpp"
 
@@ -146,6 +152,11 @@ PackReader::~PackReader() {
 	if (file_) {
 		std::fclose(file_);
 	}
+#ifndef _WIN32
+	if (fd_ >= 0) {
+		::close(fd_);
+	}
+#endif
 }
 
 bool PackReader::open(const std::string &p_path) {
@@ -153,6 +164,9 @@ bool PackReader::open(const std::string &p_path) {
 	if (!file_) {
 		return false;
 	}
+#ifndef _WIN32
+	fd_ = ::open(p_path.c_str(), O_RDONLY);
+#endif
 	uint8_t head[PACK_HEADER_SIZE];
 	if (std::fread(head, 1, PACK_HEADER_SIZE, file_) != PACK_HEADER_SIZE || !decode_header(head, header_)) {
 		return false;
@@ -193,6 +207,27 @@ bool PackReader::read_blob(const PackEntry &p_entry, std::vector<uint8_t> &r_blo
 	if (std::fread(r_blob.data(), 1, r_blob.size(), file_) != r_blob.size()) {
 		return false;
 	}
+	return crc32(r_blob.data(), r_blob.size()) == p_entry.crc;
+}
+
+bool PackReader::read_blob_concurrent(const PackEntry &p_entry, std::vector<uint8_t> &r_blob) const {
+	r_blob.resize(p_entry.size);
+#ifndef _WIN32
+	size_t done = 0;
+	while (done < r_blob.size()) {
+		const ssize_t got = ::pread(fd_, r_blob.data() + done, r_blob.size() - done, off_t(p_entry.offset + done));
+		if (got <= 0) {
+			return false;
+		}
+		done += size_t(got);
+	}
+#else
+	static std::mutex lock;
+	std::lock_guard<std::mutex> guard(lock);
+	if (!seek(file_, p_entry.offset) || std::fread(r_blob.data(), 1, r_blob.size(), file_) != r_blob.size()) {
+		return false;
+	}
+#endif
 	return crc32(r_blob.data(), r_blob.size()) == p_entry.crc;
 }
 

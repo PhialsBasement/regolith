@@ -1,0 +1,149 @@
+#pragma once
+
+#include <memory>
+#include <unordered_map>
+#include <vector>
+
+#include <godot_cpp/classes/node3d.hpp>
+#include <godot_cpp/classes/shader.hpp>
+#include <godot_cpp/variant/rid.hpp>
+#include <godot_cpp/variant/string.hpp>
+
+#include "regolith/height_tile.hpp"
+#include "regolith/patch.hpp"
+#include "regolith/select.hpp"
+#include "regolith/tile_loader.hpp"
+
+namespace godot {
+
+class RegolithSystem;
+
+// One celestial body: streams its height pack, draws it as a
+// CDLOD cube-sphere and keeps terrain collision around every
+// RegolithCollider.
+class RegolithBody : public Node3D {
+	GDCLASS(RegolithBody, Node3D)
+
+public:
+	RegolithBody();
+	~RegolithBody() override;
+	void _ready() override;
+	void _process(double p_delta) override;
+	void _physics_process(double p_delta) override;
+	void _exit_tree() override;
+
+	bool ensure_open();
+	double r_ref() const { return source_.r_ref(); }
+	// Surface radius under a direction; p_exact produces the
+	// finest tile synchronously, otherwise the deepest cached.
+	double surface_radius(const regolith::DVec3 &p_dir, bool p_exact);
+	// Areoid (datum) radius under a direction.
+	double datum_radius(const regolith::DVec3 &p_dir) const;
+
+	void set_pack_path(const String &p_v) { pack_path_ = p_v; }
+	String get_pack_path() const { return pack_path_; }
+	void set_datum_path(const String &p_v) { datum_path_ = p_v; }
+	String get_datum_path() const { return datum_path_; }
+	void set_system_path(const NodePath &p_v) { system_path_ = p_v; }
+	NodePath get_system_path() const { return system_path_; }
+	void set_gm(double p_v) { gm_ = p_v; }
+	double get_gm() const { return gm_; }
+	void set_max_level(int p_v) { max_level_ = p_v; }
+	int get_max_level() const { return max_level_; }
+	void set_collision_level(int p_v) { collision_level_ = p_v; }
+	int get_collision_level() const { return collision_level_; }
+	void set_quads(int p_v) { quads_ = p_v; }
+	int get_quads() const { return quads_; }
+	void set_range_factor(double p_v) { range_factor_ = p_v; }
+	double get_range_factor() const { return range_factor_; }
+	void set_page_capacity(int p_v) { page_capacity_ = p_v; }
+	int get_page_capacity() const { return page_capacity_; }
+	void set_debug_mode(int p_v);
+	int get_debug_mode() const { return debug_mode_; }
+	Dictionary get_stats() const;
+	bool is_collision_ready_at(const Vector3 &p_pos) const;
+
+protected:
+	static void _bind_methods();
+
+private:
+	struct Page {
+		int layer = -1;
+		uint64_t used = 0;
+	};
+	struct Patch {
+		RID body;
+		RID shape;
+		regolith::DVec3 origin; // body-fixed
+		uint64_t used = 0;
+	};
+	// One render instance per drawn node, mesh fixed for life;
+	// parameters are pushed only when something changed.
+	struct Drawn {
+		RID instance;
+		bool fine = false;
+		int self_layer = -1;
+		int parent_layer = -1;
+		int rebase = -1;
+		bool shadow = false;
+		uint64_t seen = 0;
+	};
+
+	RegolithSystem *system() const;
+	void create_render_resources();
+	RID make_grid_mesh(int p_quads);
+	void upload_finished(int p_budget);
+	bool upload(regolith::TileKey p_key);
+	void draw(const std::vector<regolith::SelectedNode> &p_nodes);
+	void update_collision();
+	bool build_patch(uint64_t p_id, regolith::TileKey p_tile, int p_bx, int p_by);
+	void place_patch(Patch &r_patch) const;
+	void free_render_resources();
+
+	String pack_path_;
+	String datum_path_;
+	NodePath system_path_;
+	double gm_ = 4.282837e13;
+	int max_level_ = 15;
+	int collision_level_ = 15;
+	int quads_ = 52;
+	double range_factor_ = 6.0;
+	int page_capacity_ = 4096;
+	int debug_mode_ = 0;
+
+	bool opened_ = false;
+	regolith::PackTileSource source_;
+	regolith::PackTileSource datum_source_;
+	bool has_datum_ = false;
+	std::unique_ptr<regolith::TileCache> cache_;
+	std::unique_ptr<regolith::TileLoader> loader_;
+	std::unordered_map<uint64_t, regolith::HeightTilePtr> datum_tiles_;
+	int datum_level_ = 0;
+	regolith::Selector selector_;
+
+	Ref<Shader> shader_;
+	RID material_;
+	RID atlas_;
+	RID mesh_coarse_;
+	RID mesh_fine_;
+	std::unordered_map<uint64_t, Drawn> drawn_;
+	std::vector<RID> spare_coarse_;
+	std::vector<RID> spare_fine_;
+	std::unordered_map<uint64_t, Page> pages_;
+	std::vector<int> free_layers_;
+	std::vector<regolith::TileKey> to_upload_;
+	uint64_t frame_ = 0;
+	double occluder_radius_ = 0.0;
+
+	std::unordered_map<uint64_t, Patch> patches_;
+	uint64_t physics_tick_ = 0;
+	uint64_t last_rebase_seen_ = 0;
+
+	// stats
+	int stat_nodes_ = 0;
+	int stat_uploads_ = 0;
+	int stat_wanted_ = 0;
+	double stat_select_ms_ = 0.0;
+};
+
+} // namespace godot

@@ -73,9 +73,12 @@ public:
 	const std::string &attribution() const { return attribution_; }
 	const PackEntry *find(TileKey p_key) const;
 	bool read_blob(const PackEntry &p_entry, std::vector<uint8_t> &r_blob) const;
+	// Safe to call from many threads at once.
+	bool read_blob_concurrent(const PackEntry &p_entry, std::vector<uint8_t> &r_blob) const;
 
 private:
 	FILE *file_ = nullptr;
+	int fd_ = -1;
 	PackHeader header_;
 	std::vector<PackEntry> entries_;
 	std::string attribution_;

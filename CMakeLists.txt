@@ -24,9 +24,15 @@ pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
 add_library(regolith_core STATIC
 	core/src/codec.cpp
 	core/src/cube.cpp
+	core/src/ephemeris.cpp
+	core/src/height_tile.cpp
 	core/src/pack.cpp
 	core/src/patch.cpp
+	core/src/select.cpp
+	core/src/tile_loader.cpp
 )
+find_package(Threads REQUIRED)
+target_link_libraries(regolith_core PUBLIC Threads::Threads)
 target_include_directories(regolith_core PUBLIC core/include)
 target_link_libraries(regolith_core PUBLIC PkgConfig::ZSTD)
 target_compile_options(regolith_core PRIVATE ${REGOLITH_FP_FLAGS})
@@ -52,8 +58,11 @@ if(REGOLITH_BUILD_TESTS)
 		tests/test_main.cpp
 		tests/test_codec.cpp
 		tests/test_cube.cpp
+		tests/test_ephemeris.cpp
 		tests/test_fold.cpp
 		tests/test_patch.cpp
+		tests/test_select.cpp
+		tests/test_tiles.cpp
 	)
 	target_link_libraries(regolith_core_tests PRIVATE regolith_core)
 	target_compile_options(regolith_core_tests PRIVATE ${REGOLITH_FP_FLAGS})
@@ -65,6 +74,8 @@ if(REGOLITH_BUILD_GDEXTENSION)
 	add_subdirectory(thirdparty/godot-cpp)
 	add_library(regolith SHARED
 		gdext/register_types.cpp
+		gdext/regolith_body.cpp
+		gdext/regolith_collider.cpp
 		gdext/regolith_system.cpp
 	)
 	target_link_libraries(regolith PRIVATE godot::cpp regolith_core)
@@ -79,4 +90,6 @@ if(REGOLITH_BUILD_GDEXTENSION)
 	)
 	configure_file(addon/regolith.gdextension
 		"${REGOLITH_ADDON_DIR}/regolith.gdextension" COPYONLY)
+	configure_file(addon/regolith_terrain.gdshader
+		"${REGOLITH_ADDON_DIR}/regolith_terrain.gdshader" COPYONLY)
 endif()
