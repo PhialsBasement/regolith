@@ -26,6 +26,7 @@ add_library(regolith_core STATIC
 	core/src/cube.cpp
 	core/src/ephemeris.cpp
 	core/src/height_tile.cpp
+	core/src/orbit.cpp
 	core/src/pack.cpp
 	core/src/patch.cpp
 	core/src/select.cpp

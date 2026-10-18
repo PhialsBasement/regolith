@@ -1,9 +1,12 @@
+#include <algorithm>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <map>
 #include <string>
 #include <vector>
 
+#include "regolith/orbit.hpp"
 #include "samplers.hpp"
 #include "tile_bake.hpp"
 
@@ -16,6 +19,7 @@ const char *USAGE =
 		"usage:\n"
 		"  regolith_bake mars --dem TIF --areoid IMG [--craters BIN] [--pits BIN] --out DIR [options]\n"
 		"  regolith_bake phobos --icq TAB --out DIR [options]\n"
+		"  regolith_bake orbit --horizons FILE[,FILE...] --out RGE (parent Mars)\n"
 		"options: --min-level N --max-level N --codec 1|2|3 --zstd N --step M --trial\n";
 
 struct Args {
@@ -160,6 +164,85 @@ int run_phobos(const Args &p_args) {
 	return 0;
 }
 
+// Horizons CSV vectors ($$SOE..$$EOE rows: JD, date, x, y, z,
+// vx, vy, vz in km and km/s) into an RGE1 table.
+int run_orbit(const Args &p_args) {
+	struct Row {
+		double jd;
+		OrbitState s;
+	};
+	std::vector<Row> rows;
+	std::string list = p_args.get("horizons");
+	size_t from = 0;
+	while (from <= list.size()) {
+		const size_t comma = list.find(',', from);
+		const std::string path = list.substr(from, comma == std::string::npos ? std::string::npos : comma - from);
+		from = comma == std::string::npos ? list.size() + 1 : comma + 1;
+		FILE *f = std::fopen(path.c_str(), "r");
+		if (!f) {
+			std::fprintf(stderr, "orbit: cannot open %s\n", path.c_str());
+			return 1;
+		}
+		char line[512];
+		bool inside = false;
+		while (std::fgets(line, sizeof(line), f)) {
+			const std::string l(line);
+			if (l.rfind("$$SOE", 0) == 0) {
+				inside = true;
+				continue;
+			}
+			if (l.rfind("$$EOE", 0) == 0) {
+				inside = false;
+				continue;
+			}
+			if (!inside) {
+				continue;
+			}
+			Row r;
+			char date[64];
+			double v[6];
+			if (std::sscanf(line, "%lf, %63[^,], %lf, %lf, %lf, %lf, %lf, %lf", &r.jd, date, &v[0], &v[1], &v[2], &v[3],
+						&v[4], &v[5]) == 8) {
+				r.s = { DVec3(v[0], v[1], v[2]) * 1000.0, DVec3(v[3], v[4], v[5]) * 1000.0 };
+				rows.push_back(r);
+			}
+		}
+		std::fclose(f);
+	}
+	std::sort(rows.begin(), rows.end(), [](const Row &p_a, const Row &p_b) { return p_a.jd < p_b.jd; });
+	rows.erase(std::unique(rows.begin(), rows.end(), [](const Row &p_a, const Row &p_b) { return std::abs(p_a.jd - p_b.jd) < 1e-9; }),
+			rows.end());
+	if (rows.size() < 2) {
+		std::fprintf(stderr, "orbit: no samples\n");
+		return 1;
+	}
+	OrbitTable table;
+	table.t0_ = (rows.front().jd - 2451545.0) * 86400.0;
+	// From the whole span: one JD difference carries ~0.1 ms of
+	// rounding, which would add up to seconds over the table.
+	table.step_ = std::round((rows.back().jd - rows.front().jd) * 86400.0 / double(rows.size() - 1) * 1e6) * 1e-6;
+	for (size_t k = 1; k < rows.size(); ++k) {
+		if (std::abs((rows[k].jd - rows[k - 1].jd) * 86400.0 - table.step_) > 1e-3) {
+			std::fprintf(stderr, "orbit: uneven step at row %zu\n", k);
+			return 1;
+		}
+		table.states_.push_back(rows[k - 1].s);
+	}
+	table.states_.push_back(rows.back().s);
+	// Mars: GM and J2 (JPL), IAU pole at J2000.
+	table.parent_gm_ = 4.282837e13;
+	table.parent_j2_ = 1.96045e-3;
+	table.parent_radius_ = 3396200.0;
+	table.pole_ra_ = 317.68143;
+	table.pole_dec_ = 52.88650;
+	if (!table.save(p_args.get("out"))) {
+		return 1;
+	}
+	std::printf("orbit: %zu samples every %.0f s from J2000%+.0f s to %+.0f s\n", table.states_.size(), table.step_,
+			table.t0_, table.end());
+	return 0;
+}
+
 } // namespace
 
 int main(int p_argc, char **p_argv) {
@@ -173,6 +256,9 @@ int main(int p_argc, char **p_argv) {
 	}
 	if (args.mode == "phobos") {
 		return run_phobos(args);
+	}
+	if (args.mode == "orbit") {
+		return run_orbit(args);
 	}
 	std::fputs(USAGE, stderr);
 	return 2;

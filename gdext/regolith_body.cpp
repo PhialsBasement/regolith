@@ -26,6 +26,7 @@
 
 #include "convert.hpp"
 #include "regolith/cube.hpp"
+#include "regolith/ephemeris.hpp"
 #include "regolith_collider.hpp"
 #include "regolith_system.hpp"
 
@@ -93,6 +94,10 @@ void RegolithBody::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_system_path"), &RegolithBody::get_system_path);
 	ClassDB::bind_method(D_METHOD("set_gm", "gm"), &RegolithBody::set_gm);
 	ClassDB::bind_method(D_METHOD("get_gm"), &RegolithBody::get_gm);
+	ClassDB::bind_method(D_METHOD("set_orbit_path", "path"), &RegolithBody::set_orbit_path);
+	ClassDB::bind_method(D_METHOD("get_orbit_path"), &RegolithBody::get_orbit_path);
+	ClassDB::bind_method(D_METHOD("set_rotation_model", "model"), &RegolithBody::set_rotation_model);
+	ClassDB::bind_method(D_METHOD("get_rotation_model"), &RegolithBody::get_rotation_model);
 	ClassDB::bind_method(D_METHOD("set_max_level", "level"), &RegolithBody::set_max_level);
 	ClassDB::bind_method(D_METHOD("get_max_level"), &RegolithBody::get_max_level);
 	ClassDB::bind_method(D_METHOD("set_collision_level", "level"), &RegolithBody::set_collision_level);
@@ -111,6 +116,9 @@ void RegolithBody::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "datum_path", PROPERTY_HINT_FILE, "*.rgp"), "set_datum_path", "get_datum_path");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "system"), "set_system_path", "get_system_path");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "gm"), "set_gm", "get_gm");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "orbit_path", PROPERTY_HINT_FILE, "*.rge"), "set_orbit_path", "get_orbit_path");
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "rotation_model", PROPERTY_HINT_ENUM, "Mars IAU,Synchronous"), "set_rotation_model",
+			"get_rotation_model");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "max_level"), "set_max_level", "get_max_level");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "collision_level"), "set_collision_level", "get_collision_level");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "quads"), "set_quads", "get_quads");
@@ -130,6 +138,12 @@ bool RegolithBody::ensure_open() {
 	if (!source_.open(path_of(pack_path_))) {
 		ERR_PRINT("RegolithBody: cannot open pack " + pack_path_);
 		return false;
+	}
+	if (!orbit_path_.is_empty()) {
+		has_orbit_ = orbit_.open(path_of(orbit_path_));
+		if (!has_orbit_) {
+			ERR_PRINT("RegolithBody: cannot open orbit " + orbit_path_);
+		}
 	}
 	if (!datum_path_.is_empty() && datum_source_.open(path_of(datum_path_))) {
 		has_datum_ = true;
@@ -397,7 +411,7 @@ void RegolithBody::_process(double p_delta) {
 	upload_finished(UPLOADS_PER_FRAME);
 
 	const uint64_t t0 = Time::get_singleton()->get_ticks_usec();
-	const regolith::RenderFrame &f = sys->frame();
+	const regolith::RenderFrame f = sys->frame_for(this);
 	regolith::SelectInput in;
 	in.camera = regolith::to_body_point(f, regolith::to_d(cam->get_global_position()));
 	in.r_ref = source_.r_ref();
@@ -423,11 +437,11 @@ void RegolithBody::_process(double p_delta) {
 void RegolithBody::draw(const std::vector<regolith::SelectedNode> &p_nodes) {
 	RenderingServer *rs = RenderingServer::get_singleton();
 	RegolithSystem *sys = system();
-	const regolith::RenderFrame &f = sys->frame();
+	const regolith::RenderFrame f = sys->frame_for(this);
 	const regolith::TileLayout lay = source_.layout();
 	const RID scenario = get_world_3d()->get_scenario();
 	const Vector3 cam = get_viewport()->get_camera_3d()->get_global_position();
-	const int rebase = sys->get_rebase_count();
+	const uint64_t version = sys->frame_version(this);
 	for (const regolith::SelectedNode &n : p_nodes) {
 		const int level = n.key.level();
 		const bool fine = level >= max_level_ - 1;
@@ -478,12 +492,12 @@ void RegolithBody::draw(const std::vector<regolith::SelectedNode> &p_nodes) {
 					shadow ? RenderingServer::SHADOW_CASTING_SETTING_ON : RenderingServer::SHADOW_CASTING_SETTING_OFF);
 			d.shadow = shadow;
 		}
-		if (d.self_layer == self_layer && d.parent_layer == parent_layer && d.rebase == rebase) {
+		if (d.self_layer == self_layer && d.parent_layer == parent_layer && d.frame_version == version) {
 			continue;
 		}
 		d.self_layer = self_layer;
 		d.parent_layer = parent_layer;
-		d.rebase = rebase;
+		d.frame_version = version;
 		const RID inst = d.instance;
 
 		float lo = 0.0f, hi = 0.0f;
@@ -521,16 +535,47 @@ void RegolithBody::draw(const std::vector<regolith::SelectedNode> &p_nodes) {
 }
 
 void RegolithBody::_physics_process(double p_delta) {
-	if (!opened_ || !system()) {
+	RegolithSystem *sys = system();
+	if (!opened_ || !sys) {
 		return;
 	}
 	++physics_tick_;
-	update_collision();
+	if (sys->dominant() == this) {
+		update_collision();
+		return;
+	}
+	// Only the body whose frame we are in has ground to touch.
+	PhysicsServer3D *ps = PhysicsServer3D::get_singleton();
+	for (auto &entry : patches_) {
+		ps->free_rid(entry.second.body);
+		ps->free_rid(entry.second.shape);
+	}
+	patches_.clear();
+}
+
+void RegolithBody::_enter_tree() {
+	add_to_group("regolith_body");
+}
+
+void RegolithBody::pose(double p_t, DVec3 &r_position, DVec3 r_axes[3]) const {
+	if (has_orbit_) {
+		const regolith::OrbitState s = orbit_.state(p_t);
+		r_position = s.position;
+		if (rotation_model_ == ROTATION_SYNCHRONOUS) {
+			regolith::synchronous_axes(s, r_axes);
+			return;
+		}
+	} else {
+		r_position = DVec3(0.0, 0.0, 0.0);
+	}
+	r_axes[0] = regolith::mars_body_to_inertial(p_t, DVec3(1.0, 0.0, 0.0));
+	r_axes[1] = regolith::mars_body_to_inertial(p_t, DVec3(0.0, 1.0, 0.0));
+	r_axes[2] = regolith::mars_body_to_inertial(p_t, DVec3(0.0, 0.0, 1.0));
 }
 
 void RegolithBody::update_collision() {
 	RegolithSystem *sys = system();
-	const regolith::RenderFrame &f = sys->frame();
+	const regolith::RenderFrame f = sys->frame_for(this);
 	const int patch_level = collision_level_ + PATCH_SPLIT_LEVELS;
 	const double patch_edge = regolith::Selector::node_edge(source_.r_ref(), patch_level);
 
@@ -670,7 +715,7 @@ bool RegolithBody::build_patch(uint64_t p_id, TileKey p_tile, int p_bx, int p_by
 }
 
 void RegolithBody::place_patch(Patch &r_patch) const {
-	const regolith::RenderFrame &f = system()->frame();
+	const regolith::RenderFrame f = system()->frame_for(this);
 	const regolith::RenderFrame pf = regolith::RenderFrame::at(r_patch.origin);
 	Transform3D xf;
 	xf.basis = regolith::basis_between(f, pf);
@@ -683,7 +728,7 @@ bool RegolithBody::is_collision_ready_at(const Vector3 &p_pos) const {
 	if (!sys || !opened_) {
 		return false;
 	}
-	const DVec3 x = regolith::to_body_point(sys->frame(), regolith::to_d(p_pos));
+	const DVec3 x = regolith::to_body_point(sys->frame_for(this), regolith::to_d(p_pos));
 	const regolith::FaceCoord fc = regolith::dir_to_face(regolith::normalize(x));
 	return patches_.count(key_at(fc, collision_level_ + PATCH_SPLIT_LEVELS).bits) != 0;
 }

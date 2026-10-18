@@ -10,6 +10,7 @@
 #include <godot_cpp/variant/string.hpp>
 
 #include "regolith/height_tile.hpp"
+#include "regolith/orbit.hpp"
 #include "regolith/patch.hpp"
 #include "regolith/select.hpp"
 #include "regolith/tile_loader.hpp"
@@ -25,8 +26,14 @@ class RegolithBody : public Node3D {
 	GDCLASS(RegolithBody, Node3D)
 
 public:
+	enum RotationModel {
+		ROTATION_MARS_IAU = 0,
+		ROTATION_SYNCHRONOUS = 1,
+	};
+
 	RegolithBody();
 	~RegolithBody() override;
+	void _enter_tree() override;
 	void _ready() override;
 	void _process(double p_delta) override;
 	void _physics_process(double p_delta) override;
@@ -34,6 +41,9 @@ public:
 
 	bool ensure_open();
 	double r_ref() const { return source_.r_ref(); }
+	// Centre (m, ICRF, relative to the central body) and the
+	// body-fixed axes as ICRF columns, at TT seconds p_t.
+	void pose(double p_t, regolith::DVec3 &r_position, regolith::DVec3 r_axes[3]) const;
 	// Surface radius under a direction; p_exact produces the
 	// finest tile synchronously, otherwise the deepest cached.
 	double surface_radius(const regolith::DVec3 &p_dir, bool p_exact);
@@ -48,6 +58,10 @@ public:
 	NodePath get_system_path() const { return system_path_; }
 	void set_gm(double p_v) { gm_ = p_v; }
 	double get_gm() const { return gm_; }
+	void set_orbit_path(const String &p_v) { orbit_path_ = p_v; }
+	String get_orbit_path() const { return orbit_path_; }
+	void set_rotation_model(int p_v) { rotation_model_ = p_v; }
+	int get_rotation_model() const { return rotation_model_; }
 	void set_max_level(int p_v) { max_level_ = p_v; }
 	int get_max_level() const { return max_level_; }
 	void set_collision_level(int p_v) { collision_level_ = p_v; }
@@ -84,7 +98,7 @@ private:
 		bool fine = false;
 		int self_layer = -1;
 		int parent_layer = -1;
-		int rebase = -1;
+		uint64_t frame_version = UINT64_MAX;
 		bool shadow = false;
 		uint64_t seen = 0;
 	};
@@ -102,8 +116,12 @@ private:
 
 	String pack_path_;
 	String datum_path_;
+	String orbit_path_;
 	NodePath system_path_;
 	double gm_ = 4.282837e13;
+	int rotation_model_ = ROTATION_MARS_IAU;
+	regolith::OrbitTable orbit_;
+	bool has_orbit_ = false;
 	int max_level_ = 15;
 	int collision_level_ = 15;
 	int quads_ = 52;
