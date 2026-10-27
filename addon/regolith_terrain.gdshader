@@ -200,15 +200,32 @@ void hex_sample(vec2 local_uv, vec4 dom, float layer, vec4 dd, out vec4 alb, out
 	}
 	w = w * w * w;
 	w /= w.x + w.y + w.z;
-	vec2 u1 = d_uv + hex_hash(v1);
-	vec2 u2 = d_uv + hex_hash(v2);
-	vec2 u3 = d_uv + hex_hash(v3);
-	alb = w.x * textureGrad(albedo_array, vec3(u1, layer), dd.xy, dd.zw)
-		+ w.y * textureGrad(albedo_array, vec3(u2, layer), dd.xy, dd.zw)
-		+ w.z * textureGrad(albedo_array, vec3(u3, layer), dd.xy, dd.zw);
-	nrm = w.x * textureGrad(normal_array, vec3(u1, layer), dd.xy, dd.zw)
-		+ w.y * textureGrad(normal_array, vec3(u2, layer), dd.xy, dd.zw)
-		+ w.z * textureGrad(normal_array, vec3(u3, layer), dd.xy, dd.zw);
+	// Far away the mips average a scan to near uniform and the
+	// blend hides nothing: slide to the dominant cell alone (16
+	// to 64 texels per pixel), skipping samples left at zero.
+	float lod = log2(max(length(dd.xy), length(dd.zw)) * 2048.0);
+	float k = smoothstep(4.0, 6.0, lod);
+	if (k > 0.0) {
+		vec3 one = w.x >= w.y && w.x >= w.z ? vec3(1.0, 0.0, 0.0) : (w.y >= w.z ? vec3(0.0, 1.0, 0.0) : vec3(0.0, 0.0, 1.0));
+		w = mix(w, one, k);
+	}
+	alb = vec4(0.0);
+	nrm = vec4(0.0);
+	if (w.x > 0.0) {
+		vec3 u = vec3(d_uv + hex_hash(v1), layer);
+		alb += w.x * textureGrad(albedo_array, u, dd.xy, dd.zw);
+		nrm += w.x * textureGrad(normal_array, u, dd.xy, dd.zw);
+	}
+	if (w.y > 0.0) {
+		vec3 u = vec3(d_uv + hex_hash(v2), layer);
+		alb += w.y * textureGrad(albedo_array, u, dd.xy, dd.zw);
+		nrm += w.y * textureGrad(normal_array, u, dd.xy, dd.zw);
+	}
+	if (w.z > 0.0) {
+		vec3 u = vec3(d_uv + hex_hash(v3), layer);
+		alb += w.z * textureGrad(albedo_array, u, dd.xy, dd.zw);
+		nrm += w.z * textureGrad(normal_array, u, dd.xy, dd.zw);
+	}
 }
 
 float horizon_dir(vec3 hp, int k) {
