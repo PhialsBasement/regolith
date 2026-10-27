@@ -74,6 +74,9 @@ public:
 	int get_max_level() const { return max_level_; }
 	void set_collision_level(int p_v) { collision_level_ = p_v; }
 	int get_collision_level() const { return collision_level_; }
+	// The finest levels drawn with the full-density mesh.
+	void set_dense_levels(int p_v) { dense_levels_ = p_v; }
+	int get_dense_levels() const { return dense_levels_; }
 	void set_quads(int p_v) { quads_ = p_v; }
 	int get_quads() const { return quads_; }
 	void set_range_factor(double p_v) { range_factor_ = p_v; }
@@ -154,6 +157,7 @@ private:
 	int max_level_ = 15;
 	int collision_level_ = 15;
 	int quads_ = 52;
+	int dense_levels_ = 2;
 	double range_factor_ = 6.0;
 	int page_capacity_ = 4096;
 	int debug_mode_ = 0;

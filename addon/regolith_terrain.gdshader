@@ -90,7 +90,7 @@ float bilinear(int layer, vec2 ij) {
 
 // Offset from the node centre in difference form: nothing
 // planet-sized is ever subtracted (see regolith/patch.hpp).
-vec3 offset_of(vec2 ij, float rho, out vec3 dir) {
+vec3 offset_of(vec2 ij, float rho, out vec3 dir, out float q_len_out) {
 	float n = float(intervals);
 	float ds = (2.0 * ij.x - n) * u_misc.z;
 	float dt = (2.0 * ij.y - n) * u_misc.z;
@@ -103,6 +103,7 @@ vec3 offset_of(vec2 ij, float rho, out vec3 dir) {
 	float k = (2.0 * dot(u_qc.xyz, dq) + dot(dq, dq)) / (n0 * n2 * (n0 + n2));
 	vec3 dd = dq / n2 - u_qc.xyz * k;
 	dir = q / n2;
+	q_len_out = n2;
 	return dd * u_center.w + dir * (rho - u_debug.z);
 }
 
@@ -114,8 +115,9 @@ void vertex() {
 	vec2 g = VERTEX.xz;
 	bool skirt = VERTEX.y < -0.5;
 	vec3 dir;
+	float q_len_out;
 	vec2 ij = g * step;
-	vec3 p = u_center.xyz + offset_of(ij, texel(layer, ivec2(ij)), dir);
+	vec3 p = u_center.xyz + offset_of(ij, texel(layer, ivec2(ij)), dir, q_len_out);
 	// Morph by distance to the MAIN camera, also in shadow passes.
 	vec3 eye = MAIN_CAM_INV_VIEW_MATRIX[3].xyz;
 	vec3 p_world = (MODEL_MATRIX * vec4(p, 1.0)).xyz;
@@ -124,10 +126,17 @@ void vertex() {
 	vec2 ijm = gm * step;
 	vec2 pij = (vec2(float(quadrant & 1), float(quadrant >> 1)) * float(intervals) + ijm) * 0.5;
 	float h = mix(bilinear(layer, ijm), bilinear(parent_layer, pij), morph);
-	p = u_center.xyz + offset_of(ijm, h, dir);
-	vec3 spare;
-	v_ts = offset_of(ijm + vec2(0.5, 0.0), h, spare) - offset_of(ijm - vec2(0.5, 0.0), h, spare);
-	v_tt = offset_of(ijm + vec2(0.0, 0.5), h, spare) - offset_of(ijm - vec2(0.0, 0.5), h, spare);
+	p = u_center.xyz + offset_of(ijm, h, dir, q_len_out);
+	// Surface tangents per unit ij, analytic: d(dir)/di times
+	// the radius, with dq/di = axis * QP * 2/m / cos^2(QP * s).
+	float n_i = float(intervals);
+	float cs = cos(QP * (u_axis_u.w + (2.0 * ijm.x - n_i) * u_misc.z));
+	float ct = cos(QP * (u_axis_v.w + (2.0 * ijm.y - n_i) * u_misc.z));
+	vec3 dq_s = u_axis_u.xyz * (QP * 2.0 * u_misc.z / (cs * cs));
+	vec3 dq_t = u_axis_v.xyz * (QP * 2.0 * u_misc.z / (ct * ct));
+	float rad = (u_center.w + h - u_debug.z) / q_len_out;
+	v_ts = (dq_s - dir * dot(dir, dq_s)) * rad;
+	v_tt = (dq_t - dir * dot(dir, dq_t)) * rad;
 	if (skirt) {
 		p -= dir * u_debug.w;
 	}

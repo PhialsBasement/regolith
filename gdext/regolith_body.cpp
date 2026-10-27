@@ -223,6 +223,9 @@ void RegolithBody::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_max_level"), &RegolithBody::get_max_level);
 	ClassDB::bind_method(D_METHOD("set_collision_level", "level"), &RegolithBody::set_collision_level);
 	ClassDB::bind_method(D_METHOD("get_collision_level"), &RegolithBody::get_collision_level);
+	ClassDB::bind_method(D_METHOD("set_dense_levels", "levels"), &RegolithBody::set_dense_levels);
+	ClassDB::bind_method(D_METHOD("get_dense_levels"), &RegolithBody::get_dense_levels);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "dense_levels"), "set_dense_levels", "get_dense_levels");
 	ClassDB::bind_method(D_METHOD("set_quads", "quads"), &RegolithBody::set_quads);
 	ClassDB::bind_method(D_METHOD("get_quads"), &RegolithBody::get_quads);
 	ClassDB::bind_method(D_METHOD("set_range_factor", "factor"), &RegolithBody::set_range_factor);
@@ -653,7 +656,7 @@ void RegolithBody::draw(const std::vector<regolith::SelectedNode> &p_nodes) {
 	}
 	for (const regolith::SelectedNode &n : p_nodes) {
 		const int level = n.key.level();
-		const bool fine = level >= max_level_ - 1;
+		const bool fine = level > max_level_ - dense_levels_;
 
 		// Mark the node and its whole ancestry as in use.
 		for (TileKey a = n.key;; a = a.parent()) {
