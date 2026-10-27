@@ -35,9 +35,10 @@ Sources, each read in full (PDFs from the open archives):
 Eight levels above the ground, edges 0, 2, 5, 9, 14, 20, 27, 35, 45
 km. Pressure p(z) = p_s exp(-z / H), H = R T_a / g. Temperature falls
 1.6 K/km to 40 km and is isothermal above (SK77 abstract), centred so
-the column mean is the model's T_a; the lowest level is the surface
-air. Floored at the CO2 frost point. Orographic lift cools a level by
-(g / cp) times the terrain rise across a cell along the wind.
+the column mean is the model's T_a. Floored at the CO2 frost point.
+The surface couples through the flux only: the levels are kilometres
+thick, while M04's surface-coupled layers are 4, 19 and 44 m (para 17),
+so the ground's diurnal swing is kept out of them.
 
 Air molecular weight 43.34 (SK77, Viking 2).
 
@@ -77,9 +78,13 @@ diffusion: 100 m2/s up to 25 km, rising inversely with density above
 
 ## Surface exchange (M04 eq. 1)
 
-E = rho C_d |U| (q_s(T_s) - q), C_d = (kappa / ln(z / z0))^2, kappa
-0.4, z0 1 cm, z 4 m. Surface ice over 5 um takes albedo 0.4 (M04 para
-35; N14 later tuned 0.35).
+E = rho C_h |U| (q_s(T_s) - q), z0 1 cm, z 4 m. C_h is LMD's
+vdif_cd_mod.F90 (Colaitis 2013, England 1995 branch): neutral log law
+times a Richardson-number stability function, with the gust term from
+w*. Past the critical Richardson number the code sets the function to
+1 while its comment says no mixing; the comment is followed (0).
+Surface ice over 5 um takes albedo 0.4 (M04 para 35; N14 later tuned
+0.35).
 
 ## Optical depth (for the renderer)
 
@@ -88,9 +93,11 @@ tau = 3 Q_ext M_c / (4 rho_i r_c), Q_ext 2 in the visible (M04 para 85).
 ## Start
 
 150 ppm vapour at the north pole falling linearly to 0 at the south
-pole, uniform in height (M04 para 37). M04 runs until the inventory
-changes by under 1 percent a year; N14 needs about 20 years. Short runs
-from this start are a transient.
+pole, uniform in height (M04 para 37), clipped to what each level holds
+at its temperature; the excess lies on the ground as frost. Unclipped,
+the cold north turns about 44 pr-um into cloud on the first step, which
+M04 washes out by running years (N14 about 20). Clipped, the first sol
+already holds 8 percent of the water as cloud (M04: about 9).
 
 ## Known differences from M04
 

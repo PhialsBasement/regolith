@@ -114,8 +114,8 @@ constexpr double R0_SURF = 0.8e-6, R0_H = 18000.0; // m
 // sedimentation radius factor f = exp(3 sigma^2), M04 para 31
 constexpr double F_SED = 1.5;
 constexpr double Q_EXT = 2.0; // visible, M04 para 85
-// surface flux drag (kappa / ln(z / z0))^2, M04 eq. 1
-constexpr double C_D_WATER = 0.4 * 0.4 / (5.9914645471079810 * 5.9914645471079810); // ln(4 / 0.01)
+// surface layer: first level at 4 m, z0 1 cm (M04 eq. 1)
+constexpr double Z1_SURF = 4.0, Z0_SURF = 0.01;
 constexpr double ALBEDO_ICE = 0.4; // over 5 um of ice, M04 para 35
 constexpr double FROST_VISIBLE = 5.0e-3; // kg/m2 (5 um)
 constexpr double NORTH_CAP_LAT = 80.0; // perennial ice, M04 para 34
@@ -138,6 +138,57 @@ double free_path(double p_t, double p_p) {
 double fall_speed(double p_r, double p_t, double p_p, double p_g) {
 	const double kn = free_path(p_t, p_p) / p_r;
 	return 2.0 * p_g * RHO_ICE * p_r * p_r / (9.0 * 1.0e-5) * (1.0 + kn * (1.246 + 0.42 * std::exp(-0.87 / kn)));
+}
+
+// Level l of a column: air mass (kg/m2), mid pressure and
+// temperature, the Viking lapse about the mean T_a
+void level_state(int p_l, double p_ps, double p_ta, double p_r, double p_g, double &r_air, double &r_p, double &r_t) {
+	const double sh = p_r * p_ta / p_g;
+	const double z0 = Gcm::LEVEL_M[p_l], z1 = Gcm::LEVEL_M[p_l + 1], zm = 0.5 * (z0 + z1);
+	r_air = p_ps * (std::exp(-z0 / sh) - std::exp(-z1 / sh)) / p_g;
+	r_p = p_ps * std::exp(-zm / sh);
+	const double t_fr = 3182.48 / (27.9546 - std::log(std::max(r_p, 1e-3)));
+	r_t = std::max(p_ta + LAPSE * sh - LAPSE * std::min(zm, LAPSE_TOP), t_fr);
+}
+
+// Scalar exchange coefficient C_h and the wind it multiplies,
+// LMD vdif_cd_mod.F90 (Colaitis 2013, England 1995 branch)
+void surface_exchange(double p_t_air, double p_t_s, double p_wind, double p_wstar, double p_g, double &r_ch,
+		double &r_u) {
+	constexpr double karman = 0.41, nu = 0.001, bm = 16.0, bh = 16.0;
+	constexpr double alphah = 1.0, betam = 5.0, betah = 5.0;
+	const double lambda = std::sqrt(bh / bm) / alphah;
+	const double ric = betah / (betam * betam);
+	const double lz = std::log(Z1_SURF / Z0_SURF);
+	const double cdn = (karman / lz) * (karman / lz);
+	const double gust = std::log(1.0 + 0.7 * p_wstar + 2.3 * p_wstar * p_wstar);
+	const double zu2 = std::max(p_wind * p_wind + gust * gust, 1e-6);
+	double z0t_comp = 0.1 * Z0_SURF, chn = cdn, fh = 1.0;
+	for (int ite = 0; ite < 10; ++ite) {
+		const double z0t = z0t_comp;
+		chn = cdn * lz / std::log(Z1_SURF / z0t);
+		const double rib = p_g / p_t_s * std::sqrt(Z1_SURF * Z0_SURF) * lz * lz / std::log(Z1_SURF / z0t) *
+				(p_t_air - p_t_s) / zu2;
+		double fm, prandtl;
+		if (rib > 0.0) {
+			prandtl = 1.0;
+			// past Ri_c the source's comment says no turbulent
+			// mixing (its code sets 1; the comment is followed)
+			fm = rib < ric ? ((ric - rib) / ric) * ((ric - rib) / ric) : 0.0;
+			fh = fm;
+		} else {
+			fm = std::sqrt(1.0 - lambda * bm * rib);
+			fh = (1.0 / alphah) * std::sqrt(1.0 - lambda * bh * rib) * std::pow(1.0 - lambda * bm * rib, 0.25);
+			prandtl = alphah * std::pow(1.0 - lambda * bm * rib, 0.25) / std::sqrt(1.0 - lambda * bh * rib);
+		}
+		const double re = karman * std::sqrt(fm) * std::sqrt(zu2) * Z0_SURF / (lz * nu);
+		z0t_comp = Z0_SURF * std::exp(-karman * 7.3 * std::pow(re, 0.25) * std::sqrt(prandtl) + 5.0 * karman);
+		if (std::fabs(z0t - z0t_comp) <= 0.01 * Z0_SURF) {
+			break;
+		}
+	}
+	r_ch = chn * fh;
+	r_u = std::sqrt(zu2);
 }
 
 // Growth resistance R_k + R_d (s/m2), LMD growthrate.F after
@@ -453,15 +504,6 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 			}
 			soil[k] = float(s);
 			dust[k] = float(0.05 * (0.4 + 0.6 * std::cos(lat_r_[size_t(j)])));
-			// moist start, uniform in height (M04 para 37)
-			const double q0 = Q_START_NORTH * (latv + 90.0) / 180.0;
-			double col = 0.0;
-			for (int l = 0; l < NL; ++l) {
-				const double air = pref[k] * (std::exp(-LEVEL_M[l] / SCALE_H) - std::exp(-LEVEL_M[l + 1] / SCALE_H)) / GRAV;
-				vap[size_t(l)][k] = float(q0 * air);
-				col += q0 * air;
-			}
-			wv[k] = float(col);
 			const double lat_eff = latd + CAP_LAT_PER_K * (frost_point(pref[k]) - tfr_row);
 			co2[k] = float(cap_mass(lat_eff, p_ls, latv > 0.0));
 			msum += co2[k] * carea_[size_t(j)];
@@ -487,6 +529,23 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 			ttm[size_t(k)] = float(ta[size_t(k)] + TIDE_GROUND_W * (ts[size_t(k)] - ta[size_t(k)]));
 			ttf[size_t(k)] = ttm[size_t(k)];
 		}
+	}
+	// M04's moist start (para 37), clipped to what each level
+	// holds: the excess lies on the ground as frost
+	for (int k = 0; k < N; ++k) {
+		const double latv = lat_r_[size_t(k / GW)] * RAD2DEG;
+		const double q0 = Q_START_NORTH * (latv + 90.0) / 180.0;
+		const double p_s = pref[size_t(k)] * (1.0 + hbar0 / H_MEAN);
+		double col = 0.0;
+		for (int l = 0; l < NL; ++l) {
+			double air, lp, lt;
+			level_state(l, p_s, ta[size_t(k)], R_GAS, GRAV, air, lp, lt);
+			const double held = std::min(q0, M_RATIO * e_ice(lt) / lp) * air;
+			vap[size_t(l)][size_t(k)] = float(held);
+			frost[size_t(k)] = float(frost[size_t(k)] + (q0 * air - held));
+			col += held;
+		}
+		wv[size_t(k)] = float(col);
 	}
 	// western boundary currents (Joshi 1995; Newman 2002)
 	for (int j = 0; j < GH; ++j) {
@@ -1023,34 +1082,23 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 			sum_tm += ttm[k] * area;
 			sum_ms += clampd(ttm[k] - ttmb, -MEAN_STATE_MAX, MEAN_STATE_MAX) * taper * area;
 			sum_ts += ts[k];
-			// Water (docs/water.md). Levels above the ground:
-			// pressure from the column scale height; temperature
-			// down the Viking lapse rate to 40 km, isothermal
-			// above, about the column's mass-weighted mean; the
-			// lowest level is the surface air.
+			// Water (docs/water.md). Levels: pressure from the
+			// column scale height, temperature the Viking lapse
+			// about the column's mass-weighted mean T_a
 			{
 				const double sh = R_GAS * t_a / GRAV;
-				const double t_base = t_a + LAPSE * sh;
-				const double wind = std::sqrt(u[k] * u[k] + v[k] * v[k]);
-				// orographic lift: terrain rise across a cell
-				const double rise = wind > 0.1 ? std::max(u[k] * gtx + v[k] * gty, 0.0) / wind * GCELL_M : 0.0;
-				const double cool = GRAV / CP_AIR * rise;
 				double air[NL], qsat[NL], lt[NL], lp[NL];
 				for (int l = 0; l < NL; ++l) {
-					const double z0 = LEVEL_M[l], z1 = LEVEL_M[l + 1], zm = 0.5 * (z0 + z1);
-					air[l] = p_s * (std::exp(-z0 / sh) - std::exp(-z1 / sh)) / GRAV;
-					lp[l] = p_s * std::exp(-zm / sh);
-					const double t_lvl = l == 0 ? t_air : t_base - LAPSE * std::min(zm, LAPSE_TOP);
-					// floored at the CO2 frost point there
-					const double t_fr_l = 3182.48 / (27.9546 - std::log(std::max(lp[l], 1e-3)));
-					lt[l] = std::max(t_lvl - cool, t_fr_l);
+					level_state(l, p_s, t_a, R_GAS, GRAV, air[l], lp[l], lt[l]);
 					qsat[l] = M_RATIO * e_ice(lt[l]) / lp[l];
 				}
-				// surface flux, M04 eq. 1: rho C_d |U| (q_s(T_s)
-				// - q), sublimes surface ice, deposits on ground
-				// colder than the air's frost point
+				// surface flux, M04 eq. 1: rho C_h |U| (q_s(T_s)
+				// - q), C_h cut by a stable surface layer (LMD
+				// vdif_cd); sublimes ice, deposits on cold ground
 				double &v0 = a[T_VAP];
-				const double e_flux = rho * C_D_WATER * spd * (M_RATIO * e_ice(t_s) / p_s - v0 / air[0]);
+				double ch = 0.0, u_ch = 0.0;
+				surface_exchange(t_air, t_s, spd, wstar, GRAV, ch, u_ch);
+				const double e_flux = rho * ch * u_ch * (M_RATIO * e_ice(t_s) / p_s - v0 / air[0]);
 				double ex_w = e_flux * dt;
 				ex_w = ex_w > 0.0 ? std::min(ex_w, double(frost[k])) : std::max(ex_w, -v0);
 				frost[k] = float(frost[k] - ex_w);
