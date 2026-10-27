@@ -132,6 +132,7 @@ void RegolithSystem::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_radius", "position"), &RegolithSystem::get_radius);
 	ClassDB::bind_method(D_METHOD("get_rebase_count"), &RegolithSystem::get_rebase_count);
 	ClassDB::bind_method(D_METHOD("get_shift_count"), &RegolithSystem::get_shift_count);
+	ClassDB::bind_method(D_METHOD("get_stats"), &RegolithSystem::get_stats);
 	ClassDB::bind_method(D_METHOD("get_time"), &RegolithSystem::get_time);
 	ClassDB::bind_method(D_METHOD("get_local_solar_time", "position"), &RegolithSystem::get_local_solar_time);
 	ClassDB::bind_method(D_METHOD("get_sun_direction"), &RegolithSystem::get_sun_direction);
@@ -716,6 +717,8 @@ void RegolithSystem::_physics_process(double p_delta) {
 	if (!anchored_) {
 		return;
 	}
+	Time *clock = Time::get_singleton();
+	const uint64_t t0 = clock->get_ticks_usec();
 	Node3D *focus = focus_node();
 	if (focus) {
 		manage_frame(focus);
@@ -723,12 +726,18 @@ void RegolithSystem::_physics_process(double p_delta) {
 			floating_velocity(focus);
 		}
 	}
+	const uint64_t t1 = clock->get_ticks_usec();
 	// Forces use the state at time t; then the frame and the
 	// bodies advance, and Jolt moves everything by its v dt.
 	update_vessels(focus, p_delta);
+	const uint64_t t2 = clock->get_ticks_usec();
 	time_ += p_delta;
 	frame_.anchor = frame_.anchor + frame_velocity_ * p_delta;
 	update_poses();
+	const uint64_t t3 = clock->get_ticks_usec();
+	stats_["frame_ms"] = double(t1 - t0) * 1e-3;
+	stats_["vessels_ms"] = double(t2 - t1) * 1e-3;
+	stats_["poses_ms"] = double(t3 - t2) * 1e-3;
 }
 
 void RegolithSystem::_process(double p_delta) {

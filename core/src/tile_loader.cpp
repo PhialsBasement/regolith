@@ -3,6 +3,12 @@
 #include <algorithm>
 #include <chrono>
 
+#ifdef __linux__
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#include <unistd.h>
+#endif
+
 #include "regolith/cube.hpp"
 
 namespace regolith {
@@ -234,6 +240,11 @@ void TileLoader::relief_level(TileKey p_key, HeightTile &r_tile) {
 }
 
 void TileLoader::worker() {
+#ifdef __linux__
+	// Streaming must never take cores from the game's own threads
+	// (main, render, Jolt's jobs): run at the lowest priority.
+	setpriority(PRIO_PROCESS, pid_t(syscall(SYS_gettid)), 19);
+#endif
 	for (;;) {
 		uint64_t key = 0;
 		{

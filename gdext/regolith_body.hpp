@@ -119,6 +119,7 @@ private:
 	};
 
 	RegolithSystem *system() const;
+	static bool has_live_shape(Node3D *p_node);
 	static std::shared_ptr<const regolith::DarkField> load_dark_field(const String &p_path);
 	void create_render_resources();
 	RID make_grid_mesh(int p_quads);
@@ -174,6 +175,7 @@ private:
 	std::vector<RID> spare_coarse_;
 	std::vector<RID> spare_fine_;
 	std::unordered_map<uint64_t, Page> pages_;
+	std::unordered_map<uint64_t, std::pair<float, float>> page_bounds_;
 	std::vector<int> free_layers_;
 	std::vector<regolith::TileKey> to_upload_;
 	uint64_t frame_ = 0;
@@ -192,12 +194,19 @@ private:
 	std::unordered_map<uint64_t, Patch> patches_;
 	uint64_t physics_tick_ = 0;
 	uint64_t patch_rebuild_ = 0;
+	bool patches_moving_ = false;
 
 	// stats
 	int stat_nodes_ = 0;
 	int stat_uploads_ = 0;
 	int stat_wanted_ = 0;
 	double stat_select_ms_ = 0.0;
+	double stat_draw_ms_ = 0.0;
+	double stat_upload_ms_ = 0.0;
+	double stat_collision_ms_ = 0.0;
+	uint64_t stat_builds_ = 0;
+	uint64_t stat_build_us_ = 0;
+	uint64_t stat_place_us_ = 0;
 };
 
 } // namespace godot

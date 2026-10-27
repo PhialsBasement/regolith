@@ -97,6 +97,8 @@ public:
 	double get_radius(const Vector3 &p_pos) const;
 	String get_dominant_name() const;
 	bool get_frame_rotating() const { return rotating_; }
+	// True while the dominant body's ground moves in render space.
+	bool frame_moving() const { return !rotating_ || regolith::length(frame_velocity_) > 0.0; }
 	Vector3 get_frame_velocity() const;
 	Array get_bodies_info(const Vector3 &p_pos) const;
 	Vector3 get_body_position(const String &p_name) const;
@@ -107,6 +109,7 @@ public:
 	void put_near(Node *p_node, const String &p_body, double p_lat_deg, double p_lon_deg, double p_height);
 	int get_rebase_count() const { return rebases_; }
 	int get_shift_count() const { return shifts_; }
+	Dictionary get_stats() const { return stats_; }
 
 protected:
 	static void _bind_methods();
@@ -176,6 +179,7 @@ private:
 	bool anchored_ = false;
 	int rebases_ = 0;
 	int shifts_ = 0;
+	Dictionary stats_;
 	Node3D *last_focus_ = nullptr;
 
 	SubViewport *far_view_ = nullptr;

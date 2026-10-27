@@ -2,6 +2,7 @@
 
 #include <array>
 #include <functional>
+#include <unordered_map>
 #include <vector>
 
 #include "regolith/tile_key.hpp"
@@ -54,6 +55,16 @@ private:
 	void visit(const SelectInput &p_in, TileKey p_key, std::vector<SelectedNode> &r_nodes,
 			std::vector<WantedTile> &r_wanted) const;
 	bool culled(const SelectInput &p_in, const NodeSphere &p_s) const;
+	NodeSphere compute_bounds(const SelectInput &p_in, TileKey p_key, TileKey p_known, float p_lo, float p_hi) const;
+
+	// Spheres only change when a tile's height range does.
+	struct CachedSphere {
+		NodeSphere sphere;
+		float lo = 0.0f;
+		float hi = 0.0f;
+		uint64_t known = 0;
+	};
+	mutable std::unordered_map<uint64_t, CachedSphere> spheres_;
 };
 
 } // namespace regolith

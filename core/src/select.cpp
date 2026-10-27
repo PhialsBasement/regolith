@@ -27,8 +27,19 @@ NodeSphere Selector::bounds(const SelectInput &p_in, TileKey p_key) const {
 		k = k.parent();
 		known = rho_bounds && rho_bounds(k, lo, hi);
 	}
+	auto it = spheres_.find(p_key.bits);
+	if (it != spheres_.end() && it->second.lo == lo && it->second.hi == hi && it->second.known == k.bits) {
+		return it->second.sphere;
+	}
+	const NodeSphere s = compute_bounds(p_in, p_key, k, lo, hi);
+	spheres_[p_key.bits] = { s, lo, hi, k.bits };
+	return s;
+}
+
+NodeSphere Selector::compute_bounds(const SelectInput &p_in, TileKey p_key, TileKey p_known, float p_lo, float p_hi) const {
+	const float lo = p_lo, hi = p_hi;
 	double pad = 2.0;
-	if (k.level() != p_key.level()) {
+	if (p_known.level() != p_key.level()) {
 		pad += 0.15 * double(hi - lo);
 	}
 	const double r_lo = p_in.r_ref + double(lo) - pad;

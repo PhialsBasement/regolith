@@ -9,6 +9,7 @@
 
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/character_body3d.hpp>
+#include <godot_cpp/classes/collision_object3d.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/mesh.hpp>
@@ -227,7 +228,8 @@ bool RegolithBody::ensure_open() {
 		synth_->set_dark(load_dark_field(dark_map_path_));
 	}
 	cache_ = std::make_unique<regolith::TileCache>(size_t(page_capacity_) * 2, PINNED_LEVEL);
-	const int threads = std::max(1, int(std::thread::hardware_concurrency()) - 2);
+	// Half the cores: the rest stay free for the game.
+	const int threads = std::max(1, int(std::thread::hardware_concurrency()) / 2);
 	loader_ = std::make_unique<regolith::TileLoader>(source_, *cache_, threads, synth_.get());
 
 	// The never-a-hole set, loaded before the first frame.
@@ -246,10 +248,12 @@ bool RegolithBody::ensure_open() {
 	}
 	occluder_radius_ = source_.r_ref() + double(lowest);
 
+	// Main thread only: ranges of uploaded pages, no locking.
 	selector_.rho_bounds = [this](TileKey p_k, float &r_lo, float &r_hi) {
-		if (HeightTilePtr t = cache_->get(p_k)) {
-			r_lo = t->min;
-			r_hi = t->max;
+		auto it = page_bounds_.find(p_k.bits);
+		if (it != page_bounds_.end()) {
+			r_lo = it->second.first;
+			r_hi = it->second.second;
 			return true;
 		}
 		if (p_k.level() <= source_.max_level() && source_.bounds(p_k, r_lo, r_hi)) {
@@ -451,6 +455,7 @@ bool RegolithBody::upload(TileKey p_key) {
 				Image::create_from_data(gs, gs, false, Image::FORMAT_RGBA8, geo), layer);
 	}
 	pages_[p_key.bits] = { layer, frame_ };
+	page_bounds_[p_key.bits] = { tile->min, tile->max };
 	++stat_uploads_;
 	return true;
 }
@@ -485,6 +490,7 @@ void RegolithBody::_process(double p_delta) {
 	}
 	++frame_;
 	stat_uploads_ = 0;
+	const uint64_t t_start = Time::get_singleton()->get_ticks_usec();
 	if (frame_ == 1) {
 		// Upload the pinned set before anything is drawn.
 		for (int face = 0; face < regolith::FACE_COUNT; ++face) {
@@ -518,10 +524,14 @@ void RegolithBody::_process(double p_delta) {
 		loader_->request(w.key, w.priority);
 	}
 	loader_->end_frame();
-	stat_select_ms_ = double(Time::get_singleton()->get_ticks_usec() - t0) * 1e-3;
+	const uint64_t t1 = Time::get_singleton()->get_ticks_usec();
+	stat_select_ms_ = double(t1 - t0) * 1e-3;
 	stat_nodes_ = int(nodes.size());
 	stat_wanted_ = int(wanted.size());
 	draw(nodes);
+	const uint64_t t2 = Time::get_singleton()->get_ticks_usec();
+	stat_draw_ms_ = double(t2 - t1) * 1e-3;
+	stat_upload_ms_ = double(t0 - t_start) * 1e-3;
 }
 
 void RegolithBody::draw(const std::vector<regolith::SelectedNode> &p_nodes) {
@@ -691,7 +701,9 @@ void RegolithBody::_physics_process(double p_delta) {
 	}
 	++physics_tick_;
 	if (sys->dominant() == this) {
+		const uint64_t t0 = Time::get_singleton()->get_ticks_usec();
 		update_collision();
+		stat_collision_ms_ = double(Time::get_singleton()->get_ticks_usec() - t0) * 1e-3;
 		return;
 	}
 	// Only the body whose frame we are in has ground to touch.
@@ -701,6 +713,21 @@ void RegolithBody::_physics_process(double p_delta) {
 		ps->free_rid(entry.second.shape);
 	}
 	patches_.clear();
+}
+
+// A body in noclip (every shape disabled) touches nothing.
+bool RegolithBody::has_live_shape(Node3D *p_node) {
+	CollisionObject3D *co = Object::cast_to<CollisionObject3D>(p_node);
+	if (!co) {
+		return true;
+	}
+	const PackedInt32Array owners = co->get_shape_owners();
+	for (int i = 0; i < owners.size(); ++i) {
+		if (!co->is_shape_owner_disabled(uint32_t(owners[i]))) {
+			return true;
+		}
+	}
+	return false;
 }
 
 void RegolithBody::_enter_tree() {
@@ -740,7 +767,7 @@ void RegolithBody::update_collision() {
 	for (int i = 0; i < colliders.size(); ++i) {
 		RegolithCollider *c = Object::cast_to<RegolithCollider>(colliders[i]);
 		Node3D *anchor = c ? Object::cast_to<Node3D>(c->get_parent()) : nullptr;
-		if (!anchor || sys->is_parked(anchor)) {
+		if (!anchor || sys->is_parked(anchor) || !has_live_shape(anchor)) {
 			continue;
 		}
 		Vector3 vel;
@@ -784,9 +811,11 @@ void RegolithBody::update_collision() {
 				nd.patch.y() >> PATCH_SPLIT_LEVELS);
 		if (built < PATCH_BUILDS_PER_TICK && cache_->contains(tile)) {
 			const int mask = (1 << PATCH_SPLIT_LEVELS) - 1;
+			const uint64_t tb = Time::get_singleton()->get_ticks_usec();
 			if (build_patch(nd.patch.bits, tile, int(nd.patch.x()) & mask, int(nd.patch.y()) & mask)) {
 				++built;
 			}
+			stat_build_us_ += Time::get_singleton()->get_ticks_usec() - tb;
 		} else if (!cache_->contains(tile)) {
 			loader_->request(tile, 1000.0f + float(1.0 / (1.0 + nd.dist)));
 		}
@@ -801,14 +830,21 @@ void RegolithBody::update_collision() {
 			++it;
 		}
 	}
-	// The frame may move or turn every tick (floating velocity,
-	// inertial mode), so the ground is re-placed every tick; a
-	// rebuilt frame is a teleport, not motion.
+	// Ground only moves through the frame when it is inertial or
+	// carrying velocity; a rebuilt frame is a teleport.
 	const bool rebuilt = sys->rebuild_count() != patch_rebuild_;
 	patch_rebuild_ = sys->rebuild_count();
-	for (auto &entry : patches_) {
-		place_patch(entry.second, rebuilt);
+	const uint64_t tp = Time::get_singleton()->get_ticks_usec();
+	// One more pass on the tick it stops, to zero their velocity.
+	const bool moving = sys->frame_moving();
+	if (rebuilt || moving || patches_moving_) {
+		for (auto &entry : patches_) {
+			place_patch(entry.second, rebuilt);
+		}
 	}
+	patches_moving_ = moving;
+	stat_place_us_ += Time::get_singleton()->get_ticks_usec() - tp;
+	stat_builds_ += uint64_t(built);
 }
 
 bool RegolithBody::build_patch(uint64_t p_id, TileKey p_tile, int p_bx, int p_by) {
@@ -921,6 +957,12 @@ Dictionary RegolithBody::get_stats() const {
 	d["cached"] = cache_ ? int(cache_->size()) : 0;
 	d["patches"] = int(patches_.size());
 	d["select_ms"] = stat_select_ms_;
+	d["draw_ms"] = stat_draw_ms_;
+	d["upload_ms"] = stat_upload_ms_;
+	d["collision_ms"] = stat_collision_ms_;
+	d["builds"] = int64_t(stat_builds_);
+	d["build_ms_total"] = double(stat_build_us_) * 1e-3;
+	d["place_ms_total"] = double(stat_place_us_) * 1e-3;
 	Dictionary levels;
 	for (int level = 0; loader_ && level <= max_level_; ++level) {
 		double ms = 0.0;
@@ -969,5 +1011,6 @@ void RegolithBody::free_render_resources() {
 	}
 	patches_.clear();
 	pages_.clear();
+	page_bounds_.clear();
 	loader_.reset();
 }
