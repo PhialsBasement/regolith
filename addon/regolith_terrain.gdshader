@@ -32,7 +32,7 @@ uniform int horizon_side = 55;
 // Cloud shadows: sun transmittance on a ground-plane map around
 // the eye (RegolithWeather); clear outside it.
 uniform sampler2D cloud_shadow : filter_linear, repeat_disable;
-uniform vec3 cloud_origin;
+uniform vec3 cloud_origin; // relative to the camera
 uniform vec3 cloud_e;
 uniform vec3 cloud_s;
 uniform float cloud_size = 100000.0;
@@ -283,7 +283,8 @@ void fragment() {
 	vec3 n = normalize(cross(v_ts + up * (0.5 * hx), v_tt + up * (0.5 * hy)));
 	mat3 to_world = mat3(MODEL_MATRIX);
 	vec3 n_view = normalize((VIEW_MATRIX * vec4(to_world * n, 0.0)).xyz);
-	v_sun_vis = sun_visibility(up, v_ts, v_tt, v_ij, u_pages.x, (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz);
+	// camera-relative: world origins differ in double builds
+	v_sun_vis = sun_visibility(up, v_ts, v_tt, v_ij, u_pages.x, mat3(INV_VIEW_MATRIX) * VERTEX);
 	v_up_view = normalize(mat3(VIEW_MATRIX) * (mat3(MODEL_MATRIX) * up));
 	v_spec = 0.5; // Godot's default
 	// height of the eye over this ground: -VERTEX is the view

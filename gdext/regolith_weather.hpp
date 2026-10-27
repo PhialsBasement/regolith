@@ -63,6 +63,8 @@ public:
 	int get_threads() const { return threads_; }
 	void set_config(const Dictionary &p_v) { config_ = p_v; }
 	Dictionary get_config() const { return config_; }
+	void set_debug_view(int p_v) { debug_view_ = p_v; }
+	int get_debug_view() const { return debug_view_; }
 	void set_clouds_visible(bool p_v) { clouds_visible_ = p_v; }
 	bool get_clouds_visible() const { return clouds_visible_; }
 
@@ -79,6 +81,7 @@ public:
 	double get_cloud(const Vector3 &p_pos) const;
 	double get_vapor(const Vector3 &p_pos) const;
 	Vector3 get_cloud_layers(const Vector3 &p_pos) const; // low, cirrus, meso
+	Dictionary find_clouds(double p_min_sun_deg) const;
 	void inject_dust(const Vector3 &p_pos);
 	bool is_ready() const { return ready_.load(); }
 	Dictionary get_stats() const;
@@ -126,6 +129,7 @@ private:
 	int threads_ = 4;
 	Dictionary config_;
 	bool clouds_visible_ = true;
+	int debug_view_ = 0;
 
 	std::unique_ptr<regolith::Gcm> gcm_;
 	RegolithBody *body_ptr_ = nullptr;
@@ -160,6 +164,7 @@ private:
 	Ref<ImageTexture> local_tex_, global_tex_, surface_tex_;
 	double org_x_ = 0.0, org_y_ = 0.0;
 	double ground_alt_ = 0.0;
+	double eye_alt_ = 0.0;
 	bool ground_set_ = false;
 	regolith::DVec3 chart_up_;
 	bool chart_set_ = false;

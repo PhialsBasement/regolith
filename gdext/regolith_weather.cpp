@@ -81,6 +81,8 @@ void RegolithWeather::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_threads"), &RegolithWeather::get_threads);
 	ClassDB::bind_method(D_METHOD("set_config", "config"), &RegolithWeather::set_config);
 	ClassDB::bind_method(D_METHOD("get_config"), &RegolithWeather::get_config);
+	ClassDB::bind_method(D_METHOD("set_debug_view", "view"), &RegolithWeather::set_debug_view);
+	ClassDB::bind_method(D_METHOD("get_debug_view"), &RegolithWeather::get_debug_view);
 	ClassDB::bind_method(D_METHOD("set_clouds_visible", "visible"), &RegolithWeather::set_clouds_visible);
 	ClassDB::bind_method(D_METHOD("get_clouds_visible"), &RegolithWeather::get_clouds_visible);
 	ClassDB::bind_method(D_METHOD("get_tau", "position"), &RegolithWeather::get_tau);
@@ -95,6 +97,7 @@ void RegolithWeather::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_cloud", "position"), &RegolithWeather::get_cloud);
 	ClassDB::bind_method(D_METHOD("get_vapor", "position"), &RegolithWeather::get_vapor);
 	ClassDB::bind_method(D_METHOD("get_cloud_layers", "position"), &RegolithWeather::get_cloud_layers);
+	ClassDB::bind_method(D_METHOD("find_clouds", "min_sun_deg"), &RegolithWeather::find_clouds);
 	ClassDB::bind_method(D_METHOD("inject_dust", "position"), &RegolithWeather::inject_dust);
 	ClassDB::bind_method(D_METHOD("is_ready"), &RegolithWeather::is_ready);
 	ClassDB::bind_method(D_METHOD("get_stats"), &RegolithWeather::get_stats);
@@ -543,6 +546,46 @@ Vector3 RegolithWeather::get_cloud_layers(const Vector3 &p_pos) const {
 			real_t(gcm_->sample(pub_.q[2], px, py)));
 }
 
+// The cloudiest cell with the sun at least p_min_sun_deg up:
+// lat, lon (deg), and the three ice layers there.
+Dictionary RegolithWeather::find_clouds(double p_min_sun_deg) const {
+	Dictionary out;
+	RegolithSystem *sys = system();
+	std::lock_guard<std::mutex> guard(mutex_);
+	if (!gcm_ || pub_.q[0].empty() || !sys) {
+		return out;
+	}
+	const DVec3 sun = regolith::mars_sun_direction(sys->get_time());
+	const double min_mu = std::sin(p_min_sun_deg * DEG);
+	const int gw = gcm_->GW, gh = gcm_->GH;
+	double best = 0.0;
+	int best_k = -1;
+	for (int j = 0; j < gh; ++j) {
+		const double lat = (90.0 - (j + 0.5) / gh * 180.0) * DEG;
+		for (int i = 0; i < gw; ++i) {
+			const double lon = ((i + 0.5) / gw * 360.0 - 180.0) * DEG;
+			const DVec3 d(std::cos(lat) * std::cos(lon), std::cos(lat) * std::sin(lon), std::sin(lat));
+			if (regolith::dot(d, sun) < min_mu) {
+				continue;
+			}
+			const size_t k = size_t(j) * gw + i;
+			// the low deck reads most as cloud from the ground
+			const double score = 2.0 * pub_.q[0][k] + pub_.q[1][k];
+			if (score > best) {
+				best = score;
+				best_k = int(k);
+			}
+		}
+	}
+	if (best_k >= 0) {
+		const int i = best_k % gw, j = best_k / gw;
+		out["lat"] = 90.0 - (j + 0.5) / gh * 180.0;
+		out["lon"] = (i + 0.5) / gw * 360.0 - 180.0;
+		out["layers"] = Vector3(pub_.q[0][size_t(best_k)], pub_.q[1][size_t(best_k)], pub_.q[2][size_t(best_k)]);
+	}
+	return out;
+}
+
 double RegolithWeather::get_vapor(const Vector3 &p_pos) const {
 	std::lock_guard<std::mutex> guard(mutex_);
 	const double q = pub_at(pub_.qv, p_pos);
@@ -574,6 +617,8 @@ Dictionary RegolithWeather::get_stats() const {
 	d["sim_time"] = stat_sim_time_;
 	d["steps"] = int64_t(stat_steps_);
 	d["ls"] = regolith::mars_solar_longitude(stat_sim_time_);
+	d["ground_alt"] = ground_alt_;
+	d["eye_alt"] = eye_alt_;
 	return d;
 }
 
@@ -671,6 +716,7 @@ void RegolithWeather::update_clouds() {
 	const DVec3 up = regolith::normalize(eye_b);
 	const double datum = b->datum_radius(up);
 	const double eye_alt = regolith::length(eye_b) - datum;
+	eye_alt_ = eye_alt;
 	const double clear = sys->get_ground_clearance(eye);
 	const double ground = std::isnan(clear) ? 0.0 : eye_alt - clear;
 	ground_alt_ = ground_set_ ? ground_alt_ + (ground - ground_alt_) * 0.02 : ground;
@@ -704,11 +750,14 @@ void RegolithWeather::update_clouds() {
 	to_body.set_column(0, regolith::to_v(f.east));
 	to_body.set_column(1, regolith::to_v(f.up));
 	to_body.set_column(2, regolith::to_v(f.south));
-	const Vector3 centre = regolith::to_v(f.to_local_point(DVec3()));
+	// camera-relative, in double before the cast
+	const DVec3 eye_r = regolith::to_d(eye);
+	const Vector3 centre = regolith::to_v(f.to_local_point(DVec3()) - eye_r);
 	const DVec3 sun = regolith::mars_sun_direction(sys->get_time());
 	for (const Ref<ShaderMaterial> &m : { mat_, shadow_mat_ }) {
 		m->set_shader_parameter("window_org_px", Vector2(real_t(org_x_), real_t(org_y_)));
 		m->set_shader_parameter("u_center", centre);
+		m->set_shader_parameter("u_eye_b", regolith::to_v(eye_b));
 		m->set_shader_parameter("u_to_body", to_body);
 		m->set_shader_parameter("u_chart_e", regolith::to_v(ce));
 		m->set_shader_parameter("u_chart_s", regolith::to_v(cs));
@@ -722,12 +771,13 @@ void RegolithWeather::update_clouds() {
 	// from orbit the field is the globe's to show
 	box_->set_visible(clouds_visible_ && ready_ && eye_alt < 100000.0);
 	mat_->set_shader_parameter("orbit_fade", real_t(1.0 - std::clamp((eye_alt - 60000.0) / 40000.0, 0.0, 1.0)));
+	mat_->set_shader_parameter("debug_view", debug_view_);
 	// shadow map: the tangent plane under the eye, render axes
 	const DVec3 e_b = regolith::normalize(regolith::cross(DVec3(0, 0, 1), up));
 	const DVec3 s_b = regolith::cross(e_b, up);
 	const Vector3 e_r = regolith::to_v(f.to_local_vec(e_b));
 	const Vector3 s_r = regolith::to_v(f.to_local_vec(s_b));
-	const Vector3 origin = regolith::to_v(f.to_local_point(up * (datum + ground_alt_)));
+	const Vector3 origin = regolith::to_v(f.to_local_point(up * (datum + ground_alt_)) - eye_r);
 	shadow_mat_->set_shader_parameter("shadow_origin", origin);
 	shadow_mat_->set_shader_parameter("shadow_e", e_r);
 	shadow_mat_->set_shader_parameter("shadow_s", s_r);

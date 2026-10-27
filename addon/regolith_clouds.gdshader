@@ -1,5 +1,7 @@
 shader_type spatial;
-render_mode unshaded, blend_mix, depth_draw_never, cull_front, fog_disabled;
+// depth tested in the shader (t_scene): the box's far faces sit
+// behind the ground, which the hardware test would cull
+render_mode unshaded, blend_mix, depth_draw_never, depth_test_disabled, cull_front, fog_disabled;
 
 // mors's cloudscape (mars_cloudscape.gdshader): three ice slabs
 // and the lifted dust, ray marched against the GCM's fields, as
@@ -8,6 +10,7 @@ render_mode unshaded, blend_mix, depth_draw_never, cull_front, fog_disabled;
 
 uniform sampler2D depth_tex : hint_depth_texture, filter_linear;
 uniform float orbit_fade : hint_range(0.0, 1.0) = 1.0;
+uniform int debug_view = 0; // 1: low deck interval and alpha
 
 // Entry and exit of a shell of radius rc + dr for a ray from a
 // point rc from the centre, mu the cosine to the outward radial:
@@ -88,7 +91,9 @@ vec4 march_slab(vec3 ro_b, vec3 rd_b, float t0, float t1, int layer, int steps, 
 void fragment() {
 	vec3 dir_view = normalize(VERTEX);
 	vec3 rd = normalize((INV_VIEW_MATRIX * vec4(dir_view, 0.0)).xyz);
-	vec3 ro_b = u_to_body * (CAMERA_POSITION_WORLD - u_center);
+	// the eye, body-fixed, from the CPU in double: the shader's
+	// world space is rebased in double builds
+	vec3 ro_b = u_eye_b;
 	vec3 rd_b = normalize(u_to_body * rd);
 	float rc = length(ro_b);
 	float h_eye = rc - u_datum_r;
@@ -126,6 +131,22 @@ void fragment() {
 			}
 		}
 	}
+	vec3 dbg = vec3(-1.0);
+	if (debug_view == 2) {
+		// red: eye above the low deck's base (/5 km); green:
+		// -ground_alt / 10 km; blue: eye height / 10 km
+		float b0;
+		float t0;
+		slab_bounds(0, b0, t0);
+		dbg = vec3(clamp((h_eye - b0) / 5000.0, 0.0, 1.0), clamp(-ground_alt / 10000.0, 0.0, 1.0),
+				clamp(h_eye / 10000.0 + 0.5, 0.0, 1.0));
+	}
+	if (debug_view == 1) {
+		// red: low deck march length / 20 km; green: its alpha;
+		// blue: scene distance / 50 km
+		vec4 c0 = march_slab(ro_b, rd_b, ts[0], te[0], 0, 12, 0.5);
+		dbg = vec3(clamp((te[0] - ts[0]) / 20000.0, 0.0, 1.0), c0.a, clamp(t_scene / 50000.0, 0.0, 1.0));
+	}
 	vec3 col = vec3(0.0);
 	float alpha = 0.0;
 	for (int k = 0; k < 4; k++) {
@@ -145,9 +166,13 @@ void fragment() {
 		}
 	}
 	alpha *= orbit_fade;
+	if (dbg.x >= 0.0) {
+		col = dbg;
+		alpha = 1.0;
+	}
 	if (alpha < 0.004) {
 		discard;
 	}
-	ALBEDO = col / max(alpha, 1.0e-4);
+	ALBEDO = dbg.x >= 0.0 ? dbg : col / max(alpha, 1.0e-4);
 	ALPHA = alpha;
 }

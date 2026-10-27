@@ -7,7 +7,8 @@ uniform sampler3D noise_tex : filter_linear, repeat_enable;
 uniform vec2 window_org_px = vec2(0.0);
 uniform vec2 planet_px = vec2(106496.0, 53248.0);
 uniform float win_px = 2000.0; // fine window, planet px
-uniform vec3 u_center; // body centre, render space
+uniform vec3 u_center; // body centre, relative to the camera
+uniform vec3 u_eye_b; // the eye, body-fixed metres
 uniform mat3 u_to_body; // render to body-fixed
 uniform vec3 u_chart_e = vec3(0.0, 1.0, 0.0);
 uniform vec3 u_chart_s = vec3(-1.0, 0.0, 0.0);
