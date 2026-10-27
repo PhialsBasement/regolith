@@ -18,6 +18,7 @@ namespace {
 constexpr double PI = std::numbers::pi;
 constexpr double TAU = 2.0 * PI;
 constexpr double DEG = PI / 180.0;
+constexpr double RAD2DEG = 180.0 / PI; // Godot's rad_to_deg
 
 // Body and grid constants are members, from GcmConfig; what
 // stays here is Mars's column physics.
@@ -235,7 +236,7 @@ Gcm::Gcm(const GcmConfig &p_config) :
 		GCELL_M(TAU * p_config.radius / p_config.gw),
 		LCELL_PX(p_config.lcell_px),
 		SOL_S(p_config.sol_s),
-		SOL_HOURS(p_config.sol_s / 3600.0),
+		SOL_HOURS(p_config.sol_hours),
 		YEAR_SOLS(p_config.year_sols),
 		OMEGA(p_config.omega),
 		OMEGA_SOL(TAU / p_config.sol_s),
@@ -287,7 +288,7 @@ double Gcm::sample(const Field &p_f, double p_px, double p_py) const {
 void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_threads) {
 	threads_ = std::max(1, p_threads);
 	for (Field *f : { &u, &v, &h, &qv, &dust, &dustc, &frost, &soil, &ts, &ta, &tdeep, &tmean, &ttm, &ttf, &co2, &wfr,
-				 &wlf, &wdu, &wlc, &wdc, &psurf, &tair, &wsx, &wsy, &wconv, &topo, &pref, &alb, &cap, &wbc, &nu_,
+				 &wlf, &wdu, &wlc, &wdc, &psurf, &tair, &wsx, &wsy, &wconv, &topo, &pref, &alb, &cap, &wbc, &rel_, &nu_,
 				 &nv_, &nh_, &nqv_, &ndu_, &ndc_, &nq0_, &nq1_, &nq2_, &aqv_, &adu_, &adc_, &aq0_, &aq1_, &aq2_,
 				 &d_slope, &d_edge, &d_had, &d_eddy, &d_stress, &d_lift_s, &d_lift_d, &bl_x, &bl_y, &d_front,
 				 &d_tail }) {
@@ -308,22 +309,26 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 	cor_c_.assign(GH, 0.0);
 	cor_s_.assign(GH, 0.0);
 	carea_.assign(GH, 0.0);
+	// The row and column tables hold float32 values, as mors's
+	// PackedFloat32Array ones do (the cap edge is that sharp).
+	auto f32 = [](double p_v) { return double(float(p_v)); };
 	for (int j = 0; j < GH; ++j) {
+		// derived from the double latitude, each stored float
 		const double lat = (90.0 - (j + 0.5) / double(GH) * 180.0) * DEG;
-		lat_r_[size_t(j)] = lat;
-		fcor_[size_t(j)] = 2.0 * OMEGA * std::sin(lat);
-		inv_dx_[size_t(j)] = 1.0 / (GCELL_M * std::max(std::cos(lat), 0.25));
-		inv_dxt_[size_t(j)] = 1.0 / (GCELL_M * std::max(std::cos(lat), 0.008));
-		cor_c_[size_t(j)] = std::cos(fcor_[size_t(j)] * DT);
-		cor_s_[size_t(j)] = std::sin(fcor_[size_t(j)] * DT);
-		carea_[size_t(j)] = std::max(std::cos(lat), 0.004);
+		lat_r_[size_t(j)] = f32(lat);
+		fcor_[size_t(j)] = f32(2.0 * OMEGA * std::sin(lat));
+		inv_dx_[size_t(j)] = f32(1.0 / (GCELL_M * std::max(std::cos(lat), 0.25)));
+		inv_dxt_[size_t(j)] = f32(1.0 / (GCELL_M * std::max(std::cos(lat), 0.008)));
+		cor_c_[size_t(j)] = f32(std::cos(fcor_[size_t(j)] * DT));
+		cor_s_[size_t(j)] = f32(std::sin(fcor_[size_t(j)] * DT));
+		carea_[size_t(j)] = f32(std::max(std::cos(lat), 0.004));
 	}
 	cos_lon_.assign(GW, 0.0);
 	sin_lon_.assign(GW, 0.0);
 	for (int i = 0; i < GW; ++i) {
 		const double lon = (i + 0.5) / double(GW) * TAU - PI;
-		cos_lon_[size_t(i)] = std::cos(lon);
-		sin_lon_[size_t(i)] = std::sin(lon);
+		cos_lon_[size_t(i)] = f32(std::cos(lon));
+		sin_lon_[size_t(i)] = f32(std::sin(lon));
 	}
 	for (int k = 0; k < N; ++k) {
 		topo[size_t(k)] = p_topo ? p_topo[k] : 0.0f;
@@ -339,7 +344,7 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 			hi = std::max(double(sorted[size_t(N * 0.95)]), lo + 1e-3);
 		}
 		for (int j = 0; j < GH; ++j) {
-			const double latd = std::fabs(lat_r_[size_t(j)] / DEG);
+			const double latd = std::fabs(lat_r_[size_t(j)] * RAD2DEG);
 			for (int i = 0; i < GW; ++i) {
 				const int k = j * GW + i;
 				const double n = p_lum ? clampd((p_lum[k] - lo) / (hi - lo), 0.0, 1.0) : 0.5;
@@ -361,8 +366,8 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 	const double flux = std::pow((1.0 + ECC * std::cos(ls_rad - PERI_LS * DEG)) / (1.0 - ECC * ECC), 2.0);
 	double msum = 0.0, asum = 0.0;
 	for (int j = 0; j < GH; ++j) {
-		const double latd = std::fabs(lat_r_[size_t(j)] / DEG);
-		const double latv = lat_r_[size_t(j)] / DEG;
+		const double latd = std::fabs(lat_r_[size_t(j)] * RAD2DEG);
+		const double latv = lat_r_[size_t(j)] * RAD2DEG;
 		double prow = 0.0;
 		for (int i = 0; i < GW; ++i) {
 			prow += pref[size_t(j * GW + i)];
@@ -527,7 +532,7 @@ void Gcm::step_waves(const Inputs &p_in) {
 		} else {
 			grad = std::fabs(row_ts_[size_t(jp)] - row_ts_[size_t(jm)]) / (double(jp - jm) * GCELL_M);
 		}
-		const double latd = std::fabs(lat_r_[size_t(j)] / DEG);
+		const double latd = std::fabs(lat_r_[size_t(j)] * RAD2DEG);
 		const double win = sstep(28.0, 42.0, latd) * (1.0 - sstep(70.0, 80.0, latd));
 		const double solstice = lat_r_[size_t(j)] > 0.0 ? 270.0 : 90.0;
 		const double dls = std::fabs(fposmod(ls - solstice + 180.0, 360.0) - 180.0);
@@ -545,12 +550,14 @@ void Gcm::step_dynamics() {
 	rows([&](int j) {
 		const int jrm = std::max(j - 1, 0), jrp = std::min(j + 1, GH - 1);
 		const int jm = jrm * GW, jp = jrp * GW;
-		const double dyf = (j > 0 && j < GH - 1) ? 0.5 : 1.0;
 		const int j0 = j * GW;
 		const double idx = inv_dx_[size_t(j)];
 		const double cm = carea_[size_t(jrm)] / carea_[size_t(j)];
 		const double cp = carea_[size_t(jrp)] / carea_[size_t(j)];
-		const double taper = 1.0 - sstep(60.0, 85.0, std::fabs(lat_r_[size_t(j)] / DEG));
+		// flux form: face fluxes are the mean of the two rows'
+		// v cos(lat); none crosses a pole, so mass is kept
+		const double f_n = j > 0 ? 0.5 : 0.0, f_s = j < GH - 1 ? 0.5 : 0.0;
+		const double taper = 1.0 - sstep(60.0, 85.0, std::fabs(lat_r_[size_t(j)] * RAD2DEG));
 		const int hemi = lat_r_[size_t(j)] > 0.0 ? 0 : 1;
 		const double amp = bc_amp_[size_t(j)];
 		const double mw = bc_m[size_t(hemi)];
@@ -571,12 +578,31 @@ void Gcm::step_dynamics() {
 				const double lon = (i + 0.5) / double(GW) * TAU;
 				heq += amp * std::cos(mw * lon - ph);
 			}
-			const double div = (double(u[ip]) - u[im]) * 0.5 * idx +
-					(double(v[size_t(jp + i)]) * cp - double(v[size_t(jm + i)]) * cm) * dyf * inv_dy;
+			const double vk = v[k];
+			const double flux_s = f_s * (vk + double(v[size_t(jp + i)]) * cp);
+			const double flux_n = f_n * (vk + double(v[size_t(jm + i)]) * cm);
+			const double div = (double(u[ip]) - u[im]) * 0.5 * idx + (flux_s - flux_n) * inv_dy;
 			const double rh = R_HEAT * (1.0 + 20.0 * std::min(dtot, 1.2));
-			nh_[k] = float(h[k] + DT * (-H_MEAN * div - rh * (h[k] - heq)));
+			rel_[k] = float(-rh * (h[k] - heq));
+			nh_[k] = float(h[k] + DT * (-H_MEAN * div));
 		}
 	});
+	// The relaxation moves thickness toward the heating; its
+	// rate varies with the dust, so its planet mean (a mass
+	// source) is taken out.
+	double rel_sum = 0.0, area_sum = 0.0;
+	for (int j = 0; j < GH; ++j) {
+		double s = 0.0;
+		for (int i = 0; i < GW; ++i) {
+			s += rel_[size_t(j * GW + i)];
+		}
+		rel_sum += s * carea_[size_t(j)];
+		area_sum += carea_[size_t(j)] * GW;
+	}
+	const double rel_mean = rel_sum / area_sum;
+	for (int k = 0; k < N; ++k) {
+		nh_[size_t(k)] = float(nh_[size_t(k)] + DT * (rel_[size_t(k)] - rel_mean));
+	}
 	rows([&](int j) {
 		const int jm = std::max(j - 1, 0) * GW, jp = std::min(j + 1, GH - 1) * GW;
 		const double dyf = (j > 0 && j < GH - 1) ? 0.5 : 1.0;
@@ -611,7 +637,7 @@ void Gcm::step_dynamics() {
 	});
 	rows([&](int j) {
 		const int j0 = j * GW;
-		const double latd = std::fabs(lat_r_[size_t(j)] / DEG);
+		const double latd = std::fabs(lat_r_[size_t(j)] * RAD2DEG);
 		if (latd > 78.0) {
 			double mu = 0.0, mv = 0.0;
 			for (int i = 0; i < GW; ++i) {
@@ -719,7 +745,7 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 		vbar[size_t(j)] = sv / GW;
 	}
 	for (int j = 0; j < GH; ++j) {
-		const double psi = s_sum * lat_r_[size_t(j)] / DEG;
+		const double psi = s_sum * lat_r_[size_t(j)] * RAD2DEG;
 		const double pv = sstep(-40.0, -20.0, psi) * (1.0 - sstep(20.0, 35.0, psi)) *
 				(0.6 + 0.4 * std::exp(-std::pow((psi - 5.0) / 15.0, 2.0)));
 		had_v[size_t(j)] = -s_sum * HAD_V_SURF * had_s * pv;
@@ -736,7 +762,7 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 	rows([&](int j) {
 		const int j0 = j * GW;
 		const double clat = std::cos(lat_r_[size_t(j)]), slat = std::sin(lat_r_[size_t(j)]);
-		const double latd = std::fabs(lat_r_[size_t(j)] / DEG);
+		const double latd = std::fabs(lat_r_[size_t(j)] * RAD2DEG);
 		const bool winter = lat_r_[size_t(j)] * subsolar_lat < 0.0;
 		const double dyf = (j > 0 && j < GH - 1) ? 0.5 : 1.0;
 		const double area = carea_[size_t(j)];
@@ -919,7 +945,8 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 					dm_fast *= scl;
 					dm_slow *= scl;
 				}
-				co2[k] = float(co2[k] + dm_fast + dm_slow);
+				// mors's order: a cap that sublimates whole lands on 0
+				co2[k] = float(co2[k] + (dm_fast + dm_slow));
 				h[k] = float(h[k] - dm_fast / RHO_H);
 				sum_dm += dm_slow * area;
 				ts[k] = float(t_fr);

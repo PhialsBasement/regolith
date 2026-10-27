@@ -370,6 +370,26 @@ double RegolithBody::surface_radius(const DVec3 &p_dir, bool p_exact) {
 	return source_.r_ref() + sample_tile(*tile, source_.layout(), fc);
 }
 
+void RegolithBody::height_grid(int p_w, int p_h, int p_level, std::vector<float> &r_out) {
+	r_out.assign(size_t(p_w) * size_t(p_h), 0.0f);
+	if (!opened_) {
+		return;
+	}
+	const regolith::TileLayout lay = source_.layout();
+	constexpr double DEG = std::numbers::pi / 180.0;
+	for (int j = 0; j < p_h; ++j) {
+		const double lat = (90.0 - (j + 0.5) / p_h * 180.0) * DEG;
+		for (int i = 0; i < p_w; ++i) {
+			const double lon = ((i + 0.5) / p_w * 360.0 - 180.0) * DEG;
+			const DVec3 dir(std::cos(lat) * std::cos(lon), std::cos(lat) * std::sin(lon), std::sin(lat));
+			const regolith::FaceCoord fc = regolith::dir_to_face(dir);
+			HeightTilePtr t = loader_->produce(key_at(fc, p_level));
+			const double r = t ? source_.r_ref() + sample_tile(*t, lay, fc) : source_.r_ref();
+			r_out[size_t(j) * p_w + size_t(i)] = float(r - datum_radius(dir));
+		}
+	}
+}
+
 double RegolithBody::datum_radius(const DVec3 &p_dir) const {
 	if (!has_datum_) {
 		return source_.r_ref();

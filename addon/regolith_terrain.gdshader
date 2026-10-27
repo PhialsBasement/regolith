@@ -29,10 +29,13 @@ uniform sampler2DArray geology : filter_linear, repeat_disable;
 uniform sampler2DArray horizon_a : filter_linear, repeat_disable;
 uniform sampler2DArray horizon_b : filter_linear, repeat_disable;
 uniform int horizon_side = 55;
-// Cloud shadows (physical clouds, later): transmittance in
-// the sun's light space; off means clear sky.
-uniform sampler2D cloud_shadow : filter_linear, repeat_enable;
-uniform mat4 cloud_matrix = mat4(1.0);
+// Cloud shadows: sun transmittance on a ground-plane map around
+// the eye (RegolithWeather); clear outside it.
+uniform sampler2D cloud_shadow : filter_linear, repeat_disable;
+uniform vec3 cloud_origin;
+uniform vec3 cloud_e;
+uniform vec3 cloud_s;
+uniform float cloud_size = 100000.0;
 uniform bool has_cloud_shadow = false;
 uniform int intervals = 208;
 uniform int border = 2;
@@ -254,7 +257,11 @@ float sun_visibility(vec3 up, vec3 ts, vec3 tt, vec2 ij, float page, vec3 world)
 	float hz = mix(horizon_dir(hp, k0), horizon_dir(hp, k1), fract(f));
 	float vis = smoothstep(-0.006, 0.006, asin(clamp(s_e, -1.0, 1.0)) - hz);
 	if (has_cloud_shadow) {
-		vis *= texture(cloud_shadow, (cloud_matrix * vec4(world, 1.0)).xy).r;
+		vec3 dw = world - cloud_origin;
+		vec2 uv = vec2(dot(dw, cloud_e), dot(dw, cloud_s)) / cloud_size + 0.5;
+		if (all(greaterThan(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0)))) {
+			vis *= texture(cloud_shadow, uv).r;
+		}
 	}
 	return vis;
 }

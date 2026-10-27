@@ -94,6 +94,7 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		gdext/regolith_gcm.cpp
 		gdext/regolith_system.cpp
 		gdext/regolith_vessel.cpp
+		gdext/regolith_weather.cpp
 	)
 	target_link_libraries(regolith PRIVATE godot::cpp regolith_core)
 	target_compile_options(regolith PRIVATE ${REGOLITH_FP_FLAGS})
@@ -109,6 +110,8 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		"${REGOLITH_ADDON_DIR}/regolith.gdextension" COPYONLY)
 	configure_file(addon/regolith_terrain.gdshader
 		"${REGOLITH_ADDON_DIR}/regolith_terrain.gdshader" COPYONLY)
-	configure_file(addon/regolith_sky.gdshader
-		"${REGOLITH_ADDON_DIR}/regolith_sky.gdshader" COPYONLY)
+	foreach(f regolith_sky.gdshader regolith_clouds.gdshader regolith_clouds.gdshaderinc
+			regolith_cloud_shadow.gdshader)
+		configure_file(addon/${f} "${REGOLITH_ADDON_DIR}/${f}" COPYONLY)
+	endforeach()
 endif()

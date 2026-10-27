@@ -66,6 +66,8 @@ public:
 	Basis icrf_to_render() const { return render_to_icrf().transposed(); }
 	bool is_anchored() const { return anchored_; }
 	RegolithBody *find_body(const String &p_name) const;
+	// A render-space point in p_body's fixed frame (m).
+	regolith::DVec3 body_point(const RegolithBody *p_body, const Vector3 &p_pos) const;
 
 	String get_version() const;
 	Dictionary self_test() const;
@@ -135,7 +137,6 @@ private:
 	Basis render_to_icrf() const;
 	regolith::DVec3 field(const regolith::DVec3 &p_x, const RegolithBody *p_skip) const;
 	regolith::DVec3 accel_icrf(const State &p_s, bool p_coriolis) const;
-	regolith::DVec3 body_point(const RegolithBody *p_body, const Vector3 &p_pos) const;
 	RegolithBody *nearest_surface(const regolith::DVec3 &p_x) const;
 	double clearance(const RegolithBody *p_b, const regolith::DVec3 &p_x) const;
 

@@ -58,6 +58,9 @@ public:
 	double surface_radius(const regolith::DVec3 &p_dir, bool p_exact);
 	// Areoid (datum) radius under a direction.
 	double datum_radius(const regolith::DVec3 &p_dir) const;
+	// Height over the datum at equirect cell centres (row 0
+	// north, column 0 at -180), from level p_level; any thread.
+	void height_grid(int p_w, int p_h, int p_level, std::vector<float> &r_out);
 
 	void set_pack_path(const String &p_v) { pack_path_ = p_v; }
 	String get_pack_path() const { return pack_path_; }

@@ -30,11 +30,13 @@ PackedByteArray RegolithGcm::get_meso() const {
 Gcm::Field *RegolithGcm::field_of(Gcm &p_g, const String &p_name) {
 	static const char *names[] = { "u", "v", "h", "qv", "dust", "dustc", "frost", "soil", "ts", "ta", "tdeep", "tmean",
 		"ttm", "ttf", "co2", "wfr", "wlf", "wdu", "wlc", "wdc", "psurf", "tair", "wsx", "wsy", "wconv", "topo", "pref",
-		"alb", "cap", "wbc", "q0", "q1", "q2", "bl_x", "bl_y" };
+		"alb", "cap", "wbc", "q0", "q1", "q2", "bl_x", "bl_y", "d_slope", "d_edge", "d_had", "d_eddy", "d_stress",
+		"d_front", "d_lift_s", "d_lift_d" };
 	Gcm::Field *fields[] = { &p_g.u, &p_g.v, &p_g.h, &p_g.qv, &p_g.dust, &p_g.dustc, &p_g.frost, &p_g.soil, &p_g.ts,
 		&p_g.ta, &p_g.tdeep, &p_g.tmean, &p_g.ttm, &p_g.ttf, &p_g.co2, &p_g.wfr, &p_g.wlf, &p_g.wdu, &p_g.wlc, &p_g.wdc,
 		&p_g.psurf, &p_g.tair, &p_g.wsx, &p_g.wsy, &p_g.wconv, &p_g.topo, &p_g.pref, &p_g.alb, &p_g.cap, &p_g.wbc,
-		&p_g.qc[0], &p_g.qc[1], &p_g.qc[2], &p_g.bl_x, &p_g.bl_y };
+		&p_g.qc[0], &p_g.qc[1], &p_g.qc[2], &p_g.bl_x, &p_g.bl_y, &p_g.d_slope, &p_g.d_edge, &p_g.d_had,
+		&p_g.d_eddy, &p_g.d_stress, &p_g.d_front, &p_g.d_lift_s, &p_g.d_lift_d };
 	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
 		if (p_name == names[i]) {
 			return fields[i];
@@ -49,6 +51,7 @@ regolith::GcmConfig RegolithGcm::config_from(const Dictionary &p_d) {
 	c.gravity = double(p_d.get("gravity", c.gravity));
 	c.omega = double(p_d.get("omega", c.omega));
 	c.sol_s = double(p_d.get("sol_s", c.sol_s));
+	c.sol_hours = double(p_d.get("sol_hours", c.sol_s == 88775.0 ? c.sol_hours : c.sol_s / 3600.0));
 	c.year_sols = double(p_d.get("year_sols", c.year_sols));
 	c.obliquity_deg = double(p_d.get("obliquity_deg", c.obliquity_deg));
 	c.eccentricity = double(p_d.get("eccentricity", c.eccentricity));

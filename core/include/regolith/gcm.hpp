@@ -16,6 +16,7 @@ struct GcmConfig {
 	double gravity = 3.711; // m/s2
 	double omega = 7.088e-5; // rad/s
 	double sol_s = 88775.0; // s, mean solar day
+	double sol_hours = 24.6597; // the clock's hours a sol (mors)
 	double year_sols = 668.6;
 	double obliquity_deg = 25.19;
 	double eccentricity = 0.0934;
@@ -141,6 +142,7 @@ private:
 
 	int threads_ = 1;
 	std::vector<double> lat_r_, fcor_, inv_dx_, inv_dxt_, cor_c_, cor_s_, carea_, cos_lon_, sin_lon_;
+	Field rel_; // relaxation tendency, per step
 	Field nu_, nv_, nh_, nqv_, ndu_, ndc_, nq0_, nq1_, nq2_, aqv_, adu_, adc_, aq0_, aq1_, aq2_;
 	std::vector<double> row_h_, row_tt_, row_ts_, row_tm_, row_ms_, row_fix_, row_dm_, row_wlf_, row_wlc_;
 	std::vector<double> bc_amp_;
