@@ -85,6 +85,7 @@ varying vec3 v_up;
 varying float v_morph;
 varying float v_sun_vis; // terrain x clouds, for the sun only
 varying vec3 v_up_view; // local vertical, view space
+varying float v_spec; // the material's SPECULAR, for light()
 
 const float QP = 0.7853981633974483;
 
@@ -260,6 +261,7 @@ void fragment() {
 	vec3 n_view = normalize((VIEW_MATRIX * vec4(to_world * n, 0.0)).xyz);
 	v_sun_vis = sun_visibility(up, v_ts, v_tt, v_ij, u_pages.x, (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz);
 	v_up_view = normalize(mat3(VIEW_MATRIX) * (mat3(MODEL_MATRIX) * up));
+	v_spec = 0.5; // Godot's default
 	// height of the eye over this ground: -VERTEX is the view
 	// space vector to the camera, small at any world position
 	float eye_h = dot(-VERTEX, v_up_view);
@@ -394,6 +396,7 @@ void fragment() {
 		}
 		ROUGHNESS = roughness;
 		SPECULAR = specular_amount * (1.0 - view_h);
+		v_spec = SPECULAR;
 		// texture u runs along the face u axis
 		vec3 t_model = normalize(u_axis_u.xyz - n * dot(n, u_axis_u.xyz));
 		vec3 b_model = normalize(cross(n, t_model));
@@ -456,24 +459,28 @@ void light() {
 		DIFFUSE_LIGHT += LIGHT_COLOR * sky * dome / PI;
 	}
 	if (ndl > 0.0) {
+		// Godot's own BRDF (scene_forward_lights_inc.glsl)
 		float vis = LIGHT_IS_DIRECTIONAL ? v_sun_vis * direct : 1.0;
 		vec3 hv = normalize(LIGHT + VIEW);
-		float ndv = clamp(dot(NORMAL, VIEW), 1e-4, 1.0);
+		float ndv = max(dot(NORMAL, VIEW), 1e-4);
 		float ldh = clamp(dot(LIGHT, hv), 0.0, 1.0);
 		float ndh = clamp(dot(NORMAL, hv), 0.0, 1.0);
 		float r = ROUGHNESS;
-		float fd90 = 0.5 + 2.0 * ldh * ldh * r;
-		float fl = 1.0 + (fd90 - 1.0) * pow(1.0 - ndl, 5.0);
-		float fv = 1.0 + (fd90 - 1.0) * pow(1.0 - ndv, 5.0);
-		vec3 lit = LIGHT_COLOR * ATTENUATION * vis * ndl;
-		DIFFUSE_LIGHT += lit * fl * fv / PI;
+		float fd90m1 = 2.0 * ldh * ldh * r - 0.5;
+		float fl = 1.0 + fd90m1 * pow(1.0 - ndl, 5.0);
+		float fv = 1.0 + fd90m1 * pow(1.0 - ndv, 5.0);
+		vec3 lit = LIGHT_COLOR * ATTENUATION * vis;
+		DIFFUSE_LIGHT += lit * fl * fv * ndl / PI;
+		// dielectric f0 from the material's specular (fragment);
+		// SPECULAR_AMOUNT here is the light's own multiplier
 		float a = r * r;
 		float a2 = a * a;
-		float dd = ndh * ndh * (a2 - 1.0) + 1.0;
-		float k = a * 0.5;
-		float g = (ndl / (ndl * (1.0 - k) + k)) * (ndv / (ndv * (1.0 - k) + k));
-		float f0 = 0.16 * SPECULAR_AMOUNT * SPECULAR_AMOUNT;
-		float fr = f0 + (1.0 - f0) * pow(1.0 - ldh, 5.0);
-		SPECULAR_LIGHT += lit * (a2 / (PI * dd * dd)) * g * fr / (4.0 * ndl * ndv);
+		float dd = 1.0 + (a2 - 1.0) * ndh * ndh;
+		float d = a2 / (PI * dd * dd);
+		float g = 0.5 / (ndl * sqrt(ndv * ndv * (1.0 - a2) + a2) + ndv * sqrt(ndl * ndl * (1.0 - a2) + a2));
+		float f0 = 0.16 * v_spec * v_spec;
+		float f90 = clamp(f0 * 50.0, 0.0, 1.0);
+		float f = f0 + (f90 - f0) * pow(1.0 - ldh, 5.0);
+		SPECULAR_LIGHT += lit * ndl * d * f * g * SPECULAR_AMOUNT;
 	}
 }
