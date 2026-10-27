@@ -103,10 +103,13 @@ void sky() {
 	vec3 up = normalize(up_dir);
 	vec3 dir = EYEDIR;
 	vec3 sdir = LIGHT0_ENABLED ? LIGHT0_DIRECTION : up;
-	float dir_e = dot(dir, up);
+	float dir_geo = dot(dir, up);
 	float sdir_e = dot(sdir, up);
-	vec3 dir_h = dir - up * dir_e;
+	vec3 dir_h = dir - up * dir_geo;
 	vec3 sdir_h = sdir - up * sdir_e;
+	// the view ray against the true horizon, the limb dip below
+	// level when high: all horizon effects sit on the limb
+	float dir_e = sin(asin(clamp(dir_geo, -1.0, 1.0)) + horizon_dip);
 	// sin(sun elevation) against the true horizon
 	float se = sin(asin(clamp(sdir_e, -1.0, 1.0)) + horizon_dip);
 
