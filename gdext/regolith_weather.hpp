@@ -82,7 +82,7 @@ public:
 	double get_vapor(const Vector3 &p_pos) const; // kg/m2
 	// tau below 14 km, tau above, ice column kg/m2
 	Vector3 get_cloud_layers(const Vector3 &p_pos) const;
-	Dictionary find_clouds(double p_min_sun_deg) const;
+	Dictionary find_clouds(double p_min_sun_deg, double p_target_tau = -1.0) const;
 	// for a cloud renderer (Nimbus): ice optical depth per level
 	// (levels x GH x GW, lon fastest), ground height, level edges;
 	// "version" changes with each GCM publish

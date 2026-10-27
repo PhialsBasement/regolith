@@ -98,7 +98,7 @@ void RegolithWeather::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_cloud", "position"), &RegolithWeather::get_cloud);
 	ClassDB::bind_method(D_METHOD("get_vapor", "position"), &RegolithWeather::get_vapor);
 	ClassDB::bind_method(D_METHOD("get_cloud_layers", "position"), &RegolithWeather::get_cloud_layers);
-	ClassDB::bind_method(D_METHOD("find_clouds", "min_sun_deg"), &RegolithWeather::find_clouds);
+	ClassDB::bind_method(D_METHOD("find_clouds", "min_sun_deg", "target_tau"), &RegolithWeather::find_clouds, DEFVAL(-1.0));
 	ClassDB::bind_method(D_METHOD("get_cloud_levels"), &RegolithWeather::get_cloud_levels);
 	ClassDB::bind_method(D_METHOD("get_cloud_frame"), &RegolithWeather::get_cloud_frame);
 	ClassDB::bind_method(D_METHOD("inject_dust", "position"), &RegolithWeather::inject_dust);
@@ -563,7 +563,7 @@ Vector3 RegolithWeather::get_cloud_layers(const Vector3 &p_pos) const {
 
 // The cloudiest cell with the sun at least p_min_sun_deg up:
 // lat, lon (deg), and the three ice layers there.
-Dictionary RegolithWeather::find_clouds(double p_min_sun_deg) const {
+Dictionary RegolithWeather::find_clouds(double p_min_sun_deg, double p_target_tau) const {
 	Dictionary out;
 	RegolithSystem *sys = system();
 	std::lock_guard<std::mutex> guard(mutex_);
@@ -584,8 +584,10 @@ Dictionary RegolithWeather::find_clouds(double p_min_sun_deg) const {
 				continue;
 			}
 			const size_t k = size_t(j) * gw + i;
-			// the column's visible optical depth
-			const double score = pub_.q[0][k] + pub_.q[1][k];
+			// the column's visible optical depth, or its nearness
+			// to a target when one is given
+			const double tau_c = pub_.q[0][k] + pub_.q[1][k];
+			const double score = p_target_tau > 0.0 ? 1.0 / (1e-3 + std::fabs(tau_c - p_target_tau)) : tau_c;
 			if (score > best) {
 				best = score;
 				best_k = int(k);
