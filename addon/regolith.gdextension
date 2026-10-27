@@ -6,6 +6,8 @@ reloadable = true
 
 [libraries]
 
+linux.debug.double.x86_64 = "res://addons/regolith/bin/libregolith.linux.template_debug.double.x86_64.so"
+linux.release.double.x86_64 = "res://addons/regolith/bin/libregolith.linux.template_release.double.x86_64.so"
 linux.debug.x86_64 = "res://addons/regolith/bin/libregolith.linux.template_debug.x86_64.so"
 linux.release.x86_64 = "res://addons/regolith/bin/libregolith.linux.template_release.x86_64.so"
 windows.debug.x86_64 = "res://addons/regolith/bin/libregolith.windows.template_debug.x86_64.dll"

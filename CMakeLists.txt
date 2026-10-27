@@ -74,6 +74,11 @@ endif()
 
 if(REGOLITH_BUILD_GDEXTENSION)
 	set(GODOTCPP_DEFAULT_API_VERSION "4.7")
+	# A double build needs the API dumped from a double Godot.
+	if(GODOTCPP_PRECISION STREQUAL "double")
+		set(GODOTCPP_CUSTOM_API_FILE "${CMAKE_CURRENT_SOURCE_DIR}/api/extension_api-4-7-double.json"
+			CACHE FILEPATH "" FORCE)
+	endif()
 	add_subdirectory(thirdparty/godot-cpp)
 	add_library(regolith SHARED
 		gdext/register_types.cpp
