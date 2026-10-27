@@ -293,6 +293,15 @@ void RegolithSystem::from_state(const State &p_s, Vector3 &r_pos, Vector3 &r_vel
 	r_vel = regolith::to_v(frame_.to_local_vec(v_ref - frame_velocity_));
 }
 
+RegolithBody *RegolithSystem::find_body(const String &p_name) const {
+	for (RegolithBody *b : bodies_) {
+		if (String(b->get_name()) == p_name) {
+			return b;
+		}
+	}
+	return nullptr;
+}
+
 Vector3 RegolithSystem::render_angular_velocity(const RegolithBody *p_body) const {
 	const DVec3 w = pose_of(p_body).omega - ref_omega();
 	return regolith::to_v(frame_.to_local_vec(from_icrf(ref_axes(), w)));
@@ -773,6 +782,8 @@ void RegolithSystem::setup_passes() {
 	add_child(far_view_);
 	far_camera_ = memnew(Camera3D);
 	far_camera_->set_environment(far_env);
+	far_env_ = far_env;
+	near_env_ = env;
 	far_view_->add_child(far_camera_);
 	far_camera_->set_current(true);
 
@@ -802,6 +813,13 @@ void RegolithSystem::update_passes(Camera3D *p_cam) {
 	const Vector2 size = get_viewport()->get_visible_rect().size;
 	if (far_view_->get_size() != Vector2i(size)) {
 		far_view_->set_size(Vector2i(size));
+	}
+	// The far pass shares the scene's haze and ambient.
+	if (far_env_.is_valid() && near_env_.is_valid()) {
+		far_env_->set_fog_density(near_env_->get_fog_density());
+		far_env_->set_fog_sky_affect(near_env_->get_fog_sky_affect());
+		far_env_->set_fog_light_color(near_env_->get_fog_light_color());
+		far_env_->set_ambient_light_energy(near_env_->get_ambient_light_energy());
 	}
 	far_camera_->set_global_transform(p_cam->get_global_transform());
 	far_camera_->set_fov(p_cam->get_fov());

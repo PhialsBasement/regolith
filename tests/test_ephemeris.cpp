@@ -27,6 +27,22 @@ TEST_CASE(mars_seasons) {
 	CHECK(r > 1.38 && r < 1.67);
 }
 
+TEST_CASE(earth_at_mars_opposition) {
+	// Mars opposition 2025-01-16 02:32 UTC: from Mars, Earth sits
+	// in front of the sun (inferior conjunction).
+	const double t = j2000_seconds_from_unix(1736994720.0);
+	// Equal heliocentric ecliptic longitudes (not latitudes:
+	// Mars's 1.85 deg tilt keeps Earth off the solar disc).
+	auto ecl_lon = [](const DVec3 &p_v) {
+		const double eps = 23.43928 * std::numbers::pi / 180.0;
+		const double y = p_v.y * std::cos(eps) + p_v.z * std::sin(eps);
+		return std::atan2(y, p_v.x) * 180.0 / std::numbers::pi;
+	};
+	const double d = std::remainder(ecl_lon(earth_heliocentric(t)) - ecl_lon(mars_heliocentric(t)), 360.0);
+	std::printf("  heliocentric longitude difference at opposition: %.3f deg\n", d);
+	CHECK(std::fabs(d) < 0.3);
+}
+
 TEST_CASE(mars_local_solar_time_runs_one_sol) {
 	const double t = j2000_seconds_from_unix(1760000000.0);
 	const double a = mars_local_solar_time(t, 137.8);

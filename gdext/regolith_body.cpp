@@ -559,6 +559,18 @@ void RegolithBody::draw(const std::vector<regolith::SelectedNode> &p_nodes) {
 		push_rebuild_ = sys->rebuild_count();
 		++push_id_;
 		xf = Transform3D();
+		// node space -> body-fixed, for the orbital look
+		Basis to_body;
+		to_body.set_column(0, regolith::to_v(push_frame_.east));
+		to_body.set_column(1, regolith::to_v(push_frame_.up));
+		to_body.set_column(2, regolith::to_v(push_frame_.south));
+		rs->material_set_param(material_, "u_to_body", to_body);
+	}
+	{
+		const RegolithSystem::Pose &bp = sys->pose_of(this);
+		const regolith::DVec3 sun = regolith::normalize(regolith::mars_heliocentric(sys->get_time()) * -1.0 - bp.position / 1.495978707e11);
+		rs->material_set_param(material_, "sun_body",
+				Vector3(real_t(regolith::dot(bp.axes[0], sun)), real_t(regolith::dot(bp.axes[1], sun)), real_t(regolith::dot(bp.axes[2], sun))));
 	}
 	if (!xf.is_equal_approx(push_xform_) || xform_id_ == 0) {
 		push_xform_ = xf;

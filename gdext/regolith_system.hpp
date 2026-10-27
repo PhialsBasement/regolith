@@ -3,6 +3,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <godot_cpp/classes/environment.hpp>
 #include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
@@ -61,6 +62,10 @@ public:
 	void from_state(const State &p_s, Vector3 &r_pos, Vector3 &r_vel) const;
 	// Spin of p_body as seen in the render frame.
 	Vector3 render_angular_velocity(const RegolithBody *p_body) const;
+	// Columns: ICRF axes in render space.
+	Basis icrf_to_render() const { return render_to_icrf().transposed(); }
+	bool is_anchored() const { return anchored_; }
+	RegolithBody *find_body(const String &p_name) const;
 
 	String get_version() const;
 	Dictionary self_test() const;
@@ -185,6 +190,8 @@ private:
 	SubViewport *far_view_ = nullptr;
 	Camera3D *far_camera_ = nullptr;
 	CanvasLayer *far_layer_ = nullptr;
+	Ref<Environment> far_env_;
+	Ref<Environment> near_env_;
 	double sun_energy_ = -1.0;
 	double sun_visible_ = 1.0;
 };

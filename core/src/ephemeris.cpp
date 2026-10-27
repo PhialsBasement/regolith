@@ -46,14 +46,30 @@ double j2000_seconds_from_unix(double p_unix) {
 	return p_unix - 946727935.816 + 69.184 - 64.184;
 }
 
-DVec3 mars_heliocentric(double p_seconds) {
+namespace {
+
+// Standish's elements and their rates per century: a (AU),
+// e, I, L, long. perihelion, long. node (degrees).
+struct Elements {
+	double a[2], e[2], inc[2], mean_long[2], peri[2], node[2];
+};
+
+constexpr Elements MARS_ELEMENTS = { { 1.52371034, 0.00001847 }, { 0.09339410, 0.00007882 },
+	{ 1.84969142, -0.00813131 }, { -4.55343205, 19140.30268499 }, { -23.94362959, 0.44441088 },
+	{ 49.55953891, -0.29257343 } };
+// Earth-Moon barycentre.
+constexpr Elements EARTH_ELEMENTS = { { 1.00000261, 0.00000562 }, { 0.01671123, -0.00004392 },
+	{ -0.00001531, -0.01294668 }, { 100.46457166, 35999.37244981 }, { 102.93768193, 0.32327364 },
+	{ 0.0, 0.0 } };
+
+DVec3 heliocentric(const Elements &p_el, double p_seconds) {
 	const double t = p_seconds / CENTURY;
-	const double a = 1.52371034 + 0.00001847 * t;
-	const double e = 0.09339410 + 0.00007882 * t;
-	const double inc = (1.84969142 - 0.00813131 * t) * DEG;
-	const double mean_long = (-4.55343205 + 19140.30268499 * t) * DEG;
-	const double peri = (-23.94362959 + 0.44441088 * t) * DEG;
-	const double node = (49.55953891 - 0.29257343 * t) * DEG;
+	const double a = p_el.a[0] + p_el.a[1] * t;
+	const double e = p_el.e[0] + p_el.e[1] * t;
+	const double inc = (p_el.inc[0] + p_el.inc[1] * t) * DEG;
+	const double mean_long = (p_el.mean_long[0] + p_el.mean_long[1] * t) * DEG;
+	const double peri = (p_el.peri[0] + p_el.peri[1] * t) * DEG;
+	const double node = (p_el.node[0] + p_el.node[1] * t) * DEG;
 	const double arg_peri = peri - node;
 	const double mean_anom = std::remainder(mean_long - peri, 2.0 * std::numbers::pi);
 	double ecc = mean_anom + e * std::sin(mean_anom);
@@ -63,6 +79,22 @@ DVec3 mars_heliocentric(double p_seconds) {
 	const DVec3 orbital(a * (std::cos(ecc) - e), a * std::sqrt(1.0 - e * e) * std::sin(ecc), 0.0);
 	const DVec3 ecliptic = rot_z(rot_x(rot_z(orbital, arg_peri), inc), node);
 	return rot_x(ecliptic, OBLIQUITY);
+}
+
+} // namespace
+
+DVec3 mars_heliocentric(double p_seconds) {
+	return heliocentric(MARS_ELEMENTS, p_seconds);
+}
+
+DVec3 earth_heliocentric(double p_seconds) {
+	return heliocentric(EARTH_ELEMENTS, p_seconds);
+}
+
+DVec3 galactic_pole() {
+	// RA 192.85948, Dec 27.12825 (ICRF)
+	const double ra = 192.85948 * DEG, dec = 27.12825 * DEG;
+	return { std::cos(dec) * std::cos(ra), std::cos(dec) * std::sin(ra), std::sin(dec) };
 }
 
 DVec3 mars_body_to_inertial(double p_seconds, const DVec3 &p_body) {

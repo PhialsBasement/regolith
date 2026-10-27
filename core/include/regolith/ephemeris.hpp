@@ -10,6 +10,10 @@ double j2000_seconds_from_unix(double p_unix);
 // Mars heliocentric position, J2000 equatorial, AU, from
 // Standish's mean elements (JPL, valid 1800 to 2050).
 DVec3 mars_heliocentric(double p_seconds);
+DVec3 earth_heliocentric(double p_seconds);
+
+// North galactic pole, ICRF unit vector.
+DVec3 galactic_pole();
 
 // Body-fixed Mars vector to J2000 equatorial (IAU WGCCRE
 // pole and prime meridian; Archinal et al.).

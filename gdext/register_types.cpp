@@ -4,6 +4,7 @@
 #include <godot_cpp/core/defs.hpp>
 #include <godot_cpp/godot.hpp>
 
+#include "regolith_atmosphere.hpp"
 #include "regolith_body.hpp"
 #include "regolith_collider.hpp"
 #include "regolith_system.hpp"
@@ -21,6 +22,7 @@ void initialize_regolith(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(RegolithBody);
 	GDREGISTER_CLASS(RegolithCollider);
 	GDREGISTER_CLASS(RegolithVessel);
+	GDREGISTER_CLASS(RegolithAtmosphere);
 }
 
 void uninitialize_regolith(ModuleInitializationLevel p_level) {

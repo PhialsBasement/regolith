@@ -85,6 +85,7 @@ if(REGOLITH_BUILD_GDEXTENSION)
 	add_subdirectory(thirdparty/godot-cpp)
 	add_library(regolith SHARED
 		gdext/register_types.cpp
+		gdext/regolith_atmosphere.cpp
 		gdext/regolith_body.cpp
 		gdext/regolith_collider.cpp
 		gdext/regolith_system.cpp
@@ -104,4 +105,6 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		"${REGOLITH_ADDON_DIR}/regolith.gdextension" COPYONLY)
 	configure_file(addon/regolith_terrain.gdshader
 		"${REGOLITH_ADDON_DIR}/regolith_terrain.gdshader" COPYONLY)
+	configure_file(addon/regolith_sky.gdshader
+		"${REGOLITH_ADDON_DIR}/regolith_sky.gdshader" COPYONLY)
 endif()
