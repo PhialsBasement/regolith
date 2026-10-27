@@ -140,15 +140,28 @@ double fall_speed(double p_r, double p_t, double p_p, double p_g) {
 	return 2.0 * p_g * RHO_ICE * p_r * p_r / (9.0 * 1.0e-5) * (1.0 + kn * (1.246 + 0.42 * std::exp(-0.87 / kn)));
 }
 
-// Level l of a column: air mass (kg/m2), mid pressure and
-// temperature, the Viking lapse about the mean T_a
-void level_state(int p_l, double p_ps, double p_ta, double p_r, double p_g, double &r_air, double &r_p, double &r_t) {
-	const double sh = p_r * p_ta / p_g;
-	const double z0 = Gcm::LEVEL_M[p_l], z1 = Gcm::LEVEL_M[p_l + 1], zm = 0.5 * (z0 + z1);
-	r_air = p_ps * (std::exp(-z0 / sh) - std::exp(-z1 / sh)) / p_g;
-	r_p = p_ps * std::exp(-zm / sh);
-	const double t_fr = 3182.48 / (27.9546 - std::log(std::max(r_p, 1e-3)));
-	r_t = std::max(p_ta + LAPSE * sh - LAPSE * std::min(zm, LAPSE_TOP), t_fr);
+// A column's levels: air mass (kg/m2), mid pressure and
+// temperature (the Viking lapse about the mean T_a), the edge
+// factors exp(-z / H); one exp per edge, one log per column
+struct Column {
+	double air[Gcm::NL], p[Gcm::NL], t[Gcm::NL], edge[Gcm::NL + 1];
+	double sh;
+};
+
+void column_levels(double p_ps, double p_ta, double p_r, double p_g, Column &r_c) {
+	r_c.sh = p_r * p_ta / p_g;
+	for (int i = 0; i <= Gcm::NL; ++i) {
+		r_c.edge[i] = std::exp(-Gcm::LEVEL_M[i] / r_c.sh);
+	}
+	const double log_ps = std::log(p_ps);
+	for (int l = 0; l < Gcm::NL; ++l) {
+		const double zm = 0.5 * (Gcm::LEVEL_M[l] + Gcm::LEVEL_M[l + 1]);
+		r_c.air[l] = p_ps * (r_c.edge[l] - r_c.edge[l + 1]) / p_g;
+		r_c.p[l] = p_ps * std::sqrt(r_c.edge[l] * r_c.edge[l + 1]);
+		// CO2 frost point there, log p = log p_s - z / H
+		const double t_fr = 3182.48 / (27.9546 - std::max(log_ps - zm / r_c.sh, std::log(1e-3)));
+		r_c.t[l] = std::max(p_ta + LAPSE * r_c.sh - LAPSE * std::min(zm, LAPSE_TOP), t_fr);
+	}
 }
 
 // Scalar exchange coefficient C_h and the wind it multiplies,
@@ -537,10 +550,11 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 		const double q0 = Q_START_NORTH * (latv + 90.0) / 180.0;
 		const double p_s = pref[size_t(k)] * (1.0 + hbar0 / H_MEAN);
 		double col = 0.0;
+		Column cl;
+		column_levels(p_s, ta[size_t(k)], R_GAS, GRAV, cl);
 		for (int l = 0; l < NL; ++l) {
-			double air, lp, lt;
-			level_state(l, p_s, ta[size_t(k)], R_GAS, GRAV, air, lp, lt);
-			const double held = std::min(q0, M_RATIO * e_ice(lt) / lp) * air;
+			const double air = cl.air[l];
+			const double held = std::min(q0, M_RATIO * e_ice(cl.t[l]) / cl.p[l]) * air;
 			vap[size_t(l)][size_t(k)] = float(held);
 			frost[size_t(k)] = float(frost[size_t(k)] + (q0 * air - held));
 			col += held;
@@ -1086,23 +1100,39 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 			// column scale height, temperature the Viking lapse
 			// about the column's mass-weighted mean T_a
 			{
-				const double sh = R_GAS * t_a / GRAV;
-				double air[NL], qsat[NL], lt[NL], lp[NL];
+				Column cl;
+				column_levels(p_s, t_a, R_GAS, GRAV, cl);
+				const double sh = cl.sh;
+				const double *air = cl.air, *lt = cl.t, *lp = cl.p;
+				double qsat[NL];
 				for (int l = 0; l < NL; ++l) {
-					level_state(l, p_s, t_a, R_GAS, GRAV, air[l], lp[l], lt[l]);
 					qsat[l] = M_RATIO * e_ice(lt[l]) / lp[l];
+				}
+				// interface eddy conductance rho K / dz, shared
+				// by vapour and ice
+				double cond[NL - 1];
+				const double k_top = std::exp(-K_ZZ_TOP / sh);
+				for (int l = 0; l + 1 < NL; ++l) {
+					const double dzc = 0.5 * (LEVEL_M[l + 2] - LEVEL_M[l]);
+					const double rho_i = p_s * cl.edge[l + 1] / (R_GAS * 0.5 * (lt[l] + lt[l + 1]));
+					const double kzz = K_ZZ * std::max(1.0, k_top / cl.edge[l + 1]);
+					cond[l] = rho_i * kzz / dzc;
 				}
 				// surface flux, M04 eq. 1: rho C_h |U| (q_s(T_s)
 				// - q), C_h cut by a stable surface layer (LMD
 				// vdif_cd); sublimes ice, deposits on cold ground
 				double &v0 = a[T_VAP];
-				double ch = 0.0, u_ch = 0.0;
-				surface_exchange(t_air, t_s, spd, wstar, GRAV, ch, u_ch);
-				const double e_flux = rho * ch * u_ch * (M_RATIO * e_ice(t_s) / p_s - v0 / air[0]);
-				double ex_w = e_flux * dt;
-				ex_w = ex_w > 0.0 ? std::min(ex_w, double(frost[k])) : std::max(ex_w, -v0);
-				frost[k] = float(frost[k] - ex_w);
-				v0 += ex_w;
+				const double dq = M_RATIO * e_ice(t_s) / p_s - v0 / air[0];
+				// bare ground drier-than-saturated air: no flux,
+				// and C_h's solve is skipped
+				if (dq < 0.0 || frost[k] > 0.0f) {
+					double ch = 0.0, u_ch = 0.0;
+					surface_exchange(t_air, t_s, spd, wstar, GRAV, ch, u_ch);
+					double ex_w = rho * ch * u_ch * dq * dt;
+					ex_w = ex_w > 0.0 ? std::min(ex_w, double(frost[k])) : std::max(ex_w, -v0);
+					frost[k] = float(frost[k] - ex_w);
+					v0 += ex_w;
+				}
 				// vapour and ice: convective adjustment mixes the
 				// boundary layer (M04 para 32), eddy diffusion the
 				// levels (Montmessin 2002 para 33)
@@ -1120,12 +1150,8 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 						a[base + l] = ms * air[l] / as;
 					}
 					for (int l = 0; l + 1 < NL; ++l) {
-						const double z1 = LEVEL_M[l + 1];
-						const double dzc = 0.5 * (LEVEL_M[l + 2] - LEVEL_M[l]);
-						const double rho_i = p_s * std::exp(-z1 / sh) / (R_GAS * 0.5 * (lt[l] + lt[l + 1]));
-						const double kzz = K_ZZ * std::max(1.0, std::exp((z1 - K_ZZ_TOP) / sh));
 						const double q_lo = a[base + l] / air[l], q_hi = a[base + l + 1] / air[l + 1];
-						double f = rho_i * kzz * (q_lo - q_hi) / dzc * dt;
+						double f = cond[l] * (q_lo - q_hi) * dt;
 						// never past equal mixing ratios
 						const double lim = (q_lo - q_hi) * air[l] * air[l + 1] / (air[l] + air[l + 1]);
 						f = lim > 0.0 ? std::min(f, lim) : std::max(f, lim);
@@ -1136,15 +1162,29 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 				// M04 sec. 2.2.2: crystals on N nuclei of radius
 				// r0, grown by eq. 3 integrated implicitly (para
 				// 28), then sedimented at f r_c (para 30)
-				const double sig2 = std::log(F_SED) / 3.0;
+				// exp(-sigma^2) with f = exp(3 sigma^2), and r0 per
+				// level: constants
+				static const double fall_k = std::exp(-std::log(F_SED) / 3.0);
+				static const auto r0_of = [] {
+					std::array<double, NL> r{};
+					for (int i = 0; i < NL; ++i) {
+						r[size_t(i)] = R0_SURF * std::exp(-0.5 * (LEVEL_M[i] + LEVEL_M[i + 1]) / R0_H);
+					}
+					return r;
+				}();
 				double low = 0.0, high = 0.0;
 				for (int l = 0; l < NL; ++l) {
 					double &vl = a[T_VAP + l];
 					double &il = a[T_ICE + l];
-					const double zm = 0.5 * (LEVEL_M[l] + LEVEL_M[l + 1]);
+					// no ice, subsaturated: growth is exactly a no-op
+					if (il <= 0.0 && vl <= qsat[l] * air[l]) {
+						tau[size_t(l)][k] = 0.0f;
+						continue;
+					}
 					const double rho_l = lp[l] / (R_GAS * lt[l]);
-					const double n_kg = tau_v / CCN_TAU_REF * CCN0 * std::exp(-zm / sh) / rho_l;
-					const double r0 = R0_SURF * std::exp(-zm / R0_H);
+					// exp(-z / H) at the level's middle is p / p_s
+					const double n_kg = tau_v / CCN_TAU_REF * CCN0 * (lp[l] / p_s) / rho_l;
+					const double r0 = r0_of[size_t(l)];
 					auto radius = [&](double p_mc) {
 						return std::cbrt(p_mc / (4.0 / 3.0 * PI * RHO_ICE * n_kg) + r0 * r0 * r0);
 					};
@@ -1159,7 +1199,7 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 					il = (mv + mc - mv1) * air[l];
 					const double r_n = radius(il / air[l]);
 					const double dz = LEVEL_M[l + 1] - LEVEL_M[l];
-					const double w = fall_speed(F_SED * r_n, lt[l], lp[l], GRAV) * std::exp(-sig2);
+					const double w = fall_speed(F_SED * r_n, lt[l], lp[l], GRAV) * fall_k;
 					const double out = il * std::min(w * dt / dz, 1.0);
 					il -= out;
 					if (l > 0) {
