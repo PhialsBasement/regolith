@@ -83,6 +83,13 @@ public:
 	// tau below 14 km, tau above, ice column kg/m2
 	Vector3 get_cloud_layers(const Vector3 &p_pos) const;
 	Dictionary find_clouds(double p_min_sun_deg) const;
+	// for a cloud renderer (Nimbus): ice optical depth per level
+	// (levels x GH x GW, lon fastest), ground height, level edges;
+	// "version" changes with each GCM publish
+	Dictionary get_cloud_levels() const;
+	// the body's frame this frame: centre relative to the camera
+	// (render space), render to body-fixed axes, datum, sun
+	Dictionary get_cloud_frame() const;
 	void inject_dust(const Vector3 &p_pos);
 	bool is_ready() const { return ready_.load(); }
 	Dictionary get_stats() const;
@@ -95,6 +102,8 @@ private:
 	struct Published {
 		std::vector<float> dust, cloud, lu, lv, su, sv, qv, ts, tair, p, co2, frost;
 		std::array<std::vector<float>, 3> q;
+		std::vector<float> tau_levels; // NL x N
+		uint64_t version = 0;
 		std::vector<uint8_t> local, global, surface;
 		double org_x = 0.0, org_y = 0.0;
 		bool fresh = false;
@@ -149,6 +158,7 @@ private:
 	bool in_dust_ = false;
 	double in_dust_px_ = 0.0, in_dust_py_ = 0.0;
 	Published pub_;
+	std::atomic<uint64_t> pub_version_{ 0 };
 	// stats, thread -> main
 	double stat_step_ms_ = 0.0;
 	double stat_lag_s_ = 0.0;

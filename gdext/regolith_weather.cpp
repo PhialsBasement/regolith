@@ -99,6 +99,8 @@ void RegolithWeather::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_vapor", "position"), &RegolithWeather::get_vapor);
 	ClassDB::bind_method(D_METHOD("get_cloud_layers", "position"), &RegolithWeather::get_cloud_layers);
 	ClassDB::bind_method(D_METHOD("find_clouds", "min_sun_deg"), &RegolithWeather::find_clouds);
+	ClassDB::bind_method(D_METHOD("get_cloud_levels"), &RegolithWeather::get_cloud_levels);
+	ClassDB::bind_method(D_METHOD("get_cloud_frame"), &RegolithWeather::get_cloud_frame);
 	ClassDB::bind_method(D_METHOD("inject_dust", "position"), &RegolithWeather::inject_dust);
 	ClassDB::bind_method(D_METHOD("is_ready"), &RegolithWeather::is_ready);
 	ClassDB::bind_method(D_METHOD("get_stats"), &RegolithWeather::get_stats);
@@ -321,6 +323,11 @@ void RegolithWeather::publish(const Gcm &p_g) {
 		p.su[k] = float(p_g.u[k] * Gcm::SURF_WIND + p_g.wsx[k]);
 		p.sv[k] = float(p_g.v[k] * Gcm::SURF_WIND + p_g.wsy[k]);
 	}
+	p.tau_levels.resize(size_t(Gcm::NL) * n);
+	for (int l = 0; l < Gcm::NL; ++l) {
+		std::memcpy(p.tau_levels.data() + size_t(l) * n, p_g.tau[size_t(l)].data(), n * sizeof(float));
+	}
+	p.version = pub_version_.fetch_add(1) + 1;
 	p.lu = p_g.u;
 	p.lv = p_g.v;
 	p.q[0] = p_g.tau_low;
@@ -592,6 +599,55 @@ Dictionary RegolithWeather::find_clouds(double p_min_sun_deg) const {
 		out["layers"] = Vector3(pub_.q[0][size_t(best_k)], pub_.q[1][size_t(best_k)], pub_.q[2][size_t(best_k)]);
 	}
 	return out;
+}
+
+Dictionary RegolithWeather::get_cloud_levels() const {
+	Dictionary d;
+	std::lock_guard<std::mutex> guard(mutex_);
+	if (!gcm_ || pub_.tau_levels.empty()) {
+		return d;
+	}
+	PackedFloat32Array tau, topo, edges;
+	tau.resize(int64_t(pub_.tau_levels.size()));
+	std::memcpy(tau.ptrw(), pub_.tau_levels.data(), pub_.tau_levels.size() * sizeof(float));
+	// fixed after create(): safe to read beside the thread
+	topo.resize(int64_t(gcm_->topo.size()));
+	std::memcpy(topo.ptrw(), gcm_->topo.data(), gcm_->topo.size() * sizeof(float));
+	for (double e : Gcm::LEVEL_M) {
+		edges.push_back(float(e));
+	}
+	d["gw"] = gcm_->GW;
+	d["gh"] = gcm_->GH;
+	d["levels"] = Gcm::NL;
+	d["tau"] = tau;
+	d["topo"] = topo;
+	d["edges"] = edges;
+	d["version"] = int64_t(pub_.version);
+	return d;
+}
+
+Dictionary RegolithWeather::get_cloud_frame() const {
+	Dictionary d;
+	RegolithSystem *sys = system();
+	RegolithBody *b = body();
+	Camera3D *cam = get_viewport() ? get_viewport()->get_camera_3d() : nullptr;
+	if (!sys || !b || !cam || !sys->is_anchored()) {
+		return d;
+	}
+	const Vector3 eye = cam->get_global_position();
+	const regolith::RenderFrame f = sys->frame_for(b);
+	const DVec3 eye_b = sys->body_point(b, eye);
+	Basis to_body;
+	to_body.set_column(0, regolith::to_v(f.east));
+	to_body.set_column(1, regolith::to_v(f.up));
+	to_body.set_column(2, regolith::to_v(f.south));
+	d["centre"] = regolith::to_v(f.to_local_point(DVec3()) - regolith::to_d(eye));
+	d["to_body"] = to_body;
+	d["eye_body"] = regolith::to_v(eye_b);
+	d["datum"] = b->datum_radius(regolith::normalize(eye_b));
+	d["sun_body"] = regolith::to_v(regolith::mars_sun_direction(sys->get_time()));
+	d["sun_visible"] = sys->get_sun_visible();
+	return d;
 }
 
 double RegolithWeather::get_vapor(const Vector3 &p_pos) const {
