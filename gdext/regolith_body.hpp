@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/variant/rid.hpp>
@@ -88,6 +89,7 @@ public:
 	// Ground-shader uniforms (texture arrays, tints...), kept
 	// and applied whenever the material exists.
 	void set_material_param(const StringName &p_name, const Variant &p_value);
+	Ref<Image> bake_iso_map(int p_width, int p_height, const PackedColorArray &p_layer_means, int p_level);
 	Dictionary get_stats() const;
 	bool is_collision_ready_at(const Vector3 &p_pos) const;
 

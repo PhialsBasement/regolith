@@ -6,6 +6,7 @@
 #include <numbers>
 #include <limits>
 #include <thread>
+#include <atomic>
 
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/character_body3d.hpp>
@@ -104,6 +105,79 @@ std::shared_ptr<const regolith::DarkField> RegolithBody::load_dark_field(const S
 	return field;
 }
 
+// The isomorphic map: the ground shader's layer blend as seen
+// from flight height (gravel and bedrock handed to the sands),
+// per equirect texel, from the DEM slope and the geology.
+// p_layer_means: mean albedo of the six layers, tint applied.
+Ref<Image> RegolithBody::bake_iso_map(int p_width, int p_height, const PackedColorArray &p_layer_means, int p_level) {
+	if (!ensure_open() || p_layer_means.size() < 6) {
+		return Ref<Image>();
+	}
+	const regolith::TileLayout lay = source_.layout();
+	auto radius_at = [&](const DVec3 &p_dir) {
+		const regolith::FaceCoord fc = regolith::dir_to_face(p_dir);
+		HeightTilePtr t = loader_->produce(key_at(fc, p_level));
+		return t ? source_.r_ref() + sample_tile(*t, lay, fc) : source_.r_ref();
+	};
+	auto sstep = [](double p_a, double p_b, double p_x) {
+		const double t = std::clamp((p_x - p_a) / (p_b - p_a), 0.0, 1.0);
+		return t * t * (3.0 - 2.0 * t);
+	};
+	Color mean[6];
+	for (int k = 0; k < 6; ++k) {
+		mean[k] = p_layer_means[k];
+	}
+	// macro variation at its mean (noise 0.5)
+	const Color macro = Color(0.92f, 0.92f, 0.94f) * Color(1.0f, 0.975f, 0.95f);
+	const double step = std::numbers::pi / double(p_height); // one texel
+	PackedByteArray out;
+	out.resize(int64_t(p_width) * p_height * 3);
+	uint8_t *w = out.ptrw();
+	std::atomic<int> next{ 0 };
+	auto row_job = [&]() {
+		for (int y = next++; y < p_height; y = next++) {
+			const double lat = std::numbers::pi / 2.0 - (y + 0.5) * step;
+			for (int x = 0; x < p_width; ++x) {
+				const double lon = (x + 0.5) / p_width * 2.0 * std::numbers::pi - std::numbers::pi;
+				const DVec3 d(std::cos(lat) * std::cos(lon), std::cos(lat) * std::sin(lon), std::sin(lat));
+				DVec3 east = regolith::cross(DVec3(0, 0, 1), d);
+				east = regolith::length(east) > 1e-9 ? regolith::normalize(east) : DVec3(0, 1, 0);
+				const DVec3 north = regolith::cross(d, east);
+				const double r0 = radius_at(d);
+				const double ds = step * source_.r_ref();
+				const double he = radius_at(regolith::normalize(d + east * step)) - r0;
+				const double hn = radius_at(regolith::normalize(d + north * step)) - r0;
+				const DVec3 n = regolith::normalize(d - east * (he / ds) - north * (hn / ds));
+				const double slope = std::clamp(1.0 - regolith::dot(n, d), 0.0, 1.0);
+				uint8_t g[4];
+				synth_->geology_at(d, g);
+				const double ice = g[2] / 255.0, dark = g[3] / 255.0;
+				const double w_rock = sstep(0.10, 0.22, slope);
+				const double inv_ice = 1.0 - ice;
+				const double wgt[6] = { (1.0 - w_rock) * inv_ice * (1.0 - dark), w_rock * inv_ice, 0.0, 0.0, ice,
+					(1.0 - w_rock) * inv_ice * dark };
+				Color c(0, 0, 0);
+				for (int k = 0; k < 6; ++k) {
+					c += mean[k] * real_t(wgt[k]);
+				}
+				c *= macro;
+				uint8_t *o = w + (size_t(y) * p_width + size_t(x)) * 3;
+				o[0] = uint8_t(std::clamp(c.r * 255.0f, 0.0f, 255.0f));
+				o[1] = uint8_t(std::clamp(c.g * 255.0f, 0.0f, 255.0f));
+				o[2] = uint8_t(std::clamp(c.b * 255.0f, 0.0f, 255.0f));
+			}
+		}
+	};
+	std::vector<std::thread> pool;
+	for (unsigned t = 0; t < std::max(1u, std::thread::hardware_concurrency()); ++t) {
+		pool.emplace_back(row_job);
+	}
+	for (std::thread &t : pool) {
+		t.join();
+	}
+	return Image::create_from_data(p_width, p_height, false, Image::FORMAT_RGB8, out);
+}
+
 void RegolithBody::set_material_param(const StringName &p_name, const Variant &p_value) {
 	// The server takes textures by RID; keep the resource alive.
 	Variant value = p_value;
@@ -163,6 +237,7 @@ void RegolithBody::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_dark_map_path", "path"), &RegolithBody::set_dark_map_path);
 	ClassDB::bind_method(D_METHOD("get_dark_map_path"), &RegolithBody::get_dark_map_path);
 	ClassDB::bind_method(D_METHOD("set_material_param", "name", "value"), &RegolithBody::set_material_param);
+	ClassDB::bind_method(D_METHOD("bake_iso_map", "width", "height", "layer_means", "level"), &RegolithBody::bake_iso_map);
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "synthesis", PROPERTY_HINT_ENUM, "None,Mars,Phobos"), "set_synthesis", "get_synthesis");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "dark_map_path", PROPERTY_HINT_FILE, "*.jpg,*.png"), "set_dark_map_path",
 			"get_dark_map_path");

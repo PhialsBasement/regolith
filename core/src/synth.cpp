@@ -505,30 +505,33 @@ void Synth::geology(TileKey p_key, const TileLayout &p_lay, std::vector<uint8_t>
 	if (config_.profile == 0) {
 		return;
 	}
-	const DVec3 hole = dir_of_latlon(HOLE_LAT, HOLE_LON);
-	auto byte = [](double p_n) { return uint8_t(std::clamp(p_n * 127.5 + 127.5, 0.0, 255.0)); };
 	for (int qj = -1; qj < side - 1; ++qj) {
 		for (int qi = -1; qi < side - 1; ++qi) {
-			const DVec3 d = sample_dir(p_key, p_lay, qi * 4, qj * 4);
-			const DVec3 pm = d * config_.r_ref;
-			uint8_t *o = &r_rgba[(size_t(qj + 1) * side + size_t(qi + 1)) * 4];
-			o[0] = byte(Noises::sample(noise_->prov, pm, 0.0042 / 200.0));
-			o[1] = byte(Noises::sample(noise_->patch, pm, 0.019 / 200.0));
-			if (config_.profile == 2) {
-				o[3] = 255; // Phobos: dark regolith everywhere
-				continue;
-			}
-			const double lat = std::asin(std::clamp(d.z, -1.0, 1.0)) / DEG;
-			const double lon = std::atan2(d.y, d.x) / DEG;
-			const double edge = Noises::sample(noise_->ice, pm, 0.01 / 200.0) * 2.5;
-			const double ice = lat >= 0.0 ? sstep(ICE_N_START, ICE_N_FULL, lat + edge)
-										  : sstep(ICE_S_START, ICE_S_FULL, -lat + edge);
-			o[2] = uint8_t(ice * 255.0);
-			o[3] = dark_ ? uint8_t(std::clamp(double(dark_->sample(lat, lon)), 0.0, 1.0) * 255.0) : 0;
-			if (arc(d, hole) * config_.r_ref <= HOLE_R * 1.6) {
-				o[1] = 255;
-			}
+			geology_at(sample_dir(p_key, p_lay, qi * 4, qj * 4), &r_rgba[(size_t(qj + 1) * side + size_t(qi + 1)) * 4]);
 		}
+	}
+}
+
+void Synth::geology_at(const DVec3 &p_dir, uint8_t r_out[4]) const {
+	auto byte = [](double p_n) { return uint8_t(std::clamp(p_n * 127.5 + 127.5, 0.0, 255.0)); };
+	const DVec3 pm = p_dir * config_.r_ref;
+	r_out[0] = byte(Noises::sample(noise_->prov, pm, 0.0042 / 200.0));
+	r_out[1] = byte(Noises::sample(noise_->patch, pm, 0.019 / 200.0));
+	r_out[2] = 0;
+	r_out[3] = 0;
+	if (config_.profile == 2) {
+		r_out[3] = 255; // Phobos: dark regolith everywhere
+		return;
+	}
+	const double lat = std::asin(std::clamp(p_dir.z, -1.0, 1.0)) / DEG;
+	const double lon = std::atan2(p_dir.y, p_dir.x) / DEG;
+	const double edge = Noises::sample(noise_->ice, pm, 0.01 / 200.0) * 2.5;
+	const double ice = lat >= 0.0 ? sstep(ICE_N_START, ICE_N_FULL, lat + edge)
+								  : sstep(ICE_S_START, ICE_S_FULL, -lat + edge);
+	r_out[2] = uint8_t(ice * 255.0);
+	r_out[3] = dark_ ? uint8_t(std::clamp(double(dark_->sample(lat, lon)), 0.0, 1.0) * 255.0) : 0;
+	if (arc(p_dir, dir_of_latlon(HOLE_LAT, HOLE_LON)) * config_.r_ref <= HOLE_R * 1.6) {
+		r_out[1] = 255;
 	}
 }
 

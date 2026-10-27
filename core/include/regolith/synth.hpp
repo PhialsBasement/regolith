@@ -54,6 +54,7 @@ public:
 	void thermal(std::vector<float> &r_h, const std::vector<float> &p_rep, int p_n, double p_spacing) const;
 	// Geology page: RGBA8 at quarter resolution, border 1.
 	void geology(TileKey p_key, const TileLayout &p_lay, std::vector<uint8_t> &r_rgba) const;
+	void geology_at(const DVec3 &p_dir, uint8_t r_out[4]) const;
 	static int geology_side(const TileLayout &p_lay) { return p_lay.intervals / 4 + 3; }
 
 	double spacing(int p_level) const;
