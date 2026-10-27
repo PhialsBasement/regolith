@@ -124,6 +124,10 @@ public:
 	// low and high sums the cloud packs carry
 	std::array<Field, NL> tau;
 	Field tau_low, tau_high;
+	// cloud fraction per level and for the column, LMD
+	// CLFvarying (watercloud_mod.F)
+	std::array<Field, NL> frac;
+	Field cloud_frac;
 	Field topo, pref, alb, cap, wbc;
 	double hbar = 0.0, ttbar = 0.0, ttmbar = 200.0, msbar = 0.0, cap_scale = 1.0;
 	bool ttbar_set = false;

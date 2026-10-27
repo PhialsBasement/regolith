@@ -22,12 +22,12 @@ void RegolithGcm::_bind_methods() {
 Gcm::Field *RegolithGcm::field_of(Gcm &p_g, const String &p_name) {
 	static const char *names[] = { "u", "v", "h", "wv", "dust", "dustc", "frost", "soil", "ts", "ta", "tdeep", "tmean",
 		"ttm", "ttf", "co2", "wfr", "wlf", "wdu", "wlc", "wdc", "psurf", "tair", "wsx", "wsy", "wconv", "topo", "pref",
-		"alb", "cap", "wbc", "tau_low", "tau_high", "bl_x", "bl_y", "d_slope", "d_edge", "d_had", "d_eddy",
+		"alb", "cap", "wbc", "tau_low", "tau_high", "cloud_frac", "bl_x", "bl_y", "d_slope", "d_edge", "d_had", "d_eddy",
 		"d_stress", "d_front", "d_lift_s", "d_lift_d" };
 	Gcm::Field *fields[] = { &p_g.u, &p_g.v, &p_g.h, &p_g.wv, &p_g.dust, &p_g.dustc, &p_g.frost, &p_g.soil, &p_g.ts,
 		&p_g.ta, &p_g.tdeep, &p_g.tmean, &p_g.ttm, &p_g.ttf, &p_g.co2, &p_g.wfr, &p_g.wlf, &p_g.wdu, &p_g.wlc, &p_g.wdc,
 		&p_g.psurf, &p_g.tair, &p_g.wsx, &p_g.wsy, &p_g.wconv, &p_g.topo, &p_g.pref, &p_g.alb, &p_g.cap, &p_g.wbc,
-		&p_g.tau_low, &p_g.tau_high, &p_g.bl_x, &p_g.bl_y, &p_g.d_slope, &p_g.d_edge, &p_g.d_had, &p_g.d_eddy,
+		&p_g.tau_low, &p_g.tau_high, &p_g.cloud_frac, &p_g.bl_x, &p_g.bl_y, &p_g.d_slope, &p_g.d_edge, &p_g.d_had, &p_g.d_eddy,
 		&p_g.d_stress, &p_g.d_front, &p_g.d_lift_s, &p_g.d_lift_d };
 	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
 		if (p_name == names[i]) {

@@ -102,7 +102,7 @@ private:
 	struct Published {
 		std::vector<float> dust, cloud, lu, lv, su, sv, qv, ts, tair, p, co2, frost;
 		std::array<std::vector<float>, 3> q;
-		std::vector<float> tau_levels; // NL x N
+		std::vector<float> tau_levels, frac_levels, ice_levels; // NL x N
 		uint64_t version = 0;
 		std::vector<uint8_t> local, global, surface;
 		double org_x = 0.0, org_y = 0.0;

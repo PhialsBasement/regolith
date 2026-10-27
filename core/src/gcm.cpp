@@ -120,8 +120,27 @@ constexpr double ALBEDO_ICE = 0.4; // over 5 um of ice, M04 para 35
 constexpr double FROST_VISIBLE = 5.0e-3; // kg/m2 (5 um)
 constexpr double NORTH_CAP_LAT = 80.0; // perennial ice, M04 para 34
 constexpr double NORTH_CAP_ICE = 1000.0; // kg/m2, a reservoir
-// start: 150 ppm at the north pole to 0 at the south, M04 [37]
-constexpr double Q_START_NORTH = 150.0e-6;
+// start: TES zonal-mean column vapour (pr-um), read off M04
+// Fig. 2 (top) at Ls 0, 90, 180, 270, every 30 deg from 90 S
+constexpr double TES_COLUMN[4][7] = {
+	{ 2.0, 6.0, 10.0, 12.0, 12.0, 10.0, 8.0 },
+	{ 0.5, 2.0, 8.0, 15.0, 20.0, 30.0, 60.0 },
+	{ 1.0, 5.0, 10.0, 12.0, 15.0, 15.0, 10.0 },
+	{ 22.0, 15.0, 12.0, 12.0, 10.0, 5.0, 1.0 },
+};
+
+double tes_column(double p_lat, double p_ls) {
+	const double s = std::fmod(p_ls + 360.0, 360.0) / 90.0;
+	const int s0 = int(s) % 4, s1 = (s0 + 1) % 4;
+	const double fs = s - std::floor(s);
+	const double y = std::clamp((p_lat + 90.0) / 30.0, 0.0, 6.0);
+	const int y0 = std::min(int(y), 5);
+	const double fy = y - y0;
+	auto at = [&](int p_s) {
+		return TES_COLUMN[p_s][y0] + (TES_COLUMN[p_s][y0 + 1] - TES_COLUMN[p_s][y0]) * fy;
+	};
+	return (at(s0) + (at(s1) - at(s0)) * fs) * 1.0e-3; // kg/m2
+}
 
 // Vapour pressure over ice, Pa (Murphy and Koop 2005).
 double e_ice(double p_t) {
@@ -202,6 +221,14 @@ void surface_exchange(double p_t_air, double p_t_s, double p_wind, double p_wsta
 	}
 	r_ch = chn * fh;
 	r_u = std::sqrt(zu2);
+}
+
+// Water's condensation temperature (K) at pressure p (Pa) and
+// mixing ratio q, LMD tcondwater.F90 (fit to watersat)
+double t_cond_water(double p_p, double p_q) {
+	const double x = std::log10(std::max(p_q, 1e-16) * p_p / (100.0 * 0.41));
+	return 2.52846556e+02 + 2.39229653e+01 * x + 2.21333897e+00 * x * x + 1.79977992e-01 * x * x * x +
+			1.00068175e-02 * x * x * x * x + 2.55145012e-04 * x * x * x * x * x;
 }
 
 // Growth resistance R_k + R_d (s/m2), LMD growthrate.F after
@@ -414,7 +441,7 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 	threads_ = std::max(1, p_threads);
 	for (Field *f : { &u, &v, &h, &wv, &dust, &dustc, &frost, &soil, &ts, &ta, &tdeep, &tmean, &ttm, &ttf, &co2, &wfr,
 				 &wlf, &wdu, &wlc, &wdc, &psurf, &tair, &wsx, &wsy, &wconv, &topo, &pref, &alb, &cap, &wbc, &rel_, &nu_,
-				 &nv_, &nh_, &tau_low, &tau_high, &d_slope, &d_edge, &d_had, &d_eddy, &d_stress, &d_lift_s,
+				 &nv_, &nh_, &tau_low, &tau_high, &cloud_frac, &d_slope, &d_edge, &d_had, &d_eddy, &d_stress, &d_lift_s,
 				 &d_lift_d, &bl_x, &bl_y, &d_front, &d_tail }) {
 		f->assign(N, 0.0f);
 	}
@@ -422,6 +449,7 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 		vap[size_t(l)].assign(N, 0.0f);
 		ice[size_t(l)].assign(N, 0.0f);
 		tau[size_t(l)].assign(N, 0.0f);
+		frac[size_t(l)].assign(N, 0.0f);
 	}
 	for (int t = 0; t < NT; ++t) {
 		adv_[size_t(t)].assign(N, 0.0f);
@@ -543,20 +571,22 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 			ttf[size_t(k)] = ttm[size_t(k)];
 		}
 	}
-	// M04's moist start (para 37), clipped to what each level
-	// holds: the excess lies on the ground as frost
+	// the observed column (TES, M04 Fig. 2) at this season, at
+	// one mixing ratio, held to what each level holds
 	for (int k = 0; k < N; ++k) {
 		const double latv = lat_r_[size_t(k / GW)] * RAD2DEG;
-		const double q0 = Q_START_NORTH * (latv + 90.0) / 180.0;
 		const double p_s = pref[size_t(k)] * (1.0 + hbar0 / H_MEAN);
-		double col = 0.0;
 		Column cl;
 		column_levels(p_s, ta[size_t(k)], R_GAS, GRAV, cl);
+		double air_tot = 0.0;
 		for (int l = 0; l < NL; ++l) {
-			const double air = cl.air[l];
-			const double held = std::min(q0, M_RATIO * e_ice(cl.t[l]) / cl.p[l]) * air;
+			air_tot += cl.air[l];
+		}
+		const double q0 = tes_column(latv, p_ls) / air_tot;
+		double col = 0.0;
+		for (int l = 0; l < NL; ++l) {
+			const double held = std::min(q0, M_RATIO * e_ice(cl.t[l]) / cl.p[l]) * cl.air[l];
 			vap[size_t(l)][size_t(k)] = float(held);
-			frost[size_t(k)] = float(frost[size_t(k)] + (q0 * air - held));
 			col += held;
 		}
 		wv[size_t(k)] = float(col);
@@ -1213,6 +1243,23 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 				}
 				tau_low[k] = float(low);
 				tau_high[k] = float(high);
+				// LMD CLFvarying: a level's fraction from its
+				// condensation temperature against T, +-3 K, at
+				// least 0.1; the column's is the ice-weighted mean
+				double cf_sum = 0.0, cf_norm = 0.0;
+				for (int l = 0; l < NL; ++l) {
+					const double il = a[T_ICE + l];
+					if (il <= 0.0) {
+						frac[size_t(l)][k] = 0.0f;
+						continue;
+					}
+					const double tc = t_cond_water(lp[l], (a[T_VAP + l] + il) / air[l]);
+					const double cf = std::clamp((tc - lt[l] + 3.0) / 6.0, 0.1, 1.0);
+					frac[size_t(l)][k] = float(cf);
+					cf_sum += cf * il;
+					cf_norm += il;
+				}
+				cloud_frac[k] = float(cf_norm > 0.0 ? cf_sum / cf_norm : 0.0);
 			}
 			// stress lifting over the Weibull gusts (White 1979)
 			double lift = 0.0;

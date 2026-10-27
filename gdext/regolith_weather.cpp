@@ -324,8 +324,12 @@ void RegolithWeather::publish(const Gcm &p_g) {
 		p.sv[k] = float(p_g.v[k] * Gcm::SURF_WIND + p_g.wsy[k]);
 	}
 	p.tau_levels.resize(size_t(Gcm::NL) * n);
+	p.frac_levels.resize(size_t(Gcm::NL) * n);
+	p.ice_levels.resize(size_t(Gcm::NL) * n);
 	for (int l = 0; l < Gcm::NL; ++l) {
+		std::memcpy(p.ice_levels.data() + size_t(l) * n, p_g.ice[size_t(l)].data(), n * sizeof(float));
 		std::memcpy(p.tau_levels.data() + size_t(l) * n, p_g.tau[size_t(l)].data(), n * sizeof(float));
+		std::memcpy(p.frac_levels.data() + size_t(l) * n, p_g.frac[size_t(l)].data(), n * sizeof(float));
 	}
 	p.version = pub_version_.fetch_add(1) + 1;
 	p.lu = p_g.u;
@@ -621,7 +625,15 @@ Dictionary RegolithWeather::get_cloud_levels() const {
 	d["gw"] = gcm_->GW;
 	d["gh"] = gcm_->GH;
 	d["levels"] = Gcm::NL;
+	PackedFloat32Array frac;
+	frac.resize(int64_t(pub_.frac_levels.size()));
+	std::memcpy(frac.ptrw(), pub_.frac_levels.data(), pub_.frac_levels.size() * sizeof(float));
 	d["tau"] = tau;
+	d["fraction"] = frac; // per level, LMD CLFvarying
+	PackedFloat32Array ice;
+	ice.resize(int64_t(pub_.ice_levels.size()));
+	std::memcpy(ice.ptrw(), pub_.ice_levels.data(), pub_.ice_levels.size() * sizeof(float));
+	d["ice"] = ice; // kg/m2 per level
 	d["topo"] = topo;
 	d["edges"] = edges;
 	d["version"] = int64_t(pub_.version);
