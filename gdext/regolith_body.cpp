@@ -44,7 +44,11 @@ constexpr int PINNED_LEVEL = 3;
 constexpr int UPLOADS_PER_FRAME = 24;
 constexpr int PATCH_BUILDS_PER_TICK = 4;
 constexpr uint64_t PATCH_KEEP_TICKS = 180;
-constexpr double SHADOW_RANGE = 4000.0;
+// Terrain shades itself from horizon maps; it casts into the
+// shadow maps only near the camera, for the objects there.
+constexpr double SHADOW_RANGE = 300.0;
+// Re-anchor the push frame when the camera strays this far.
+constexpr double PUSH_RADIUS = 2000.0;
 constexpr float NO_MORPH = 1e30f;
 
 // Patches are virtual tiles two levels below the collision
@@ -414,6 +418,18 @@ void RegolithBody::create_render_resources() {
 	}
 	geology_atlas_ = rs->texture_2d_layered_create(geo_layers, RenderingServer::TEXTURE_LAYERED_2D_ARRAY);
 	rs->material_set_param(material_, "geology", geology_atlas_);
+	const int hs = regolith::horizon_side(lay);
+	Ref<Image> blank_hor = Image::create_empty(hs, hs, false, Image::FORMAT_RGBA8);
+	TypedArray<Image> hor_layers;
+	for (int i = 0; i < page_capacity_; ++i) {
+		hor_layers.push_back(blank_hor);
+	}
+	for (int k = 0; k < 2; ++k) {
+		horizon_atlas_[k] = rs->texture_2d_layered_create(hor_layers, RenderingServer::TEXTURE_LAYERED_2D_ARRAY);
+	}
+	rs->material_set_param(material_, "horizon_a", horizon_atlas_[0]);
+	rs->material_set_param(material_, "horizon_b", horizon_atlas_[1]);
+	rs->material_set_param(material_, "horizon_side", hs);
 	rs->material_set_param(material_, "geology_side", gs);
 	rs->material_set_param(material_, "face_edge_m", std::numbers::pi / 2.0 * source_.r_ref());
 	const Array keys = material_params_.keys();
@@ -532,6 +548,18 @@ bool RegolithBody::upload(TileKey p_key) {
 		RenderingServer::get_singleton()->texture_2d_update(geology_atlas_,
 				Image::create_from_data(gs, gs, false, Image::FORMAT_RGBA8, geo), layer);
 	}
+	// Made on the workers; only the pinned set is made here.
+	if (const auto page = loader_->horizon(p_key)) {
+		const int hs = regolith::horizon_side(source_.layout());
+		const size_t bytes_per = size_t(hs) * hs * 4;
+		for (int k = 0; k < 2; ++k) {
+			PackedByteArray hor;
+			hor.resize(int64_t(bytes_per));
+			std::memcpy(hor.ptrw(), page->data() + k * bytes_per, bytes_per);
+			RenderingServer::get_singleton()->texture_2d_update(horizon_atlas_[k],
+					Image::create_from_data(hs, hs, false, Image::FORMAT_RGBA8, hor), layer);
+		}
+	}
 	pages_[p_key.bits] = { layer, frame_ };
 	page_bounds_[p_key.bits] = { tile->min, tile->max };
 	++stat_uploads_;
@@ -620,23 +648,28 @@ void RegolithBody::draw(const std::vector<regolith::SelectedNode> &p_nodes) {
 	const RID scenario = get_world_3d()->get_scenario();
 	const Vector3 cam = get_viewport()->get_camera_3d()->get_global_position();
 
-	// Re-push node constants only when the frame was rebuilt or
-	// has drifted far from the push frame; otherwise the shared
-	// instance transform follows the frame.
+	// Node constants live in a push frame anchored at the camera,
+	// so the GPU's float32 only ever sees small numbers. They are
+	// re-pushed when the camera strays or the frame is rebuilt;
+	// otherwise one shared instance transform carries them.
+	const regolith::DVec3 cam_body = regolith::to_body_point(f, regolith::to_d(cam));
 	Transform3D xf;
+	bool drifted = true;
 	if (push_valid_) {
 		xf.basis = regolith::basis_between(f, push_frame_);
 		xf.origin = regolith::to_v(f.to_local_point(push_frame_.anchor));
+		drifted = regolith::length(cam_body - push_frame_.anchor) > PUSH_RADIUS ||
+				(xf.basis.get_column(0) - Vector3(1, 0, 0)).length() > 0.01 ||
+				(xf.basis.get_column(1) - Vector3(0, 1, 0)).length() > 0.01;
 	}
-	const bool drifted = xf.origin.length() > 5000.0 ||
-			(xf.basis.get_column(0) - Vector3(1, 0, 0)).length() > 0.01 ||
-			(xf.basis.get_column(1) - Vector3(0, 1, 0)).length() > 0.01;
 	if (!push_valid_ || push_rebuild_ != sys->rebuild_count() || drifted) {
 		push_frame_ = f;
+		push_frame_.anchor = cam_body;
 		push_valid_ = true;
 		push_rebuild_ = sys->rebuild_count();
 		++push_id_;
-		xf = Transform3D();
+		xf.basis = Basis();
+		xf.origin = regolith::to_v(f.to_local_point(push_frame_.anchor));
 		// node space -> body-fixed, for the orbital look
 		Basis to_body;
 		to_body.set_column(0, regolith::to_v(push_frame_.east));
@@ -650,6 +683,8 @@ void RegolithBody::draw(const std::vector<regolith::SelectedNode> &p_nodes) {
 		rs->material_set_param(material_, "sun_body",
 				Vector3(real_t(regolith::dot(bp.axes[0], sun)), real_t(regolith::dot(bp.axes[1], sun)), real_t(regolith::dot(bp.axes[2], sun))));
 	}
+	// the main camera in push-frame metres, for the morph
+	rs->material_set_param(material_, "u_eye", regolith::to_v(push_frame_.to_local_point(cam_body)));
 	if (!xf.is_equal_approx(push_xform_) || xform_id_ == 0) {
 		push_xform_ = xf;
 		++xform_id_;
@@ -1086,7 +1121,7 @@ void RegolithBody::free_render_resources() {
 		drawn_.clear();
 		spare_coarse_.clear();
 		spare_fine_.clear();
-		for (RID *r : { &mesh_coarse_, &mesh_fine_, &atlas_, &geology_atlas_, &material_ }) {
+		for (RID *r : { &mesh_coarse_, &mesh_fine_, &atlas_, &geology_atlas_, &horizon_atlas_[0], &horizon_atlas_[1], &material_ }) {
 			if (r->is_valid()) {
 				rs->free_rid(*r);
 				*r = RID();

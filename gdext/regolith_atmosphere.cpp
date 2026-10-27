@@ -152,6 +152,7 @@ void RegolithAtmosphere::_process(double p_delta) {
 	sky_->set_shader_parameter("horizon_dip", dip);
 	sky_->set_shader_parameter("up_dir", up);
 	sky_->set_shader_parameter("dust_tau", dust_tau_);
+	body->set_material_param("dust_tau", dust_tau_);
 
 	// Stars fixed to ICRF; galactic pole for the Milky Way.
 	sky_->set_shader_parameter("celestial_basis", to_render);

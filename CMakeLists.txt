@@ -26,6 +26,7 @@ add_library(regolith_core STATIC
 	core/src/cube.cpp
 	core/src/ephemeris.cpp
 	core/src/height_tile.cpp
+	core/src/horizon.cpp
 	core/src/kepler.cpp
 	core/src/orbit.cpp
 	core/src/pack.cpp
@@ -64,6 +65,7 @@ if(REGOLITH_BUILD_TESTS)
 		tests/test_cube.cpp
 		tests/test_ephemeris.cpp
 		tests/test_fold.cpp
+		tests/test_horizon.cpp
 		tests/test_kepler.cpp
 		tests/test_patch.cpp
 		tests/test_select.cpp

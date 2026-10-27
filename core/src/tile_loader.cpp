@@ -10,6 +10,7 @@
 #endif
 
 #include "regolith/cube.hpp"
+#include "regolith/horizon.hpp"
 
 namespace regolith {
 
@@ -166,6 +167,73 @@ HeightTilePtr TileLoader::make(TileKey p_key) {
 	return tile;
 }
 
+// Terrain shadows, a stage after the heights: the near field
+// over a window reaching into the neighbours, the far field from
+// the parent's page. Neighbours come from the cache (or their
+// deepest cached ancestor) so one tile never makes another.
+std::shared_ptr<const std::vector<uint8_t>> TileLoader::horizon(TileKey p_key) {
+	const HeightTilePtr tile = produce(p_key);
+	if (!tile) {
+		return nullptr;
+	}
+	{
+		std::lock_guard<std::mutex> guard(horizon_mutex_);
+		if (tile->horizon) {
+			return tile->horizon;
+		}
+	}
+	const std::shared_ptr<const std::vector<uint8_t>> parent = p_key.level() > 0 ? horizon(p_key.parent()) : nullptr;
+	const TileLayout lay = source_.layout();
+	const int n = lay.intervals, b = lay.border;
+	const int lo = -HORIZON_PAD, hi = n + HORIZON_PAD, w = hi - lo + 1;
+	const int level = p_key.level();
+	const int64_t m = int64_t(n) << level;
+	std::unordered_map<uint64_t, HeightTilePtr> near;
+	auto cached = [&](TileKey p_k) {
+		auto it = near.find(p_k.bits);
+		if (it == near.end()) {
+			it = near.emplace(p_k.bits, p_k == p_key ? tile : cache_.get(p_k)).first;
+		}
+		return it->second;
+	};
+	// Height of canonical lattice sample (face, gi, gj) at level
+	// L, from the deepest cached tile holding it.
+	auto height = [&](const FaceSample &p_c) -> double {
+		for (int a = level; a >= 0; --a) {
+			const double s = double(int64_t(1) << (level - a));
+			const double gi = double(p_c.gi) / s, gj = double(p_c.gj) / s;
+			const uint32_t tiles = 1u << a;
+			const uint32_t tx = std::min(uint32_t(gi / n), tiles - 1), ty = std::min(uint32_t(gj / n), tiles - 1);
+			const HeightTilePtr t = cached(TileKey::make(p_c.face, a, tx, ty));
+			if (!t) {
+				continue;
+			}
+			const double li = gi - double(tx) * n, lj = gj - double(ty) * n;
+			const int i0 = std::min(int(li), n - 1), j0 = std::min(int(lj), n - 1);
+			const double fx = li - i0, fy = lj - j0;
+			return (t->at(lay, i0, j0) * (1 - fx) + t->at(lay, i0 + 1, j0) * fx) * (1 - fy) +
+					(t->at(lay, i0, j0 + 1) * (1 - fx) + t->at(lay, i0 + 1, j0 + 1) * fx) * fy;
+		}
+		return 0.0;
+	};
+	std::vector<DVec3> pos(size_t(w) * w);
+	for (int j = lo; j <= hi; ++j) {
+		for (int i = lo; i <= hi; ++i) {
+			const IVec3 q = fold_lattice(p_key.face(), int64_t(p_key.x()) * n + i, int64_t(p_key.y()) * n + j, m);
+			const bool own = i >= -b && i <= n + b && j >= -b && j <= n + b;
+			const double h = own ? double(tile->at(lay, i, j)) : height(canonical_sample(q, m));
+			pos[size_t(j - lo) * w + size_t(i - lo)] = lattice_dir(q, m) * (source_.r_ref() + h);
+		}
+	}
+	auto page = std::make_shared<std::vector<uint8_t>>();
+	compute_horizon(pos, p_key, lay, parent.get(), *page);
+	std::lock_guard<std::mutex> guard(horizon_mutex_);
+	if (!tile->horizon) {
+		tile->horizon = page;
+	}
+	return tile->horizon;
+}
+
 // Relief before thermal, cached apart: thermal of one tile needs
 // its neighbours' too.
 HeightTilePtr TileLoader::pre_thermal(TileKey p_key) {
@@ -263,7 +331,7 @@ void TileLoader::worker() {
 			queue_.erase(best);
 			in_flight_.insert(key);
 		}
-		produce(TileKey{ key });
+		horizon(TileKey{ key });
 		{
 			std::lock_guard<std::mutex> guard(mutex_);
 			in_flight_.erase(key);

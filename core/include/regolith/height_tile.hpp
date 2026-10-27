@@ -19,6 +19,9 @@ struct HeightTile {
 	float max = 0.0f;
 	std::vector<float> repose; // relief level only, before thermal
 	std::vector<uint8_t> geology; // RGBA8, Synth::geology_side()^2
+	// 2 x RGBA8, horizon_side()^2; set once, under the loader's
+	// horizon lock (TileLoader::horizon).
+	mutable std::shared_ptr<const std::vector<uint8_t>> horizon;
 
 	void update_bounds(const TileLayout &p_layout);
 

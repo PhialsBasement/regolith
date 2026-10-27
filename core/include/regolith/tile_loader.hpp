@@ -54,6 +54,8 @@ public:
 	std::vector<TileKey> take_finished();
 	// Synchronous, on the calling thread.
 	HeightTilePtr produce(TileKey p_key);
+	// The tile's horizon page, made on first use.
+	std::shared_ptr<const std::vector<uint8_t>> horizon(TileKey p_key);
 	size_t pending() const;
 	// Mean milliseconds to make one tile, and how many, by level.
 	void level_timing(int p_level, double &r_ms, uint64_t &r_count) const;
@@ -67,6 +69,7 @@ private:
 	const Synth *synth_;
 	std::atomic<uint64_t> make_us_[32] = {};
 	std::atomic<uint64_t> make_count_[32] = {};
+	std::mutex horizon_mutex_;
 	std::mutex pre_mutex_;
 	std::unordered_map<uint64_t, HeightTilePtr> pre_;
 	std::list<uint64_t> pre_lru_;

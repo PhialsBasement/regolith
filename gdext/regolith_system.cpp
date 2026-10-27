@@ -43,6 +43,7 @@ constexpr double SUN_RADIUS = 6.957e8;
 // Each camera pass spans this far/near ratio; float32
 // projections lose the far plane well before 1e8.
 constexpr double PASS_RATIO = 1e6;
+constexpr double FAR_PLANE = 1e9; // m, past Phobos and Deimos
 // Floating velocity: Jolt never sees the focus faster than
 // SHIFT_HIGH; under SHIFT_LOW true speed the frame stops.
 constexpr double SHIFT_HIGH = 50.0;
@@ -217,7 +218,9 @@ void RegolithSystem::_ready() {
 	}
 	anchor_at_start();
 	if (manage_camera_) {
-		setup_passes();
+		if (split_passes_) {
+			setup_passes();
+		}
 	}
 }
 
@@ -806,7 +809,8 @@ void RegolithSystem::update_passes(Camera3D *p_cam) {
 	const double near_plane = std::clamp(std::fmax(h, 0.0) * 0.002, 0.05, 100.0);
 	const double split = near_plane * PASS_RATIO;
 	p_cam->set_near(real_t(near_plane));
-	p_cam->set_far(real_t(split));
+	// One pass: reverse-Z float depth spans the solar system.
+	p_cam->set_far(real_t(split_passes_ ? split : FAR_PLANE));
 	if (!far_view_) {
 		return;
 	}

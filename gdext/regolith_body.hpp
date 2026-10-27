@@ -11,6 +11,7 @@
 #include <godot_cpp/variant/string.hpp>
 
 #include "regolith/height_tile.hpp"
+#include "regolith/horizon.hpp"
 #include "regolith/orbit.hpp"
 #include "regolith/patch.hpp"
 #include "regolith/select.hpp"
@@ -149,6 +150,7 @@ private:
 	Dictionary material_params_;
 	Dictionary material_refs_;
 	RID geology_atlas_;
+	RID horizon_atlas_[2];
 	double j2_ = 1.96045e-3;
 	double j2_radius_ = 3396200.0;
 	double rotating_altitude_ = 100000.0;

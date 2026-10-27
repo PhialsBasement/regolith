@@ -25,11 +25,24 @@ instance uniform vec4 u_nmod; // face metres mod 20 km
 
 uniform sampler2DArray heights : filter_nearest, repeat_disable;
 uniform sampler2DArray geology : filter_linear, repeat_disable;
+// Terrain shadows: horizon angles in 8 grid directions
+uniform sampler2DArray horizon_a : filter_linear, repeat_disable;
+uniform sampler2DArray horizon_b : filter_linear, repeat_disable;
+uniform int horizon_side = 55;
+// Cloud shadows (physical clouds, later): transmittance in
+// the sun's light space; off means clear sky.
+uniform sampler2D cloud_shadow : filter_linear, repeat_enable;
+uniform mat4 cloud_matrix = mat4(1.0);
+uniform bool has_cloud_shadow = false;
 uniform int intervals = 208;
 uniform int border = 2;
 uniform int geology_side = 55;
 uniform float face_edge_m = 5324000.0;
 uniform int debug_mode = 0;
+uniform vec3 u_eye; // main camera, push-frame metres
+// Dust optical depth: sets how much sunlight arrives direct
+// (shadowable) and how much as scattered skylight.
+uniform float dust_tau = 0.35;
 
 // mors ground material (Terrain3D asset values)
 uniform sampler2DArray albedo_array : source_color, filter_linear_mipmap_anisotropic, repeat_enable;
@@ -70,6 +83,8 @@ varying vec3 v_ts;
 varying vec3 v_tt;
 varying vec3 v_up;
 varying float v_morph;
+varying float v_sun_vis; // terrain x clouds, for the sun only
+varying vec3 v_up_view; // local vertical, view space
 
 const float QP = 0.7853981633974483;
 
@@ -119,9 +134,9 @@ void vertex() {
 	vec2 ij = g * step;
 	vec3 p = u_center.xyz + offset_of(ij, texel(layer, ivec2(ij)), dir, q_len_out);
 	// Morph by distance to the MAIN camera, also in shadow passes.
-	vec3 eye = MAIN_CAM_INV_VIEW_MATRIX[3].xyz;
-	vec3 p_world = (MODEL_MATRIX * vec4(p, 1.0)).xyz;
-	float morph = clamp((distance(p_world, eye) - u_misc.w) / max(u_pages.w - u_misc.w, 1e-3), 0.0, 1.0);
+	// Push-frame metres on both sides: small, so float32 is exact
+	// enough at any distance from the world origin.
+	float morph = clamp((distance(p, u_eye) - u_misc.w) / max(u_pages.w - u_misc.w, 1e-3), 0.0, 1.0);
 	vec2 gm = g - mod(g, 2.0) * morph;
 	vec2 ijm = gm * step;
 	vec2 pij = (vec2(float(quadrant & 1), float(quadrant >> 1)) * float(intervals) + ijm) * 0.5;
@@ -195,6 +210,37 @@ void hex_sample(vec2 local_uv, vec4 dom, float layer, vec4 dd, out vec4 alb, out
 		+ w.z * textureGrad(normal_array, vec3(u3, layer), dd.xy, dd.zw);
 }
 
+float horizon_dir(vec3 hp, int k) {
+	vec4 v = k < 4 ? texture(horizon_a, hp) : texture(horizon_b, hp);
+	int c = k % 4;
+	float b = c == 0 ? v.r : (c == 1 ? v.g : (c == 2 ? v.b : v.a));
+	return -0.25 + b * 1.25; // HORIZON_MIN, HORIZON_SPAN
+}
+
+// Terrain shadow: the sun against the horizon in its own grid
+// direction, soft over the solar disc; then the clouds.
+float sun_visibility(vec3 up, vec3 ts, vec3 tt, vec2 ij, float page, vec3 world) {
+	vec3 s = normalize(transpose(u_to_body) * sun_body);
+	float s_e = dot(s, up);
+	vec3 sh = s - up * s_e;
+	vec3 ti = normalize(ts), tj = normalize(tt);
+	float aa = dot(ti, ti), ab = dot(ti, tj), bb = dot(tj, tj);
+	float si = dot(sh, ti), sj = dot(sh, tj);
+	float det = aa * bb - ab * ab;
+	float a = (si * bb - sj * ab) / det;
+	float b = (sj * aa - si * ab) / det;
+	float f = mod(atan(b, a) / 0.78539816 + 8.0, 8.0);
+	int k0 = int(floor(f)) % 8;
+	int k1 = (k0 + 1) % 8;
+	vec3 hp = vec3((ij * 0.25 + 1.5) / float(horizon_side), page);
+	float hz = mix(horizon_dir(hp, k0), horizon_dir(hp, k1), fract(f));
+	float vis = smoothstep(-0.006, 0.006, asin(clamp(s_e, -1.0, 1.0)) - hz);
+	if (has_cloud_shadow) {
+		vis *= texture(cloud_shadow, (cloud_matrix * vec4(world, 1.0)).xy).r;
+	}
+	return vis;
+}
+
 vec4 domain(int id) {
 	return id == 1 ? u_dom1 : (id == 2 ? u_dom2 : (id == 3 ? u_dom3 : (id == 4 ? u_dom4 : u_dom0)));
 }
@@ -212,6 +258,11 @@ void fragment() {
 	vec3 n = normalize(cross(v_ts + up * (0.5 * hx), v_tt + up * (0.5 * hy)));
 	mat3 to_world = mat3(MODEL_MATRIX);
 	vec3 n_view = normalize((VIEW_MATRIX * vec4(to_world * n, 0.0)).xyz);
+	v_sun_vis = sun_visibility(up, v_ts, v_tt, v_ij, u_pages.x, (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz);
+	v_up_view = normalize(mat3(VIEW_MATRIX) * (mat3(MODEL_MATRIX) * up));
+	// height of the eye over this ground: -VERTEX is the view
+	// space vector to the camera, small at any world position
+	float eye_h = dot(-VERTEX, v_up_view);
 
 	if (debug_mode != 0 || !has_textures) {
 		vec3 albedo = mix(dust_colour, rock_colour, smoothstep(0.08, 0.45, 1.0 - dot(n, up)));
@@ -221,6 +272,9 @@ void fragment() {
 			albedo = vec3(v_morph, 1.0 - v_morph, 0.15);
 		} else if (debug_mode == 3) {
 			albedo = n * 0.5 + 0.5;
+		} else if (debug_mode == 4) {
+			// sun visibility, tinted by node level
+			albedo = vec3(v_sun_vis) * (0.75 + 0.25 * cos(6.2831853 * (u_debug.x / 7.0 + vec3(0.0, 0.33, 0.67))));
 		}
 		ALBEDO = albedo;
 		ROUGHNESS = 0.93;
@@ -257,10 +311,7 @@ void fragment() {
 			w_grv * inv_ice, w_bed * inv_ice, w_ice, w_sand * inv_ice * w_dark};
 		// from flight heights gravel and bedrock hand their weight
 		// to the sand layers
-		vec3 cam = INV_VIEW_MATRIX[3].xyz;
-		vec3 frag = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
-		vec3 up_world = normalize(to_world * up);
-		float view_h = clamp((dot(cam - frag, up_world) - 3000.0) / 12000.0, 0.0, 1.0);
+		float view_h = clamp((eye_h - 3000.0) / 12000.0, 0.0, 1.0);
 		wgt[0] += (wgt[2] + wgt[3]) * view_h * (1.0 - w_dark);
 		wgt[5] += (wgt[2] + wgt[3]) * view_h * w_dark;
 		wgt[2] *= 1.0 - view_h;
@@ -359,10 +410,7 @@ void fragment() {
 	// From far away (30 to 100 km up): mors's isomorphic map
 	// (mars_globe_iso.gdshader), the DEM's own relief at
 	// shade_vex over the mosaic, unshaded, with its air.
-	vec3 cam_w = INV_VIEW_MATRIX[3].xyz;
-	vec3 frag_w = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
-	vec3 up_w = normalize(mat3(MODEL_MATRIX) * up);
-	float orbit = smoothstep(30000.0, 100000.0, dot(cam_w - frag_w, up_w));
+	float orbit = smoothstep(30000.0, 100000.0, eye_h);
 	if (has_iso_map && debug_mode == 0 && orbit > 0.0) {
 		vec3 d = normalize(u_to_body * up);
 		float lat = asin(clamp(d.z, -1.0, 1.0));
@@ -382,12 +430,50 @@ void fragment() {
 		// wrapped Lambert: true hillshade blacks every away slope
 		float lam = clamp((dot(pert, sun) + 0.25) / 1.25, 0.0, 1.0);
 		vec3 col = map * (iso_night + (1.0 - iso_night) * lam);
-		vec3 n_curve = normalize((VIEW_MATRIX * vec4(up_w, 0.0)).xyz);
+		vec3 n_curve = v_up_view;
 		float fres = pow(1.0 - clamp(dot(n_curve, VIEW), 0.0, 1.0), 2.2);
 		float day = clamp(dot(d, sun) * 0.5 + 0.5, 0.0, 1.0);
 		col *= mix(1.0, 0.45, fres * atmosphere);
 		col += vec3(0.80, 0.44, 0.24) * pow(fres, 1.7) * (0.25 + 0.75 * day) * 0.9 * atmosphere;
 		ALBEDO *= 1.0 - orbit;
 		EMISSION = col * orbit;
+	}
+}
+
+// Godot's Burley diffuse and GGX specular. The sun splits by the
+// dust: the direct beam exp(-tau * airmass), which terrain and
+// object shadows block, and skylight the dust scatters down,
+// which no shadow removes (lit by the sky dome over the ground).
+void light() {
+	float ndl = clamp(dot(NORMAL, LIGHT), 0.0, 1.0);
+	float direct = 1.0;
+	if (LIGHT_IS_DIRECTIONAL) {
+		float s_e = dot(LIGHT, v_up_view);
+		direct = exp(-dust_tau / max(s_e + 0.05, 0.05));
+		// most dust scatter is forward: about 3/4 reaches the ground
+		float sky = (1.0 - direct) * 0.75 * clamp(s_e, 0.0, 1.0);
+		float dome = 0.5 + 0.5 * dot(NORMAL, v_up_view);
+		DIFFUSE_LIGHT += LIGHT_COLOR * sky * dome / PI;
+	}
+	if (ndl > 0.0) {
+		float vis = LIGHT_IS_DIRECTIONAL ? v_sun_vis * direct : 1.0;
+		vec3 hv = normalize(LIGHT + VIEW);
+		float ndv = clamp(dot(NORMAL, VIEW), 1e-4, 1.0);
+		float ldh = clamp(dot(LIGHT, hv), 0.0, 1.0);
+		float ndh = clamp(dot(NORMAL, hv), 0.0, 1.0);
+		float r = ROUGHNESS;
+		float fd90 = 0.5 + 2.0 * ldh * ldh * r;
+		float fl = 1.0 + (fd90 - 1.0) * pow(1.0 - ndl, 5.0);
+		float fv = 1.0 + (fd90 - 1.0) * pow(1.0 - ndv, 5.0);
+		vec3 lit = LIGHT_COLOR * ATTENUATION * vis * ndl;
+		DIFFUSE_LIGHT += lit * fl * fv / PI;
+		float a = r * r;
+		float a2 = a * a;
+		float dd = ndh * ndh * (a2 - 1.0) + 1.0;
+		float k = a * 0.5;
+		float g = (ndl / (ndl * (1.0 - k) + k)) * (ndv / (ndv * (1.0 - k) + k));
+		float f0 = 0.16 * SPECULAR_AMOUNT * SPECULAR_AMOUNT;
+		float fr = f0 + (1.0 - f0) * pow(1.0 - ldh, 5.0);
+		SPECULAR_LIGHT += lit * (a2 / (PI * dd * dd)) * g * fr / (4.0 * ndl * ndv);
 	}
 }
