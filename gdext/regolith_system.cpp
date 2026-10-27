@@ -168,6 +168,12 @@ void RegolithSystem::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "start_local_time", PROPERTY_HINT_RANGE, "0,24,0.1"), "set_start_local_time",
 			"get_start_local_time");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "manage_camera"), "set_manage_camera", "get_manage_camera");
+	ClassDB::bind_method(D_METHOD("set_floating_origin", "enabled"), &RegolithSystem::set_floating_origin);
+	ClassDB::bind_method(D_METHOD("get_floating_origin"), &RegolithSystem::get_floating_origin);
+	ClassDB::bind_method(D_METHOD("set_floating_velocity", "enabled"), &RegolithSystem::set_floating_velocity);
+	ClassDB::bind_method(D_METHOD("get_floating_velocity"), &RegolithSystem::get_floating_velocity);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "floating_origin"), "set_floating_origin", "get_floating_origin");
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "floating_velocity"), "set_floating_velocity", "get_floating_velocity");
 	ADD_SIGNAL(MethodInfo("frame_shifted", PropertyInfo(Variant::TRANSFORM3D, "transform")));
 }
 
@@ -485,7 +491,7 @@ void RegolithSystem::rebuild_frame(RegolithBody *p_body, bool p_rotating, const 
 	// Keep the focus's small render velocity: the rest of its
 	// true velocity becomes the frame's.
 	const DVec3 v_ref = from_icrf(a, p_focus.v - o.velocity - regolith::cross(ref_omega(), r));
-	if (regolith::length(v_ref) > SHIFT_LOW) {
+	if (floating_velocity_enabled_ && regolith::length(v_ref) > SHIFT_LOW) {
 		const Vector3 keep = render_to_icrf().transposed().xform(old_ra.xform(old_focus_vel));
 		frame_velocity_ = v_ref - regolith::to_body_vec(frame_, regolith::to_d(keep));
 	}
@@ -527,7 +533,8 @@ void RegolithSystem::manage_frame(Node3D *p_focus) {
 	}
 	const double r = body->r_ref();
 	const double leash = std::fmax(std::fmin(2000.0, 0.02 * r), 0.05 * std::fabs(alt));
-	if (body != dominant_ || rotating != rotating_ || switched_focus || local.length() > leash) {
+	const bool strayed = floating_origin_ && local.length() > leash;
+	if (body != dominant_ || rotating != rotating_ || switched_focus || strayed) {
 		rebuild_frame(body, rotating, s, p_focus);
 	}
 	if (RegolithVessel *v = vessel_of(p_focus); v && v->parked_) {
@@ -712,7 +719,9 @@ void RegolithSystem::_physics_process(double p_delta) {
 	Node3D *focus = focus_node();
 	if (focus) {
 		manage_frame(focus);
-		floating_velocity(focus);
+		if (floating_velocity_enabled_) {
+			floating_velocity(focus);
+		}
 	}
 	// Forces use the state at time t; then the frame and the
 	// bodies advance, and Jolt moves everything by its v dt.

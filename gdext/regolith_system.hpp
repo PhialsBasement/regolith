@@ -79,6 +79,10 @@ public:
 	double get_start_local_time() const { return start_local_time_; }
 	void set_manage_camera(bool p_v) { manage_camera_ = p_v; }
 	bool get_manage_camera() const { return manage_camera_; }
+	void set_floating_origin(bool p_v) { floating_origin_ = p_v; }
+	bool get_floating_origin() const { return floating_origin_; }
+	void set_floating_velocity(bool p_v) { floating_velocity_enabled_ = p_v; }
+	bool get_floating_velocity() const { return floating_velocity_enabled_; }
 
 	double get_time() const { return time_; }
 	double get_local_solar_time(const Vector3 &p_pos) const;
@@ -151,6 +155,8 @@ private:
 	double start_lon_ = 137.8;
 	double start_local_time_ = 10.0; // hours, local true solar
 	bool manage_camera_ = true;
+	bool floating_origin_ = true;
+	bool floating_velocity_enabled_ = true;
 	double time_ = 0.0; // TT seconds since J2000
 
 	std::vector<RegolithBody *> bodies_;
