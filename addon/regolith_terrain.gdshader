@@ -52,12 +52,10 @@ uniform float macro_variation_slope : hint_range(0., 1.) = 0.4;
 uniform float frost_amt : hint_range(0., 1.) = 0.0;
 uniform float roughness_floor : hint_range(0., 1.) = 0.9;
 uniform float specular_amount : hint_range(0., 1.) = 0.15;
-// mors far-shell look from orbit (mars_farshell.gdshader)
-uniform sampler2D orbit_albedo : source_color, filter_linear_mipmap, repeat_enable;
-uniform bool has_orbit_albedo = false;
+// mors far-shell air seen from orbit; 0 for airless bodies
+uniform float atmosphere = 0.0;
 uniform mat3 u_to_body = mat3(1.0); // node space -> body-fixed
 uniform vec3 sun_body = vec3(0.0, 0.0, 1.0);
-uniform float orbit_gamma = 1.55;
 uniform vec3 dust_colour : source_color = vec3(0.62, 0.36, 0.22);
 uniform vec3 rock_colour : source_color = vec3(0.30, 0.21, 0.16);
 
@@ -345,33 +343,18 @@ void fragment() {
 		AO_LIGHT_AFFECT = (1.0 - albedo_height.a) * clamp(normal_rough.y, 0., 1.);
 	}
 
-	// From orbit (30 to 100 km up): mors's far-shell look, the
-	// Viking mosaic self-lit by relief, limb dimmed and glowing.
+	// From orbit (30 to 100 km up) the ground stays itself; only
+	// the far shell's air is added: limb extinction and glow.
 	vec3 cam_w = INV_VIEW_MATRIX[3].xyz;
 	vec3 frag_w = (INV_VIEW_MATRIX * vec4(VERTEX, 1.0)).xyz;
 	vec3 up_w = normalize(mat3(MODEL_MATRIX) * up);
-	float orbit = smoothstep(30000.0, 100000.0, dot(cam_w - frag_w, up_w));
-	if (has_orbit_albedo && debug_mode == 0 && orbit > 0.0) {
+	float orbit = smoothstep(30000.0, 100000.0, dot(cam_w - frag_w, up_w)) * atmosphere;
+	if (debug_mode == 0 && orbit > 0.0) {
 		vec3 d = normalize(u_to_body * up);
-		float lat = asin(clamp(d.z, -1.0, 1.0));
-		float lon = atan(d.y, d.x);
-		// two u's, so the antimeridian seam picks the smooth one
-		vec2 uv_a = vec2(lon / 6.2831853 + 0.5, 0.5 - lat / 3.1415927);
-		vec2 uv_b = vec2(fract(uv_a.x + 0.5) - 0.5, uv_a.y);
-		vec2 uv = fwidth(uv_a.x) <= fwidth(uv_b.x) ? uv_a : uv_b;
-		vec2 du = fwidth(uv_a.x) <= fwidth(uv_b.x) ? vec2(dFdx(uv_a.x), dFdy(uv_a.x)) : vec2(dFdx(uv_b.x), dFdy(uv_b.x));
-		vec3 raw = textureGrad(orbit_albedo, uv, vec2(du.x, dFdx(uv.y)), vec2(du.y, dFdy(uv.y))).rgb;
-		vec3 relief = normalize(u_to_body * n);
-		vec3 sun = normalize(sun_body);
-		float lam = clamp((dot(relief, sun) + 0.25) / 1.25, 0.0, 1.0);
-		vec3 orbital = raw * (0.16 + 0.84 * lam);
 		vec3 n_curve = normalize((VIEW_MATRIX * vec4(up_w, 0.0)).xyz);
 		float fres = pow(1.0 - clamp(dot(n_curve, VIEW), 0.0, 1.0), 2.2);
-		float day = clamp(dot(d, sun) * 0.5 + 0.5, 0.0, 1.0);
-		orbital *= mix(1.0, 0.45, fres);
-		orbital += vec3(0.80, 0.44, 0.24) * pow(fres, 1.7) * (0.25 + 0.75 * day) * 0.9;
-		orbital = pow(max(orbital, vec3(0.0)), vec3(orbit_gamma));
-		ALBEDO *= 1.0 - orbit;
-		EMISSION = orbital * orbit;
+		float day = clamp(dot(d, normalize(sun_body)) * 0.5 + 0.5, 0.0, 1.0);
+		ALBEDO *= mix(1.0, 0.45, fres * orbit);
+		EMISSION = vec3(0.80, 0.44, 0.24) * pow(fres, 1.7) * (0.25 + 0.75 * day) * 0.9 * orbit;
 	}
 }
