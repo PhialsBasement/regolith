@@ -114,8 +114,6 @@ public:
 	void put_in_orbit(Node *p_node, const String &p_body, double p_altitude, double p_inclination_deg);
 	// At rest relative to p_body's surface, p_height above it.
 	void put_near(Node *p_node, const String &p_body, double p_lat_deg, double p_lon_deg, double p_height);
-	// render-space point p_height above a body's surface
-	Vector3 get_surface_point(const String &p_body, double p_lat_deg, double p_lon_deg, double p_height);
 	int get_rebase_count() const { return rebases_; }
 	int get_shift_count() const { return shifts_; }
 	Dictionary get_stats() const { return stats_; }

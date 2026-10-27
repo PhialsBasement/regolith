@@ -147,8 +147,6 @@ void RegolithSystem::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_inertial_state", "node"), &RegolithSystem::get_inertial_state);
 	ClassDB::bind_method(D_METHOD("put_in_orbit", "node", "body", "altitude", "inclination_deg"), &RegolithSystem::put_in_orbit);
 	ClassDB::bind_method(D_METHOD("put_near", "node", "body", "lat_deg", "lon_deg", "height"), &RegolithSystem::put_near);
-	ClassDB::bind_method(D_METHOD("get_surface_point", "body", "lat_deg", "lon_deg", "height"),
-			&RegolithSystem::get_surface_point);
 
 	ClassDB::bind_method(D_METHOD("set_body_path", "path"), &RegolithSystem::set_body_path);
 	ClassDB::bind_method(D_METHOD("get_body_path"), &RegolithSystem::get_body_path);
@@ -1074,20 +1072,4 @@ void RegolithSystem::put_near(Node *p_node, const String &p_body, double p_lat_d
 	const Vector3 side = std::fabs(up.x) < 0.9 ? Vector3(1, 0, 0) : Vector3(0, 0, 1);
 	const Vector3 x_axis = side.cross(up).normalized().cross(up).normalized();
 	teleport(node, Transform3D(Basis(x_axis, up, x_axis.cross(up)), node->get_global_position()));
-}
-
-Vector3 RegolithSystem::get_surface_point(const String &p_body, double p_lat_deg, double p_lon_deg, double p_height) {
-	for (RegolithBody *b : bodies_) {
-		if (String(b->get_name()) != p_body) {
-			continue;
-		}
-		const double lat = p_lat_deg * DEG, lon = p_lon_deg * DEG;
-		const DVec3 dir(std::cos(lat) * std::cos(lon), std::cos(lat) * std::sin(lon), std::sin(lat));
-		const Pose &bp = pose_of(b);
-		const DVec3 x = bp.position + to_icrf(bp.axes, dir * (b->surface_radius(dir, true) + p_height));
-		Vector3 pos, vel;
-		from_state({ x, bp.velocity }, pos, vel);
-		return pos;
-	}
-	return Vector3();
 }
