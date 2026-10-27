@@ -90,6 +90,10 @@ public:
 	// the body's frame this frame: centre relative to the camera
 	// (render space), render to body-fixed axes, datum, sun
 	Dictionary get_cloud_frame() const;
+	// the live global packs (planet map overlays): clouds and
+	// dust (pack_global), CO2 ice and frost (pack_surface)
+	Ref<ImageTexture> get_global_texture() const { return global_tex_; }
+	Ref<ImageTexture> get_surface_texture() const { return surface_tex_; }
 	void inject_dust(const Vector3 &p_pos);
 	bool is_ready() const { return ready_.load(); }
 	Dictionary get_stats() const;

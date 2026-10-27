@@ -101,6 +101,8 @@ void RegolithWeather::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("find_clouds", "min_sun_deg", "target_tau"), &RegolithWeather::find_clouds, DEFVAL(-1.0));
 	ClassDB::bind_method(D_METHOD("get_cloud_levels"), &RegolithWeather::get_cloud_levels);
 	ClassDB::bind_method(D_METHOD("get_cloud_frame"), &RegolithWeather::get_cloud_frame);
+	ClassDB::bind_method(D_METHOD("get_global_texture"), &RegolithWeather::get_global_texture);
+	ClassDB::bind_method(D_METHOD("get_surface_texture"), &RegolithWeather::get_surface_texture);
 	ClassDB::bind_method(D_METHOD("inject_dust", "position"), &RegolithWeather::inject_dust);
 	ClassDB::bind_method(D_METHOD("is_ready"), &RegolithWeather::is_ready);
 	ClassDB::bind_method(D_METHOD("get_stats"), &RegolithWeather::get_stats);
