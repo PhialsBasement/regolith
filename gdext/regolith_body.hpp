@@ -133,7 +133,10 @@ private:
 	void create_render_resources();
 	RID make_grid_mesh(int p_quads);
 	void upload_finished(int p_budget);
-	bool upload(regolith::TileKey p_key);
+	// p_make_horizon only for the first-frame pinned set: in play
+	// a page waits for a worker's horizon, the main thread never
+	// computes one
+	bool upload(regolith::TileKey p_key, bool p_make_horizon = false);
 	void draw(const std::vector<regolith::SelectedNode> &p_nodes);
 	void push_texture_domains(RID p_inst, regolith::TileKey p_key, double p_rho_c);
 	void update_collision();

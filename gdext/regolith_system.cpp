@@ -1084,7 +1084,13 @@ Vector3 RegolithSystem::get_surface_point(const String &p_body, double p_lat_deg
 		const double lat = p_lat_deg * DEG, lon = p_lon_deg * DEG;
 		const DVec3 dir(std::cos(lat) * std::cos(lon), std::cos(lat) * std::sin(lon), std::sin(lat));
 		const Pose &bp = pose_of(b);
-		const DVec3 x = bp.position + to_icrf(bp.axes, dir * (b->surface_radius(dir, true) + p_height));
+		// cached heights only: called per frame, it must never
+		// block on a tile read (the finest cached level answers)
+		double rs = b->surface_radius(dir, false);
+		if (std::isnan(rs)) {
+			rs = b->r_ref();
+		}
+		const DVec3 x = bp.position + to_icrf(bp.axes, dir * (rs + p_height));
 		Vector3 pos, vel;
 		from_state({ x, bp.velocity }, pos, vel);
 		return pos;

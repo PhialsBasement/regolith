@@ -529,12 +529,19 @@ void RegolithBody::set_debug_mode(int p_v) {
 	}
 }
 
-bool RegolithBody::upload(TileKey p_key) {
+bool RegolithBody::upload(TileKey p_key, bool p_make_horizon) {
 	if (pages_.count(p_key.bits)) {
 		return true;
 	}
 	HeightTilePtr tile = cache_->get(p_key);
 	if (!tile) {
+		return false;
+	}
+	// the horizon a worker made; without it, back to a worker
+	// (computing it here stalled the frame by tens of ms)
+	const auto page = p_make_horizon ? loader_->horizon(p_key) : loader_->horizon_ready(p_key);
+	if (!page) {
+		loader_->request(p_key, std::numeric_limits<float>::max());
 		return false;
 	}
 	int layer;
@@ -569,7 +576,7 @@ bool RegolithBody::upload(TileKey p_key) {
 				Image::create_from_data(gs, gs, false, Image::FORMAT_RGBA8, geo), layer);
 	}
 	// Made on the workers; only the pinned set is made here.
-	if (const auto page = loader_->horizon(p_key)) {
+	{
 		const int hs = regolith::horizon_side(source_.layout());
 		const size_t bytes_per = size_t(hs) * hs * 4;
 		for (int k = 0; k < 2; ++k) {
@@ -624,7 +631,7 @@ void RegolithBody::_process(double p_delta) {
 				const uint32_t n = 1u << level;
 				for (uint32_t x = 0; x < n; ++x) {
 					for (uint32_t y = 0; y < n; ++y) {
-						upload(TileKey::make(face, level, x, y));
+						upload(TileKey::make(face, level, x, y), true);
 					}
 				}
 			}

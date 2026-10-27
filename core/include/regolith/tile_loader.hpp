@@ -56,6 +56,9 @@ public:
 	HeightTilePtr produce(TileKey p_key);
 	// The tile's horizon page, made on first use.
 	std::shared_ptr<const std::vector<uint8_t>> horizon(TileKey p_key);
+	// The horizon page if a worker made it, else null: never
+	// makes one (the main thread must not wait on that).
+	std::shared_ptr<const std::vector<uint8_t>> horizon_ready(TileKey p_key);
 	size_t pending() const;
 	// Mean milliseconds to make one tile, and how many, by level.
 	void level_timing(int p_level, double &r_ms, uint64_t &r_count) const;

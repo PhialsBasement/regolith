@@ -75,7 +75,9 @@ TileLoader::~TileLoader() {
 }
 
 void TileLoader::request(TileKey p_key, float p_priority) {
-	if (cache_.contains(p_key)) {
+	// cached with its horizon: done; cached without one (made
+	// off the workers) still goes to a worker for the horizon
+	if (horizon_ready(p_key)) {
 		std::lock_guard<std::mutex> guard(mutex_);
 		finished_.push_back(p_key);
 		return;
@@ -171,6 +173,15 @@ HeightTilePtr TileLoader::make(TileKey p_key) {
 // over a window reaching into the neighbours, the far field from
 // the parent's page. Neighbours come from the cache (or their
 // deepest cached ancestor) so one tile never makes another.
+std::shared_ptr<const std::vector<uint8_t>> TileLoader::horizon_ready(TileKey p_key) {
+	const HeightTilePtr tile = cache_.get(p_key);
+	if (!tile) {
+		return nullptr;
+	}
+	std::lock_guard<std::mutex> guard(horizon_mutex_);
+	return tile->horizon;
+}
+
 std::shared_ptr<const std::vector<uint8_t>> TileLoader::horizon(TileKey p_key) {
 	const HeightTilePtr tile = produce(p_key);
 	if (!tile) {
