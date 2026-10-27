@@ -77,10 +77,11 @@ public:
 	double get_density(const Vector3 &p_pos) const;
 	double get_air_temperature(const Vector3 &p_pos) const;
 	double get_ground_temperature(const Vector3 &p_pos) const;
-	Vector2 get_frost(const Vector3 &p_pos) const; // CO2 kg/m2, water
-	double get_cloud(const Vector3 &p_pos) const;
-	double get_vapor(const Vector3 &p_pos) const;
-	Vector3 get_cloud_layers(const Vector3 &p_pos) const; // low, cirrus, meso
+	Vector2 get_frost(const Vector3 &p_pos) const; // CO2, water ice, kg/m2
+	double get_cloud(const Vector3 &p_pos) const; // visible tau
+	double get_vapor(const Vector3 &p_pos) const; // kg/m2
+	// tau below 14 km, tau above, ice column kg/m2
+	Vector3 get_cloud_layers(const Vector3 &p_pos) const;
 	Dictionary find_clouds(double p_min_sun_deg) const;
 	void inject_dust(const Vector3 &p_pos);
 	bool is_ready() const { return ready_.load(); }

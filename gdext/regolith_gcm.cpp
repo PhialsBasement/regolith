@@ -16,30 +16,33 @@ void RegolithGcm::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_scalars"), &RegolithGcm::get_scalars);
 	ClassDB::bind_method(D_METHOD("set_scalars", "value"), &RegolithGcm::set_scalars);
 	ClassDB::bind_method(D_METHOD("set_clim", "maxima"), &RegolithGcm::set_clim);
-	ClassDB::bind_method(D_METHOD("get_meso"), &RegolithGcm::get_meso);
 }
 
-PackedByteArray RegolithGcm::get_meso() const {
-	PackedByteArray out;
-	const std::vector<uint8_t> &m = gcm_->meso();
-	out.resize(int64_t(m.size()));
-	std::memcpy(out.ptrw(), m.data(), m.size());
-	return out;
-}
-
+// "ice0".."ice7" and "tau0".."tau7" are the levels
 Gcm::Field *RegolithGcm::field_of(Gcm &p_g, const String &p_name) {
-	static const char *names[] = { "u", "v", "h", "qv", "dust", "dustc", "frost", "soil", "ts", "ta", "tdeep", "tmean",
+	static const char *names[] = { "u", "v", "h", "wv", "dust", "dustc", "frost", "soil", "ts", "ta", "tdeep", "tmean",
 		"ttm", "ttf", "co2", "wfr", "wlf", "wdu", "wlc", "wdc", "psurf", "tair", "wsx", "wsy", "wconv", "topo", "pref",
-		"alb", "cap", "wbc", "q0", "q1", "q2", "bl_x", "bl_y", "d_slope", "d_edge", "d_had", "d_eddy", "d_stress",
-		"d_front", "d_lift_s", "d_lift_d" };
-	Gcm::Field *fields[] = { &p_g.u, &p_g.v, &p_g.h, &p_g.qv, &p_g.dust, &p_g.dustc, &p_g.frost, &p_g.soil, &p_g.ts,
+		"alb", "cap", "wbc", "tau_low", "tau_high", "bl_x", "bl_y", "d_slope", "d_edge", "d_had", "d_eddy",
+		"d_stress", "d_front", "d_lift_s", "d_lift_d" };
+	Gcm::Field *fields[] = { &p_g.u, &p_g.v, &p_g.h, &p_g.wv, &p_g.dust, &p_g.dustc, &p_g.frost, &p_g.soil, &p_g.ts,
 		&p_g.ta, &p_g.tdeep, &p_g.tmean, &p_g.ttm, &p_g.ttf, &p_g.co2, &p_g.wfr, &p_g.wlf, &p_g.wdu, &p_g.wlc, &p_g.wdc,
 		&p_g.psurf, &p_g.tair, &p_g.wsx, &p_g.wsy, &p_g.wconv, &p_g.topo, &p_g.pref, &p_g.alb, &p_g.cap, &p_g.wbc,
-		&p_g.qc[0], &p_g.qc[1], &p_g.qc[2], &p_g.bl_x, &p_g.bl_y, &p_g.d_slope, &p_g.d_edge, &p_g.d_had,
-		&p_g.d_eddy, &p_g.d_stress, &p_g.d_front, &p_g.d_lift_s, &p_g.d_lift_d };
+		&p_g.tau_low, &p_g.tau_high, &p_g.bl_x, &p_g.bl_y, &p_g.d_slope, &p_g.d_edge, &p_g.d_had, &p_g.d_eddy,
+		&p_g.d_stress, &p_g.d_front, &p_g.d_lift_s, &p_g.d_lift_d };
 	for (size_t i = 0; i < sizeof(names) / sizeof(names[0]); ++i) {
 		if (p_name == names[i]) {
 			return fields[i];
+		}
+	}
+	for (int l = 0; l < Gcm::NL; ++l) {
+		if (p_name == String("ice") + String::num_int64(l)) {
+			return &p_g.ice[size_t(l)];
+		}
+		if (p_name == String("tau") + String::num_int64(l)) {
+			return &p_g.tau[size_t(l)];
+		}
+		if (p_name == String("vap") + String::num_int64(l)) {
+			return &p_g.vap[size_t(l)];
 		}
 	}
 	return nullptr;

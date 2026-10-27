@@ -57,6 +57,16 @@ public:
 	static constexpr double TAU_FLOOR = 0.10;
 	static constexpr double TAU_PER_DUST = 2.6;
 
+	// Water in physical units on height levels above the ground
+	// (docs/water.md): edges in metres.
+	static constexpr int NL = 8;
+	static constexpr double LEVEL_M[NL + 1] = { 0.0, 2000.0, 5000.0, 9000.0, 14000.0, 20000.0, 27000.0, 35000.0, 45000.0 };
+	// the cloud packs split low (below 14 km) from high levels
+	static constexpr int NL_LOW = 4;
+	// advected tracers: fine dust, coarse dust, vapour and ice
+	// per level
+	static constexpr int T_DU = 0, T_DC = 1, T_VAP = 2, T_ICE = 2 + NL, NT = 2 + 2 * NL;
+
 	explicit Gcm(const GcmConfig &p_config = GcmConfig::mars());
 	const GcmConfig &config() const { return cfg_; }
 
@@ -98,16 +108,22 @@ public:
 	void fold_px(double &r_px, double &r_py) const;
 	int index(double p_px, double p_py) const;
 
-	// RGBA8 packs the renderer decodes (mors's scales)
+	// RGBA8 packs the renderer decodes: R low cloud tau, G high
+	// cloud tau (both over PACK_TAU_MAX), A dust (mors's scale)
+	static constexpr double PACK_TAU_MAX = 3.0;
 	void pack_local(std::vector<uint8_t> &r_out) const;
 	void pack_global(std::vector<uint8_t> &r_out) const;
 	void pack_surface(std::vector<uint8_t> &r_out) const;
-	const std::vector<uint8_t> &meso() const { return meso_; }
 
-	// state
-	Field u, v, h, qv, dust, dustc, frost, soil, ts, ta, tdeep, tmean, ttm, ttf, co2, wfr, wlf, wdu, wlc, wdc,
+	// state. vap[l] and ice[l] in kg/m2 per level, wv their
+	// vapour column (a diagnostic); frost is surface water ice
+	Field u, v, h, wv, dust, dustc, frost, soil, ts, ta, tdeep, tmean, ttm, ttf, co2, wfr, wlf, wdu, wlc, wdc,
 			psurf, tair, wsx, wsy, wconv;
-	std::array<Field, 3> qc;
+	std::array<Field, NL> vap, ice;
+	// diagnostics: visible optical depth per level, and the
+	// low and high sums the cloud packs carry
+	std::array<Field, NL> tau;
+	Field tau_low, tau_high;
 	Field topo, pref, alb, cap, wbc;
 	double hbar = 0.0, ttbar = 0.0, ttmbar = 200.0, msbar = 0.0, cap_scale = 1.0;
 	bool ttbar_set = false;
@@ -120,8 +136,8 @@ public:
 	// diagnostics (attribution)
 	Field d_slope, d_edge, d_had, d_eddy, d_stress, d_lift_s, d_lift_d, bl_x, bl_y, d_front, d_tail;
 
-	// fine window state
-	std::array<Field, 3> l_qc;
+	// fine window state: low tau, high tau, dust
+	std::array<Field, 2> l_tau;
 	Field l_dust;
 
 	// derived from the config (mors's names, now per body)
@@ -143,10 +159,11 @@ private:
 	int threads_ = 1;
 	std::vector<double> lat_r_, fcor_, inv_dx_, inv_dxt_, cor_c_, cor_s_, carea_, cos_lon_, sin_lon_;
 	Field rel_; // relaxation tendency, per step
-	Field nu_, nv_, nh_, nqv_, ndu_, ndc_, nq0_, nq1_, nq2_, aqv_, adu_, adc_, aq0_, aq1_, aq2_;
+	Field nu_, nv_, nh_;
+	// per tracer: the advected value and the value after sources
+	std::array<Field, NT> adv_, nxt_;
 	std::vector<double> row_h_, row_tt_, row_ts_, row_tm_, row_ms_, row_fix_, row_dm_, row_wlf_, row_wlc_;
 	std::vector<double> bc_amp_;
-	std::vector<uint8_t> meso_;
 	std::mt19937 rng_{ 1 };
 	double l_org_[2] = { 0.0, 0.0 };
 	bool l_valid_ = false;

@@ -5,7 +5,6 @@
 #include <numbers>
 #include <thread>
 
-#include "FastNoiseLite.h"
 
 // Line-for-line port of mors scripts/mars_atmosphere.gd; the
 // comments there (and RESEARCH_ATMOSPHERE.md) carry the sources
@@ -27,7 +26,6 @@ constexpr double SURF_WIND = Gcm::SURF_WIND;
 constexpr double TOPO_ALPHA = 0.02;
 constexpr double TAU_FLOOR = Gcm::TAU_FLOOR;
 constexpr double TAU_PER_DUST = Gcm::TAU_PER_DUST;
-constexpr double PACK_CLOUD_MAX = 1.5;
 constexpr double PACK_DUST_MAX = 2.0;
 constexpr double SIGMA = 5.670e-8;
 constexpr double EMIS = 0.97;
@@ -42,7 +40,6 @@ constexpr double SW_ABS = 0.55;
 constexpr double DUST_HEAT_K = 30.0;
 constexpr double DUST_HEAT_MAX = 1.5;
 constexpr double CH_BULK = 0.006;
-constexpr double SAT_K = 9.0;
 constexpr double SLOPE_GAIN = 1440.0;
 constexpr double SLOPE_MAX = 28.8;
 constexpr double FRONT_K = 0.0;
@@ -94,6 +91,70 @@ constexpr double CAP_S_ON[6] = { 60.0, 20.0, 15.0, 10.0, 5.0, 0.0 };
 constexpr double CAP_S_PEAK[6] = { 100.0, 143.0, 155.0, 165.0, 177.0, 188.0 };
 constexpr double CAP_S_OFF[6] = { 140.0, 200.0, 220.0, 240.0, 255.0, 270.0 };
 constexpr double CAP_S_MASS[6] = { 40.0, 100.0, 300.0, 500.0, 750.0, 950.0 };
+
+// Water: Montmessin et al. 2004 (M04) cloud scheme, docs/water.md.
+// Molecular constants as the LMD code (microphys_h.F90).
+constexpr double M_RATIO = 18.015 / 43.34; // Viking 2 mean weight
+constexpr double RHO_ICE = 917.0; // kg/m3
+constexpr double MH2O = 18.0e-3, MCO2 = 44.0e-3; // kg/mol
+constexpr double RGP = 8.3143, NAV = 6.023e23, KBZ = 1.381e-23;
+constexpr double R_MCO2 = 1.97e-10, R_MH2O = 1.2e-10; // m
+constexpr double SIG_H2O = 0.12; // N/m, ice and vapour
+// K/m to 40 km, isothermal above (Seiff and Kirk 1977)
+constexpr double LAPSE = 1.6e-3;
+constexpr double LAPSE_TOP = 40000.0;
+// eddy mixing, Montmessin 2002 para 33: 100 m2/s to 25 km,
+// rising inversely with density above
+constexpr double K_ZZ = 100.0;
+constexpr double K_ZZ_TOP = 25000.0;
+// nuclei, M04 para 29: N0 at tau_ref, radius r0 decaying
+constexpr double CCN0 = 2.0e6; // per m3
+constexpr double CCN_TAU_REF = 0.1;
+constexpr double R0_SURF = 0.8e-6, R0_H = 18000.0; // m
+// sedimentation radius factor f = exp(3 sigma^2), M04 para 31
+constexpr double F_SED = 1.5;
+constexpr double Q_EXT = 2.0; // visible, M04 para 85
+// surface flux drag (kappa / ln(z / z0))^2, M04 eq. 1
+constexpr double C_D_WATER = 0.4 * 0.4 / (5.9914645471079810 * 5.9914645471079810); // ln(4 / 0.01)
+constexpr double ALBEDO_ICE = 0.4; // over 5 um of ice, M04 para 35
+constexpr double FROST_VISIBLE = 5.0e-3; // kg/m2 (5 um)
+constexpr double NORTH_CAP_LAT = 80.0; // perennial ice, M04 para 34
+constexpr double NORTH_CAP_ICE = 1000.0; // kg/m2, a reservoir
+// start: 150 ppm at the north pole to 0 at the south, M04 [37]
+constexpr double Q_START_NORTH = 150.0e-6;
+
+// Vapour pressure over ice, Pa (Murphy and Koop 2005).
+double e_ice(double p_t) {
+	return std::exp(9.550426 - 5723.265 / p_t + 3.53068 * std::log(p_t) - 0.00728332 * p_t);
+}
+
+// CO2 gas mean free path, m (LMD newsedim, molrad 2.2e-10)
+double free_path(double p_t, double p_p) {
+	return 0.707 * 8.31 / (4.0 * 3.1416 * 2.2e-10 * 2.2e-10 * 6.023e23) * p_t / p_p;
+}
+
+// Stokes-Cunningham fall speed, m/s (Montmessin 2002 sec. 2.3,
+// Fuchs 1964); viscosity 1e-5 Pa s as LMD newsedim
+double fall_speed(double p_r, double p_t, double p_p, double p_g) {
+	const double kn = free_path(p_t, p_p) / p_r;
+	return 2.0 * p_g * RHO_ICE * p_r * p_r / (9.0 * 1.0e-5) * (1.0 + kn * (1.246 + 0.42 * std::exp(-0.87 / kn)));
+}
+
+// Growth resistance R_k + R_d (s/m2), LMD growthrate.F after
+// Montmessin 2002 sec. 2.2: heat and vapour diffusion
+double growth_resistance(double p_t, double p_p, double p_psat, double p_r) {
+	const double pi = 3.14159265358979;
+	const double k = (0.17913 * p_t - 13.9789) * 4.184e-4;
+	const double lv = (2834.3 - 0.28 * (p_t - 273.15) - 0.004 * (p_t - 273.15) * (p_t - 273.15)) * 1.0e3;
+	const double rr = R_MCO2 + R_MH2O;
+	const double dv = 1.0 / 3.0 * std::sqrt(8.0 * KBZ * p_t / (pi * MH2O / NAV)) * KBZ * p_t /
+			(pi * p_p * rr * rr * std::sqrt(1.0 + MH2O / MCO2));
+	const double kn = p_t / p_p * (0.707 * RGP / (4.0 * pi * R_MCO2 * R_MCO2 * NAV)) / p_r;
+	const double lambda = (1.333 + 0.71 / kn) / (1.0 + 1.0 / kn);
+	const double rk = lv * lv * RHO_ICE * MH2O / (k * RGP * p_t * p_t);
+	const double rd = RGP * p_t * RHO_ICE / (dv * p_psat * MH2O);
+	return rk + rd * (1.0 + lambda * kn);
+}
 
 // Godot's helpers, same definitions
 double clampd(double p_v, double p_lo, double p_hi) {
@@ -287,17 +348,22 @@ double Gcm::sample(const Field &p_f, double p_px, double p_py) const {
 
 void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_threads) {
 	threads_ = std::max(1, p_threads);
-	for (Field *f : { &u, &v, &h, &qv, &dust, &dustc, &frost, &soil, &ts, &ta, &tdeep, &tmean, &ttm, &ttf, &co2, &wfr,
+	for (Field *f : { &u, &v, &h, &wv, &dust, &dustc, &frost, &soil, &ts, &ta, &tdeep, &tmean, &ttm, &ttf, &co2, &wfr,
 				 &wlf, &wdu, &wlc, &wdc, &psurf, &tair, &wsx, &wsy, &wconv, &topo, &pref, &alb, &cap, &wbc, &rel_, &nu_,
-				 &nv_, &nh_, &nqv_, &ndu_, &ndc_, &nq0_, &nq1_, &nq2_, &aqv_, &adu_, &adc_, &aq0_, &aq1_, &aq2_,
-				 &d_slope, &d_edge, &d_had, &d_eddy, &d_stress, &d_lift_s, &d_lift_d, &bl_x, &bl_y, &d_front,
-				 &d_tail }) {
+				 &nv_, &nh_, &tau_low, &tau_high, &d_slope, &d_edge, &d_had, &d_eddy, &d_stress, &d_lift_s,
+				 &d_lift_d, &bl_x, &bl_y, &d_front, &d_tail }) {
 		f->assign(N, 0.0f);
 	}
-	for (Field &q : qc) {
-		q.assign(N, 0.0f);
+	for (int l = 0; l < NL; ++l) {
+		vap[size_t(l)].assign(N, 0.0f);
+		ice[size_t(l)].assign(N, 0.0f);
+		tau[size_t(l)].assign(N, 0.0f);
 	}
-	for (Field &q : l_qc) {
+	for (int t = 0; t < NT; ++t) {
+		adv_[size_t(t)].assign(N, 0.0f);
+		nxt_[size_t(t)].assign(N, 0.0f);
+	}
+	for (Field &q : l_tau) {
 		q.assign(size_t(LN) * LN, 0.0f);
 	}
 	l_dust.assign(size_t(LN) * LN, 0.0f);
@@ -375,7 +441,8 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 		const double tfr_row = frost_point(prow / GW);
 		for (int i = 0; i < GW; ++i) {
 			const size_t k = size_t(j * GW + i);
-			frost[k] = float(3.0 * sstep(70.0, 82.0, latd));
+			// the perennial north cap's water ice, a reservoir
+			frost[k] = latv > NORTH_CAP_LAT ? float(NORTH_CAP_ICE) : 0.0f;
 			double s = 50.0;
 			for (const Basin &b : basins) {
 				const double bx = (b.lon + 180.0) / 360.0 * GW;
@@ -386,7 +453,15 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 			}
 			soil[k] = float(s);
 			dust[k] = float(0.05 * (0.4 + 0.6 * std::cos(lat_r_[size_t(j)])));
-			qv[k] = float(0.35 + 0.75 * std::exp(-std::pow(latd / 28.0, 2.0)) + 0.35 * sstep(60.0, 80.0, latd));
+			// moist start, uniform in height (M04 para 37)
+			const double q0 = Q_START_NORTH * (latv + 90.0) / 180.0;
+			double col = 0.0;
+			for (int l = 0; l < NL; ++l) {
+				const double air = pref[k] * (std::exp(-LEVEL_M[l] / SCALE_H) - std::exp(-LEVEL_M[l + 1] / SCALE_H)) / GRAV;
+				vap[size_t(l)][k] = float(q0 * air);
+				col += q0 * air;
+			}
+			wv[k] = float(col);
 			const double lat_eff = latd + CAP_LAT_PER_K * (frost_point(pref[k]) - tfr_row);
 			co2[k] = float(cap_mass(lat_eff, p_ls, latv > 0.0));
 			msum += co2[k] * carea_[size_t(j)];
@@ -433,7 +508,7 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 	for (std::vector<double> *r : { &row_h_, &row_tt_, &row_ts_, &row_tm_, &row_ms_, &row_dm_, &row_wlf_, &row_wlc_ }) {
 		r->assign(GH, 0.0);
 	}
-	row_fix_.assign(size_t(GH) * 12, 0.0);
+	row_fix_.assign(size_t(GH) * 2 * NT, 0.0);
 	bc_amp_.assign(GH, 0.0);
 	hbar = hbar0;
 	cap_scale = 1.0;
@@ -445,24 +520,10 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 	bc_period = { 4.0, 4.0 };
 	bc_m = { 3, 2 };
 	bc_timer = 0.0;
-	// sub-grid condensation patchiness (mors: FastNoiseLite seed
-	// 3131, simplex FBM 2 octaves, 0.18 per cell, as image bytes)
-	fastnoiselite::FastNoiseLite meso(3131);
-	meso.SetNoiseType(fastnoiselite::FastNoiseLite::NoiseType_OpenSimplex2);
-	meso.SetFractalType(fastnoiselite::FastNoiseLite::FractalType_FBm);
-	meso.SetFractalOctaves(2);
-	meso.SetFrequency(0.18f);
-	meso_.assign(N, 0);
-	for (int y = 0; y < GH; ++y) {
-		for (int x = 0; x < GW; ++x) {
-			const double v = meso.GetNoise(float(x), float(y));
-			meso_[size_t(y * GW + x)] = uint8_t(clampd(v * 127.5 + 127.5, 0.0, 255.0));
-		}
-	}
 }
 
 bool Gcm::finite() const {
-	const Field *probes[] = { &u, &v, &h, &qv, &dust, &qc[0], &frost, &ts, &ta, &co2 };
+	const Field *probes[] = { &u, &v, &h, &wv, &dust, &ice[0], &ice[NL - 1], &frost, &ts, &ta, &co2 };
 	for (const Field *f : probes) {
 		const double s = double((*f)[0]) + (*f)[N / 3] + (*f)[N / 2] + (*f)[2 * N / 3] + (*f)[N - 1];
 		if (!std::isfinite(s)) {
@@ -716,7 +777,14 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 	}
 	const double wp99 = std::pow(-std::log(0.01), 1.0 / wk);
 	const double dt = DT;
-	Field &q0 = qc[0], &q1 = qc[1], &q2 = qc[2];
+	// the advected tracers, in T_* order
+	std::array<Field *, NT> tr;
+	tr[T_DU] = &dust;
+	tr[T_DC] = &dustc;
+	for (int l = 0; l < NL; ++l) {
+		tr[size_t(T_VAP + l)] = &vap[size_t(l)];
+		tr[size_t(T_ICE + l)] = &ice[size_t(l)];
+	}
 
 	// area-weighted planet-mean dust, every 7th cell
 	double dmean = 0.0, dmean_a = 0.0;
@@ -763,21 +831,17 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 		const int j0 = j * GW;
 		const double clat = std::cos(lat_r_[size_t(j)]), slat = std::sin(lat_r_[size_t(j)]);
 		const double latd = std::fabs(lat_r_[size_t(j)] * RAD2DEG);
-		const bool winter = lat_r_[size_t(j)] * subsolar_lat < 0.0;
 		const double dyf = (j > 0 && j < GH - 1) ? 0.5 : 1.0;
 		const double area = carea_[size_t(j)];
 		const double taper = 1.0 - sstep(60.0, 85.0, latd);
 		double sum_h = 0, sum_tt = 0, sum_ts = 0, sum_tm = 0, sum_ms = 0, sum_dm = 0, sum_wlf = 0, sum_wlc = 0;
-		double pre[6] = {}, post[6] = {};
+		double pre[NT] = {}, post[NT] = {};
 		const double idxt = inv_dxt_[size_t(j)];
 		for (int i = 0; i < GW; ++i) {
 			const size_t k = size_t(j0 + i);
-			pre[0] += qv[k];
-			pre[1] += dust[k];
-			pre[2] += dustc[k];
-			pre[3] += q0[k];
-			pre[4] += q1[k];
-			pre[5] += q2[k];
+			for (int t = 0; t < NT; ++t) {
+				pre[t] += (*tr[size_t(t)])[k];
+			}
 			// backtrace, true metric; reflect over the poles
 			auto trace = [&](double p_u, double p_v, size_t r_idx[4], double r_w[4]) {
 				double fx = double(i) - p_u * dt * idxt;
@@ -811,24 +875,14 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 			trace(u[k], v[k] + had_up[size_t(j)], ia, wa);
 			// dust rides the boundary layer that lifted it [M]
 			trace(u[k] + BL_DUST_W * bl_x[k], v[k] + had_up[size_t(j)] + BL_DUST_W * bl_y[k], id, wd);
-			double av = bil(qv, ia, wa);
-			double ad = bil(dust, id, wd);
-			double ac = bil(dustc, id, wd);
-			double a0 = bil(q0, ia, wa);
-			double a1 = bil(q1, ia, wa);
-			double a2 = bil(q2, ia, wa);
-			post[0] += av;
-			post[1] += ad;
-			post[2] += ac;
-			post[3] += a0;
-			post[4] += a1;
-			post[5] += a2;
-			aqv_[k] = float(av);
-			adu_[k] = float(ad);
-			adc_[k] = float(ac);
-			aq0_[k] = float(a0);
-			aq1_[k] = float(a1);
-			aq2_[k] = float(a2);
+			double a[NT];
+			for (int t = 0; t < NT; ++t) {
+				const bool dusty = t == T_DU || t == T_DC;
+				a[t] = bil(*tr[size_t(t)], dusty ? id : ia, dusty ? wd : wa);
+				post[t] += a[t];
+				adv_[size_t(t)][k] = float(a[t]);
+			}
+			double &ad = a[T_DU], &ac = a[T_DC];
 			// insolation: cos(solar zenith), orbit-scaled
 			const double cosha = cos_lon_[size_t(i)] * cs + sin_lon_[size_t(i)] * sn;
 			const double mu0 = std::max(slat * sdec + clat * cdec * cosha, 0.0);
@@ -852,8 +906,8 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 			double albedo = alb[k];
 			if (co2[k] > 0.5f) {
 				albedo = 0.60;
-			} else if (frost[k] > 0.05f) {
-				albedo = lerpd(albedo, 0.45, clampd(frost[k] / 1.5, 0.0, 1.0));
+			} else if (frost[k] > FROST_VISIBLE) {
+				albedo = std::max(albedo, ALBEDO_ICE);
 			}
 			// slope wind (sec. 6.2)
 			const size_t im2 = size_t(j0 + (i + 1) % GW);
@@ -969,46 +1023,109 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 			sum_tm += ttm[k] * area;
 			sum_ms += clampd(ttm[k] - ttmb, -MEAN_STATE_MAX, MEAN_STATE_MAX) * taper * area;
 			sum_ts += ts[k];
-			// frost sublimates when insolated
-			const double insol = mu0 * flux;
-			const double subl = std::min(double(frost[k]), 0.00030 * dt * std::max(insol - 0.15, 0.0));
-			frost[k] = float(frost[k] - subl);
-			av += subl;
-			// cold trap: polar night and the winter side
-			if (insol < 0.12 && (latd > 62.0 || (winter && latd > 50.0))) {
-				const double trap = av * 0.00001 * dt;
-				av -= trap;
-				frost[k] = float(frost[k] + trap);
+			// Water (docs/water.md). Levels above the ground:
+			// pressure from the column scale height; temperature
+			// down the Viking lapse rate to 40 km, isothermal
+			// above, about the column's mass-weighted mean; the
+			// lowest level is the surface air.
+			{
+				const double sh = R_GAS * t_a / GRAV;
+				const double t_base = t_a + LAPSE * sh;
+				const double wind = std::sqrt(u[k] * u[k] + v[k] * v[k]);
+				// orographic lift: terrain rise across a cell
+				const double rise = wind > 0.1 ? std::max(u[k] * gtx + v[k] * gty, 0.0) / wind * GCELL_M : 0.0;
+				const double cool = GRAV / CP_AIR * rise;
+				double air[NL], qsat[NL], lt[NL], lp[NL];
+				for (int l = 0; l < NL; ++l) {
+					const double z0 = LEVEL_M[l], z1 = LEVEL_M[l + 1], zm = 0.5 * (z0 + z1);
+					air[l] = p_s * (std::exp(-z0 / sh) - std::exp(-z1 / sh)) / GRAV;
+					lp[l] = p_s * std::exp(-zm / sh);
+					const double t_lvl = l == 0 ? t_air : t_base - LAPSE * std::min(zm, LAPSE_TOP);
+					// floored at the CO2 frost point there
+					const double t_fr_l = 3182.48 / (27.9546 - std::log(std::max(lp[l], 1e-3)));
+					lt[l] = std::max(t_lvl - cool, t_fr_l);
+					qsat[l] = M_RATIO * e_ice(lt[l]) / lp[l];
+				}
+				// surface flux, M04 eq. 1: rho C_d |U| (q_s(T_s)
+				// - q), sublimes surface ice, deposits on ground
+				// colder than the air's frost point
+				double &v0 = a[T_VAP];
+				const double e_flux = rho * C_D_WATER * spd * (M_RATIO * e_ice(t_s) / p_s - v0 / air[0]);
+				double ex_w = e_flux * dt;
+				ex_w = ex_w > 0.0 ? std::min(ex_w, double(frost[k])) : std::max(ex_w, -v0);
+				frost[k] = float(frost[k] - ex_w);
+				v0 += ex_w;
+				// vapour and ice: convective adjustment mixes the
+				// boundary layer (M04 para 32), eddy diffusion the
+				// levels (Montmessin 2002 para 33)
+				for (const int base : { T_VAP, T_ICE }) {
+					int top = 0;
+					while (top + 1 < NL && LEVEL_M[top + 1] < h_pbl) {
+						++top;
+					}
+					double ms = 0.0, as = 0.0;
+					for (int l = 0; l <= top; ++l) {
+						ms += a[base + l];
+						as += air[l];
+					}
+					for (int l = 0; l <= top; ++l) {
+						a[base + l] = ms * air[l] / as;
+					}
+					for (int l = 0; l + 1 < NL; ++l) {
+						const double z1 = LEVEL_M[l + 1];
+						const double dzc = 0.5 * (LEVEL_M[l + 2] - LEVEL_M[l]);
+						const double rho_i = p_s * std::exp(-z1 / sh) / (R_GAS * 0.5 * (lt[l] + lt[l + 1]));
+						const double kzz = K_ZZ * std::max(1.0, std::exp((z1 - K_ZZ_TOP) / sh));
+						const double q_lo = a[base + l] / air[l], q_hi = a[base + l + 1] / air[l + 1];
+						double f = rho_i * kzz * (q_lo - q_hi) / dzc * dt;
+						// never past equal mixing ratios
+						const double lim = (q_lo - q_hi) * air[l] * air[l + 1] / (air[l] + air[l + 1]);
+						f = lim > 0.0 ? std::min(f, lim) : std::max(f, lim);
+						a[base + l] -= f;
+						a[base + l + 1] += f;
+					}
+				}
+				// M04 sec. 2.2.2: crystals on N nuclei of radius
+				// r0, grown by eq. 3 integrated implicitly (para
+				// 28), then sedimented at f r_c (para 30)
+				const double sig2 = std::log(F_SED) / 3.0;
+				double low = 0.0, high = 0.0;
+				for (int l = 0; l < NL; ++l) {
+					double &vl = a[T_VAP + l];
+					double &il = a[T_ICE + l];
+					const double zm = 0.5 * (LEVEL_M[l] + LEVEL_M[l + 1]);
+					const double rho_l = lp[l] / (R_GAS * lt[l]);
+					const double n_kg = tau_v / CCN_TAU_REF * CCN0 * std::exp(-zm / sh) / rho_l;
+					const double r0 = R0_SURF * std::exp(-zm / R0_H);
+					auto radius = [&](double p_mc) {
+						return std::cbrt(p_mc / (4.0 / 3.0 * PI * RHO_ICE * n_kg) + r0 * r0 * r0);
+					};
+					const double mv = vl / air[l], mc = il / air[l];
+					const double r_c = radius(mc);
+					const double s_eq = std::exp(2.0 * SIG_H2O * MH2O / (RHO_ICE * RGP * lt[l] * r_c));
+					const double res = growth_resistance(lt[l], lp[l], e_ice(lt[l]), r_c);
+					const double kk = 4.0 * PI * n_kg * RHO_ICE * r_c / res;
+					double mv1 = (mv + dt * kk * s_eq) / (1.0 + dt * kk / qsat[l]);
+					mv1 = clampd(mv1, 0.0, mv + mc);
+					vl = mv1 * air[l];
+					il = (mv + mc - mv1) * air[l];
+					const double r_n = radius(il / air[l]);
+					const double dz = LEVEL_M[l + 1] - LEVEL_M[l];
+					const double w = fall_speed(F_SED * r_n, lt[l], lp[l], GRAV) * std::exp(-sig2);
+					const double out = il * std::min(w * dt / dz, 1.0);
+					il -= out;
+					if (l > 0) {
+						a[T_ICE + l - 1] += out;
+					} else {
+						frost[k] = float(frost[k] + out);
+					}
+					const double t_l = 3.0 * Q_EXT * il / (4.0 * RHO_ICE * r_n);
+					tau[size_t(l)][k] = float(t_l);
+					(l < NL_LOW ? low : high) += t_l;
+				}
+				tau_low[k] = float(low);
+				tau_high[k] = float(high);
 			}
-			const double uplift = std::max(u[k] * gtx + v[k] * gty, 0.0);
-			const double oro = clampd(uplift * 0.6, 0.0, 0.5);
-			// saturation per slab (sec. 6.3)
-			const double t0 = t_a + 0.10 * (t_s - t_a);
-			const double t1 = t_a - 30.0;
-			const double t2 = std::max(t_a - 75.0, 115.0);
-			const double sat0 = clampd(0.9 * std::exp(SAT_K * (273.15 / 190.0 - 273.15 / t0)) - oro, 0.15, 4.0);
-			const double sat1 = clampd(0.10 * std::exp(SAT_K * (273.15 / 175.0 - 273.15 / t1)) - oro, 0.03, 4.0);
-			const double sat2 = clampd(0.03 * std::exp(SAT_K * (273.15 / 130.0 - 273.15 / t2)) - oro, 0.01, 4.0);
-			const double h_w = clampd(4.0 + 0.5 * (t_a - 180.0), 6.0, 40.0);
-			const double f1 = std::exp(-22.0 / h_w);
-			const double f2 = std::exp(-65.0 / h_w);
-			const double m01 = meso_[k] * (1.0 / 255.0);
-			const double mes = 0.5 + 1.3 * m01 * m01;
-			const double c0 = std::max(av - sat0, 0.0) * 0.10 * mes;
-			const double c1 = std::max(av * f1 - sat1, 0.0) * 0.09 * mes;
-			const double c2 = std::max(av * f2 - sat2, 0.0) * 0.025 * mes;
-			av -= c0 + c1 + c2;
-			a0 += c0;
-			a1 += c1;
-			a2 += c2;
-			// cloud evaporation and layer-0 fall to frost
-			const double e0 = a0 * 0.014, e1 = a1 * 0.007, e2 = a2 * 0.010;
-			const double sed = a0 * 0.002;
-			a0 -= e0 + sed;
-			a1 -= e1;
-			a2 -= e2;
-			av += e0 + e1 + e2;
-			frost[k] = float(frost[k] + sed);
 			// stress lifting over the Weibull gusts (White 1979)
 			double lift = 0.0;
 			const double ust = std::sqrt(spd * spd + wstar * wstar) / LOG_LAW;
@@ -1060,18 +1177,9 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 				sum_wlf += wlf[k];
 				sum_wlc += wlc[k];
 			}
-			// dusty air dries clouds back to vapour
-			const double scour = clampd((ad + ac) * 0.5, 0.0, 0.9);
-			const double sc0 = a0 * scour * 0.02, sc1 = a1 * scour * 0.02;
-			a0 -= sc0;
-			a1 -= sc1;
-			av += sc0 + sc1;
-			nqv_[k] = float(std::max(av, 0.0));
-			ndu_[k] = float(std::max(ad, 0.0));
-			ndc_[k] = float(std::max(ac, 0.0));
-			nq0_[k] = float(std::max(a0, 0.0));
-			nq1_[k] = float(std::max(a1, 0.0));
-			nq2_[k] = float(std::max(a2, 0.0));
+			for (int t = 0; t < NT; ++t) {
+				nxt_[size_t(t)][k] = float(std::max(a[t], 0.0));
+			}
 		}
 		row_h_[size_t(j)] = sum_h;
 		row_tt_[size_t(j)] = sum_tt;
@@ -1081,20 +1189,20 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 		row_wlf_[size_t(j)] = sum_wlf / GW;
 		row_wlc_[size_t(j)] = sum_wlc / GW;
 		row_ts_[size_t(j)] = sum_ts / GW;
-		for (int t = 0; t < 6; ++t) {
-			row_fix_[size_t(j * 12 + t)] = pre[t] * area;
-			row_fix_[size_t(j * 12 + 6 + t)] = post[t] * area;
+		for (int t = 0; t < NT; ++t) {
+			row_fix_[size_t(j * 2 * NT + t)] = pre[t] * area;
+			row_fix_[size_t(j * 2 * NT + NT + t)] = post[t] * area;
 		}
 	});
 	// mass fixer: scale the advected part back to the old mass
-	double fix[6];
-	for (int t = 0; t < 6; ++t) {
+	double fix[NT];
+	for (int t = 0; t < NT; ++t) {
 		double pre = 0.0, post = 0.0;
 		for (int j = 0; j < GH; ++j) {
-			pre += row_fix_[size_t(j * 12 + t)];
-			post += row_fix_[size_t(j * 12 + 6 + t)];
+			pre += row_fix_[size_t(j * 2 * NT + t)];
+			post += row_fix_[size_t(j * 2 * NT + NT + t)];
 		}
-		fix[t] = (post > 1e-9 ? clampd(pre / post, 0.9, 1.1) : 1.0) - 1.0;
+		fix[t] = (post > 1e-12 ? clampd(pre / post, 0.9, 1.1) : 1.0) - 1.0;
 	}
 	// unresolved eddy mixing of dust [M]
 	const double kdiff = DUST_DIFF_K * dt / (GCELL_M * GCELL_M);
@@ -1105,14 +1213,20 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 			const size_t k = size_t(j0 + i);
 			const size_t im = size_t(j0 + (i + GW - 1) % GW);
 			const size_t ip = size_t(j0 + (i + 1) % GW);
-			qv[k] = float(std::max(nqv_[k] + aqv_[k] * fix[0], 0.0));
-			const double lap_d = double(ndu_[im]) + ndu_[ip] + ndu_[size_t(jm + i)] + ndu_[size_t(jp + i)] - 4.0 * ndu_[k];
-			const double lap_c = double(ndc_[im]) + ndc_[ip] + ndc_[size_t(jm + i)] + ndc_[size_t(jp + i)] - 4.0 * ndc_[k];
-			dust[k] = float(std::max(ndu_[k] + adu_[k] * fix[1] + kdiff * lap_d, 0.0));
-			dustc[k] = float(std::max(ndc_[k] + adc_[k] * fix[2] + kdiff * lap_c, 0.0));
-			q0[k] = float(std::max(nq0_[k] + aq0_[k] * fix[3], 0.0));
-			q1[k] = float(std::max(nq1_[k] + aq1_[k] * fix[4], 0.0));
-			q2[k] = float(std::max(nq2_[k] + aq2_[k] * fix[5], 0.0));
+			for (int t = 0; t < NT; ++t) {
+				const Field &n = nxt_[size_t(t)];
+				// unresolved eddy mixing for the dust only
+				double lap = 0.0;
+				if (t == T_DU || t == T_DC) {
+					lap = double(n[im]) + n[ip] + n[size_t(jm + i)] + n[size_t(jp + i)] - 4.0 * n[k];
+				}
+				(*tr[size_t(t)])[k] = float(std::max(n[k] + adv_[size_t(t)][k] * fix[t] + kdiff * lap, 0.0));
+			}
+			float col = 0.0f;
+			for (int l = 0; l < NL; ++l) {
+				col += vap[size_t(l)][k];
+			}
+			wv[k] = col;
 		}
 	});
 	double th = 0, ttt = 0, ttm_s = 0, tms = 0, ta_sum = 0, tdm = 0;
@@ -1173,9 +1287,9 @@ void Gcm::local_follow(double p_px, double p_py) {
 	const int dx = l_valid_ ? int(std::lround((want[0] - l_org_[0]) / LCELL_PX)) : LN;
 	const int dy = l_valid_ ? int(std::lround((want[1] - l_org_[1]) / LCELL_PX)) : LN;
 	if (dx != 0 || dy != 0) {
-		for (int f = 0; f < 4; ++f) {
-			Field &src = f == 3 ? l_dust : l_qc[size_t(f)];
-			const Field &gref = f == 3 ? dsum : qc[size_t(f)];
+		for (int f = 0; f < 3; ++f) {
+			Field &src = f == 2 ? l_dust : l_tau[size_t(f)];
+			const Field &gref = f == 2 ? dsum : (f == 0 ? tau_low : tau_high);
 			Field nq(size_t(LN) * LN);
 			for (int j = 0; j < LN; ++j) {
 				for (int i = 0; i < LN; ++i) {
@@ -1200,9 +1314,9 @@ void Gcm::local_tick(double p_dt) {
 	for (int k = 0; k < N; ++k) {
 		dsum[size_t(k)] = dust[size_t(k)] + dustc[size_t(k)];
 	}
-	for (int f = 0; f < 4; ++f) {
-		Field &src = f == 3 ? l_dust : l_qc[size_t(f)];
-		const Field &gref = f == 3 ? dsum : qc[size_t(f)];
+	for (int f = 0; f < 3; ++f) {
+		Field &src = f == 2 ? l_dust : l_tau[size_t(f)];
+		const Field &gref = f == 2 ? dsum : (f == 0 ? tau_low : tau_high);
 		Field nq(size_t(LN) * LN);
 		for (int j = 0; j < LN; ++j) {
 			const double py = l_org_[1] + (j + 0.5) * LCELL_PX;
@@ -1234,16 +1348,16 @@ void Gcm::local_tick(double p_dt) {
 
 namespace {
 
-void pack_fields(const Gcm::Field &p_q0, const Gcm::Field &p_q1, const Gcm::Field &p_q2, const Gcm::Field &p_du,
-		const Gcm::Field *p_du2, size_t p_n, std::vector<uint8_t> &r_out) {
-	const double cloud_s = 255.0 / PACK_CLOUD_MAX;
+void pack_fields(const Gcm::Field &p_low, const Gcm::Field &p_high, const Gcm::Field &p_du, const Gcm::Field *p_du2,
+		size_t p_n, std::vector<uint8_t> &r_out) {
+	const double tau_s = 255.0 / Gcm::PACK_TAU_MAX;
 	const double dust_s = 255.0 / PACK_DUST_MAX;
 	r_out.resize(p_n * 4);
 	for (size_t k = 0; k < p_n; ++k) {
 		const double du = p_du[k] + (p_du2 ? (*p_du2)[k] : 0.0f);
-		r_out[k * 4] = uint8_t(clampd(p_q0[k], 0.0, PACK_CLOUD_MAX) * cloud_s);
-		r_out[k * 4 + 1] = uint8_t(clampd(p_q1[k], 0.0, PACK_CLOUD_MAX) * cloud_s);
-		r_out[k * 4 + 2] = uint8_t(clampd(p_q2[k], 0.0, PACK_CLOUD_MAX) * cloud_s);
+		r_out[k * 4] = uint8_t(clampd(p_low[k], 0.0, Gcm::PACK_TAU_MAX) * tau_s);
+		r_out[k * 4 + 1] = uint8_t(clampd(p_high[k], 0.0, Gcm::PACK_TAU_MAX) * tau_s);
+		r_out[k * 4 + 2] = 0;
 		r_out[k * 4 + 3] = uint8_t(clampd(du, 0.0, PACK_DUST_MAX) * dust_s);
 	}
 }
@@ -1251,20 +1365,20 @@ void pack_fields(const Gcm::Field &p_q0, const Gcm::Field &p_q1, const Gcm::Fiel
 } // namespace
 
 void Gcm::pack_local(std::vector<uint8_t> &r_out) const {
-	pack_fields(l_qc[0], l_qc[1], l_qc[2], l_dust, nullptr, size_t(LN) * LN, r_out);
+	pack_fields(l_tau[0], l_tau[1], l_dust, nullptr, size_t(LN) * LN, r_out);
 }
 
 void Gcm::pack_global(std::vector<uint8_t> &r_out) const {
-	pack_fields(qc[0], qc[1], qc[2], dust, &dustc, N, r_out);
+	pack_fields(tau_low, tau_high, dust, &dustc, N, r_out);
 }
 
-// R CO2 ice / 400 kg/m2, G water frost / 3, B ground T and
+// R CO2 ice / 400 kg/m2, G water ice / 1 kg/m2, B ground T and
 // A air T as (T - 140) / 160
 void Gcm::pack_surface(std::vector<uint8_t> &r_out) const {
 	r_out.resize(size_t(N) * 4);
 	for (size_t k = 0; k < size_t(N); ++k) {
 		r_out[k * 4] = uint8_t(clampd(co2[k] / 400.0, 0.0, 1.0) * 255.0);
-		r_out[k * 4 + 1] = uint8_t(clampd(frost[k] / 3.0, 0.0, 1.0) * 255.0);
+		r_out[k * 4 + 1] = uint8_t(clampd(frost[k] / 1.0, 0.0, 1.0) * 255.0);
 		r_out[k * 4 + 2] = uint8_t(clampd((ts[k] - 140.0) / 160.0, 0.0, 1.0) * 255.0);
 		r_out[k * 4 + 3] = uint8_t(clampd((tair[k] - 140.0) / 160.0, 0.0, 1.0) * 255.0);
 	}

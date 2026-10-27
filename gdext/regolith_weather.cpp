@@ -44,7 +44,7 @@ namespace {
 
 constexpr double PI = std::numbers::pi;
 constexpr double DEG = PI / 180.0;
-constexpr int SAVE_VERSION = 1;
+constexpr int SAVE_VERSION = 2; // 2: water in kg/m2, 8 levels
 constexpr int SPINUP_STEPS = 320; // mors: ~10.7 model hours
 // Behind the clock by more than this, the skipped time goes
 // to the season clock (caps, deep soil, haze) instead.
@@ -53,7 +53,8 @@ constexpr double SEASON_K_MAX = 100.0;
 constexpr double LOOP_BUDGET_MS = 40.0;
 constexpr int TOPO_LEVEL = 2; // ~20 km samples for 60 km cells
 
-const char *SAVE_FIELDS[] = { "u", "v", "h", "qv", "dust", "dustc", "q0", "q1", "q2", "frost", "soil", "ts", "ta",
+const char *SAVE_FIELDS[] = { "u", "v", "h", "wv", "dust", "dustc", "vap0", "vap1", "vap2", "vap3", "vap4", "vap5",
+	"vap6", "vap7", "ice0", "ice1", "ice2", "ice3", "ice4", "ice5", "ice6", "ice7", "frost", "soil", "ts", "ta",
 	"tdeep", "tmean", "ttm", "co2", "wfr", "wlf", "wdu", "wlc", "wdc" };
 
 } // namespace
@@ -308,16 +309,23 @@ void RegolithWeather::publish(const Gcm &p_g) {
 	p.cloud.resize(n);
 	p.su.resize(n);
 	p.sv.resize(n);
+	p.q[2].resize(n);
 	for (size_t k = 0; k < n; ++k) {
 		p.dust[k] = p_g.dust[k] + p_g.dustc[k];
-		p.cloud[k] = p_g.qc[0][k] + p_g.qc[1][k] + p_g.qc[2][k];
+		float ice = 0.0f;
+		for (int l = 0; l < Gcm::NL; ++l) {
+			ice += p_g.ice[size_t(l)][k];
+		}
+		p.q[2][k] = ice;
+		p.cloud[k] = p_g.tau_low[k] + p_g.tau_high[k];
 		p.su[k] = float(p_g.u[k] * Gcm::SURF_WIND + p_g.wsx[k]);
 		p.sv[k] = float(p_g.v[k] * Gcm::SURF_WIND + p_g.wsy[k]);
 	}
 	p.lu = p_g.u;
 	p.lv = p_g.v;
-	p.q = p_g.qc;
-	p.qv = p_g.qv;
+	p.q[0] = p_g.tau_low;
+	p.q[1] = p_g.tau_high;
+	p.qv = p_g.wv;
 	p.ts = p_g.ts;
 	p.tair = p_g.tair;
 	p.p = p_g.psurf;
@@ -569,8 +577,8 @@ Dictionary RegolithWeather::find_clouds(double p_min_sun_deg) const {
 				continue;
 			}
 			const size_t k = size_t(j) * gw + i;
-			// the low deck reads most as cloud from the ground
-			const double score = 2.0 * pub_.q[0][k] + pub_.q[1][k];
+			// the column's visible optical depth
+			const double score = pub_.q[0][k] + pub_.q[1][k];
 			if (score > best) {
 				best = score;
 				best_k = int(k);

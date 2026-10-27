@@ -27,7 +27,6 @@ public:
 	Dictionary get_scalars() const;
 	void set_scalars(const Dictionary &p_value);
 	void set_clim(const PackedFloat32Array &p_value);
-	PackedByteArray get_meso() const;
 
 	regolith::Gcm &model() { return *gcm_; }
 	static regolith::Gcm::Inputs inputs_from(const Dictionary &p_inputs);
