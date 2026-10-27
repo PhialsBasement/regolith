@@ -8,6 +8,8 @@
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/environment.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/rendering_server.hpp>
+#include <godot_cpp/classes/shader.hpp>
 #include <godot_cpp/classes/sky.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/world3d.hpp>
@@ -220,7 +222,20 @@ void RegolithAtmosphere::_process(double p_delta) {
 		const double dayness = sstep(-0.10, 0.15, se);
 		const double amb = (0.04 + 0.20 * dayness) * (0.72 + 0.28 * sun_vis_);
 		env->set_ambient_light_energy(real_t(0.03 + (amb - 0.03) * sky_thin_));
-		Color fog = Color(0.045f, 0.045f, 0.085f).lerp(Color(0.72f, 0.55f, 0.42f), real_t(dayness));
+		// Night haze is the sky's own night horizon: distant ground
+		// fades into the sky behind it (a brighter fixed tint drew
+		// far terrain as a glowing band above black near ground).
+		Variant nh = sky_->get_shader_parameter("night_horizon");
+		if (nh.get_type() == Variant::NIL && sky_->get_shader().is_valid()) {
+			nh = RenderingServer::get_singleton()->shader_get_parameter_default(sky_->get_shader()->get_rid(), "night_horizon");
+		}
+		Color night_fog = nh.get_type() == Variant::COLOR ? Color(nh) :
+				(nh.get_type() == Variant::VECTOR3 ? Color(Vector3(nh).x, Vector3(nh).y, Vector3(nh).z) : Color(0, 0, 0));
+		// and dimmed by dust exactly as regolith_sky.gdshader dims
+		// its night colour (murk), or the haze outshines the sky
+		const double murk = sstep(0.8, 4.5, dust_tau_) * sky_thin_;
+		night_fog = night_fog * real_t(1.0 - 0.85 * murk);
+		Color fog = night_fog.lerp(Color(0.72f, 0.55f, 0.42f), real_t(dayness));
 		fog = fog * real_t(1.0 + ((1.0 + (0.45 - 1.0) * dayness) - 1.0) * (1.0 - sun_vis_));
 		env->set_fog_light_color(fog);
 		env->set_fog_density(real_t(fog_density_ * sky_thin_));
