@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <list>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "regolith/height_tile.hpp"
+#include "regolith/synth.hpp"
 
 namespace regolith {
 
@@ -37,10 +39,11 @@ private:
 };
 
 // Produces tiles on worker threads: data levels from the pack,
-// finer levels by subdividing their (recursively made) parent.
+// finer levels by subdividing their (recursively made) parent,
+// with p_synth's passes at their levels (docs/synth.md).
 class TileLoader {
 public:
-	TileLoader(const PackTileSource &p_source, TileCache &p_cache, int p_threads);
+	TileLoader(const PackTileSource &p_source, TileCache &p_cache, int p_threads, const Synth *p_synth = nullptr);
 	~TileLoader();
 
 	// Higher priority runs sooner; asking again refreshes it.
@@ -52,9 +55,21 @@ public:
 	// Synchronous, on the calling thread.
 	HeightTilePtr produce(TileKey p_key);
 	size_t pending() const;
+	// Mean milliseconds to make one tile, and how many, by level.
+	void level_timing(int p_level, double &r_ms, uint64_t &r_count) const;
 
 private:
 	void worker();
+	HeightTilePtr make(TileKey p_key);
+	HeightTilePtr pre_thermal(TileKey p_key);
+	void relief_level(TileKey p_key, HeightTile &r_tile);
+
+	const Synth *synth_;
+	std::atomic<uint64_t> make_us_[32] = {};
+	std::atomic<uint64_t> make_count_[32] = {};
+	std::mutex pre_mutex_;
+	std::unordered_map<uint64_t, HeightTilePtr> pre_;
+	std::list<uint64_t> pre_lru_;
 
 	struct Request {
 		float priority = 0.0f;

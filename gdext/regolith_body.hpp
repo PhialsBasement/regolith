@@ -13,6 +13,7 @@
 #include "regolith/orbit.hpp"
 #include "regolith/patch.hpp"
 #include "regolith/select.hpp"
+#include "regolith/synth.hpp"
 #include "regolith/tile_loader.hpp"
 
 namespace godot {
@@ -80,6 +81,13 @@ public:
 	int get_page_capacity() const { return page_capacity_; }
 	void set_debug_mode(int p_v);
 	int get_debug_mode() const { return debug_mode_; }
+	void set_synthesis(int p_v) { synthesis_ = p_v; }
+	int get_synthesis() const { return synthesis_; }
+	void set_dark_map_path(const String &p_v) { dark_map_path_ = p_v; }
+	String get_dark_map_path() const { return dark_map_path_; }
+	// Ground-shader uniforms (texture arrays, tints...), kept
+	// and applied whenever the material exists.
+	void set_material_param(const StringName &p_name, const Variant &p_value);
 	Dictionary get_stats() const;
 	bool is_collision_ready_at(const Vector3 &p_pos) const;
 
@@ -111,11 +119,13 @@ private:
 	};
 
 	RegolithSystem *system() const;
+	static std::shared_ptr<const regolith::DarkField> load_dark_field(const String &p_path);
 	void create_render_resources();
 	RID make_grid_mesh(int p_quads);
 	void upload_finished(int p_budget);
 	bool upload(regolith::TileKey p_key);
 	void draw(const std::vector<regolith::SelectedNode> &p_nodes);
+	void push_texture_domains(RID p_inst, regolith::TileKey p_key, double p_rho_c);
 	void update_collision();
 	bool build_patch(uint64_t p_id, regolith::TileKey p_tile, int p_bx, int p_by);
 	void place_patch(Patch &r_patch, bool p_teleport) const;
@@ -127,6 +137,12 @@ private:
 	NodePath system_path_;
 	double gm_ = 4.282837e13;
 	int rotation_model_ = ROTATION_MARS_IAU;
+	int synthesis_ = 0; // 0 none, 1 Mars, 2 Phobos
+	String dark_map_path_;
+	std::unique_ptr<regolith::Synth> synth_;
+	Dictionary material_params_;
+	Dictionary material_refs_;
+	RID geology_atlas_;
 	double j2_ = 1.96045e-3;
 	double j2_radius_ = 3396200.0;
 	double rotating_altitude_ = 100000.0;

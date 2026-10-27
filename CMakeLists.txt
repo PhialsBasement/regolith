@@ -31,8 +31,10 @@ add_library(regolith_core STATIC
 	core/src/pack.cpp
 	core/src/patch.cpp
 	core/src/select.cpp
+	core/src/synth.cpp
 	core/src/tile_loader.cpp
 )
+target_include_directories(regolith_core PRIVATE thirdparty/fastnoiselite)
 find_package(Threads REQUIRED)
 target_link_libraries(regolith_core PUBLIC Threads::Threads)
 target_include_directories(regolith_core PUBLIC core/include)
@@ -65,6 +67,7 @@ if(REGOLITH_BUILD_TESTS)
 		tests/test_kepler.cpp
 		tests/test_patch.cpp
 		tests/test_select.cpp
+		tests/test_synth.cpp
 		tests/test_tiles.cpp
 	)
 	target_link_libraries(regolith_core_tests PRIVATE regolith_core)

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <numbers>
 #include <limits>
 #include <thread>
 
@@ -76,6 +77,45 @@ double sample_tile(const regolith::HeightTile &p_t, const regolith::TileLayout &
 
 } // namespace
 
+// planet_streamer.gd _load_dark_grid: the Viking mosaic at
+// 2048 x 1024; darkness ramps in below 92 % of the mosaic's mean
+// luminance (0.4128) and saturates by 68 %.
+std::shared_ptr<const regolith::DarkField> RegolithBody::load_dark_field(const String &p_path) {
+	Ref<Image> img = Image::load_from_file(ProjectSettings::get_singleton()->globalize_path(p_path));
+	if (img.is_null() || img->is_empty()) {
+		ERR_PRINT("RegolithBody: cannot load dark map " + p_path);
+		return nullptr;
+	}
+	if (img->is_compressed()) {
+		img->decompress();
+	}
+	img->convert(Image::FORMAT_RGB8);
+	img->resize(2048, 1024, Image::INTERPOLATE_BILINEAR);
+	auto field = std::make_shared<regolith::DarkField>();
+	field->w = 2048;
+	field->h = 1024;
+	field->v.resize(size_t(field->w) * field->h);
+	const PackedByteArray d = img->get_data();
+	for (size_t k = 0; k < field->v.size(); ++k) {
+		const double lum = (double(d[int64_t(k * 3)]) + d[int64_t(k * 3 + 1)] + d[int64_t(k * 3 + 2)]) / 765.0;
+		field->v[k] = float(std::clamp((0.92 - lum / 0.4128) / 0.24, 0.0, 1.0));
+	}
+	return field;
+}
+
+void RegolithBody::set_material_param(const StringName &p_name, const Variant &p_value) {
+	// The server takes textures by RID; keep the resource alive.
+	Variant value = p_value;
+	if (Resource *res = Object::cast_to<Resource>(p_value)) {
+		material_refs_[p_name] = p_value;
+		value = res->get_rid();
+	}
+	material_params_[p_name] = value;
+	if (material_.is_valid()) {
+		RenderingServer::get_singleton()->material_set_param(material_, p_name, value);
+	}
+}
+
 RegolithBody::RegolithBody() {
 	set_process_priority(-50);
 	set_physics_process_priority(-50);
@@ -117,6 +157,14 @@ void RegolithBody::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_debug_mode", "mode"), &RegolithBody::set_debug_mode);
 	ClassDB::bind_method(D_METHOD("get_debug_mode"), &RegolithBody::get_debug_mode);
 	ClassDB::bind_method(D_METHOD("get_stats"), &RegolithBody::get_stats);
+	ClassDB::bind_method(D_METHOD("set_synthesis", "profile"), &RegolithBody::set_synthesis);
+	ClassDB::bind_method(D_METHOD("get_synthesis"), &RegolithBody::get_synthesis);
+	ClassDB::bind_method(D_METHOD("set_dark_map_path", "path"), &RegolithBody::set_dark_map_path);
+	ClassDB::bind_method(D_METHOD("get_dark_map_path"), &RegolithBody::get_dark_map_path);
+	ClassDB::bind_method(D_METHOD("set_material_param", "name", "value"), &RegolithBody::set_material_param);
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "synthesis", PROPERTY_HINT_ENUM, "None,Mars,Phobos"), "set_synthesis", "get_synthesis");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "dark_map_path", PROPERTY_HINT_FILE, "*.jpg,*.png"), "set_dark_map_path",
+			"get_dark_map_path");
 	ClassDB::bind_method(D_METHOD("is_collision_ready_at", "position"), &RegolithBody::is_collision_ready_at);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "pack_path", PROPERTY_HINT_FILE, "*.rgp"), "set_pack_path", "get_pack_path");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "datum_path", PROPERTY_HINT_FILE, "*.rgp"), "set_datum_path", "get_datum_path");
@@ -170,9 +218,17 @@ bool RegolithBody::ensure_open() {
 			}
 		}
 	}
+	regolith::SynthConfig sc;
+	sc.profile = synthesis_;
+	sc.r_ref = source_.r_ref();
+	sc.intervals = source_.layout().intervals;
+	synth_ = std::make_unique<regolith::Synth>(sc);
+	if (synthesis_ == 1 && !dark_map_path_.is_empty()) {
+		synth_->set_dark(load_dark_field(dark_map_path_));
+	}
 	cache_ = std::make_unique<regolith::TileCache>(size_t(page_capacity_) * 2, PINNED_LEVEL);
 	const int threads = std::max(1, int(std::thread::hardware_concurrency()) - 2);
-	loader_ = std::make_unique<regolith::TileLoader>(source_, *cache_, threads);
+	loader_ = std::make_unique<regolith::TileLoader>(source_, *cache_, threads, synth_.get());
 
 	// The never-a-hole set, loaded before the first frame.
 	float lowest = std::numeric_limits<float>::infinity();
@@ -191,12 +247,15 @@ bool RegolithBody::ensure_open() {
 	occluder_radius_ = source_.r_ref() + double(lowest);
 
 	selector_.rho_bounds = [this](TileKey p_k, float &r_lo, float &r_hi) {
-		if (p_k.level() <= source_.max_level()) {
-			return source_.bounds(p_k, r_lo, r_hi);
-		}
 		if (HeightTilePtr t = cache_->get(p_k)) {
 			r_lo = t->min;
 			r_hi = t->max;
+			return true;
+		}
+		if (p_k.level() <= source_.max_level() && source_.bounds(p_k, r_lo, r_hi)) {
+			// Synthesis may reach past the pack's bounds.
+			r_lo -= float(synth_->bounds_pad());
+			r_hi += float(synth_->bounds_pad());
 			return true;
 		}
 		return false;
@@ -265,6 +324,20 @@ void RegolithBody::create_render_resources() {
 	}
 	atlas_ = rs->texture_2d_layered_create(layers, RenderingServer::TEXTURE_LAYERED_2D_ARRAY);
 	rs->material_set_param(material_, "heights", atlas_);
+	const int gs = regolith::Synth::geology_side(lay);
+	Ref<Image> blank_geo = Image::create_empty(gs, gs, false, Image::FORMAT_RGBA8);
+	TypedArray<Image> geo_layers;
+	for (int i = 0; i < page_capacity_; ++i) {
+		geo_layers.push_back(blank_geo);
+	}
+	geology_atlas_ = rs->texture_2d_layered_create(geo_layers, RenderingServer::TEXTURE_LAYERED_2D_ARRAY);
+	rs->material_set_param(material_, "geology", geology_atlas_);
+	rs->material_set_param(material_, "geology_side", gs);
+	rs->material_set_param(material_, "face_edge_m", std::numbers::pi / 2.0 * source_.r_ref());
+	const Array keys = material_params_.keys();
+	for (int i = 0; i < keys.size(); ++i) {
+		rs->material_set_param(material_, keys[i], material_params_[keys[i]]);
+	}
 	rs->material_set_param(material_, "intervals", lay.intervals);
 	rs->material_set_param(material_, "border", lay.border);
 	rs->material_set_param(material_, "debug_mode", debug_mode_);
@@ -369,6 +442,14 @@ bool RegolithBody::upload(TileKey p_key) {
 	const int side = source_.layout().side();
 	Ref<Image> img = Image::create_from_data(side, side, false, Image::FORMAT_RF, bytes);
 	RenderingServer::get_singleton()->texture_2d_update(atlas_, img, layer);
+	if (!tile->geology.empty()) {
+		const int gs = regolith::Synth::geology_side(source_.layout());
+		PackedByteArray geo;
+		geo.resize(int64_t(tile->geology.size()));
+		std::memcpy(geo.ptrw(), tile->geology.data(), tile->geology.size());
+		RenderingServer::get_singleton()->texture_2d_update(geology_atlas_,
+				Image::create_from_data(gs, gs, false, Image::FORMAT_RGBA8, geo), layer);
+	}
 	pages_[p_key.bits] = { layer, frame_ };
 	++stat_uploads_;
 	return true;
@@ -550,6 +631,7 @@ void RegolithBody::draw(const std::vector<regolith::SelectedNode> &p_nodes) {
 		const double skirt = 1.0 + 0.01 * regolith::Selector::node_edge(source_.r_ref(), level);
 		rs->instance_geometry_set_shader_parameter(inst, "u_debug",
 				Vector4(float(level), float(fine ? lay.intervals : quads_), float(rho_c), float(skirt)));
+		push_texture_domains(inst, n.key, rho_c);
 
 		rs->instance_set_custom_aabb(inst, AABB(centre - Vector3(r, r, r), Vector3(r, r, r) * 2));
 		if (reveal) {
@@ -566,6 +648,40 @@ void RegolithBody::draw(const std::vector<regolith::SelectedNode> &p_nodes) {
 		(it->second.fine ? spare_fine_ : spare_coarse_).push_back(it->second.instance);
 		it = drawn_.erase(it);
 	}
+}
+
+// Ground texture coordinates are face metres. The shader adds
+// small node-local offsets to what is computed here in double:
+// for each texture domain, the fractional texture coordinate and
+// the hex-tiling lattice position mod 256 (the hash period), so
+// tiles and cells line up exactly across every node edge.
+void RegolithBody::push_texture_domains(RID p_inst, TileKey p_key, double p_rho_c) {
+	// mors's layer uv scales times 0.5, as its shader uses them
+	static constexpr double SCALES[5] = { 0.5, 0.0225, 0.25, 0.3335, 0.04 };
+	static constexpr double NOISE_PERIOD = 20000.0;
+	RenderingServer *rs = RenderingServer::get_singleton();
+	const regolith::TileLayout lay = source_.layout();
+	const int64_t m = int64_t(lay.intervals) << p_key.level();
+	const double edge = std::numbers::pi / 2.0 * source_.r_ref();
+	const double s_c = double(2 * (int64_t(p_key.x()) * lay.intervals + lay.intervals / 2) - m) / double(m);
+	const double t_c = double(2 * (int64_t(p_key.y()) * lay.intervals + lay.intervals / 2) - m) / double(m);
+	const double fx = (s_c + 1.0) * 0.5 * edge, fy = (t_c + 1.0) * 0.5 * edge;
+	auto domain = [](double p_bx, double p_by, double p_scale) {
+		const double dx = p_bx * p_scale + 0.5, dy = p_by * p_scale + 0.5;
+		const double ax = 0.7 * dx, ay = 0.7 * dy;
+		const double px = ax - 0.57735027 * ay, py = 1.15470054 * ay;
+		auto wrap = [](double p_v, double p_n) { return p_v - p_n * std::floor(p_v / p_n); };
+		return Vector4(float(wrap(dx, 1.0)), float(wrap(dy, 1.0)), float(wrap(px, 256.0)), float(wrap(py, 256.0)));
+	};
+	static const StringName names[5] = { "u_dom0", "u_dom1", "u_dom2", "u_dom3", "u_dom4" };
+	for (int k = 0; k < 5; ++k) {
+		rs->instance_geometry_set_shader_parameter(p_inst, names[k], domain(fx, fy, SCALES[k]));
+	}
+	// cliff, projected on vertical faces: (face metre, -height)
+	rs->instance_geometry_set_shader_parameter(p_inst, "u_cliff_u", domain(fx, -p_rho_c, SCALES[1]));
+	rs->instance_geometry_set_shader_parameter(p_inst, "u_cliff_v", domain(fy, -p_rho_c, SCALES[1]));
+	rs->instance_geometry_set_shader_parameter(p_inst, "u_nmod",
+			Vector4(float(std::fmod(fx, NOISE_PERIOD)), float(std::fmod(fy, NOISE_PERIOD)), 0.0f, 0.0f));
 }
 
 void RegolithBody::_physics_process(double p_delta) {
@@ -805,6 +921,16 @@ Dictionary RegolithBody::get_stats() const {
 	d["cached"] = cache_ ? int(cache_->size()) : 0;
 	d["patches"] = int(patches_.size());
 	d["select_ms"] = stat_select_ms_;
+	Dictionary levels;
+	for (int level = 0; loader_ && level <= max_level_; ++level) {
+		double ms = 0.0;
+		uint64_t count = 0;
+		loader_->level_timing(level, ms, count);
+		if (count) {
+			levels[level] = Vector2(real_t(ms), real_t(count));
+		}
+	}
+	d["make_ms"] = levels;
 	return d;
 }
 
@@ -828,7 +954,7 @@ void RegolithBody::free_render_resources() {
 		drawn_.clear();
 		spare_coarse_.clear();
 		spare_fine_.clear();
-		for (RID *r : { &mesh_coarse_, &mesh_fine_, &atlas_, &material_ }) {
+		for (RID *r : { &mesh_coarse_, &mesh_fine_, &atlas_, &geology_atlas_, &material_ }) {
 			if (r->is_valid()) {
 				rs->free_rid(*r);
 				*r = RID();

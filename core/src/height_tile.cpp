@@ -31,6 +31,10 @@ float midpoint(float p_a0, float p_a1, float p_a2, float p_a3) {
 
 } // namespace
 
+void HeightTile::update_bounds(const TileLayout &p_layout) {
+	interior_bounds(*this, p_layout);
+}
+
 bool PackTileSource::open(const std::string &p_path) {
 	return reader_.open(p_path);
 }

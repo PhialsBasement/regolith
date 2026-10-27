@@ -17,6 +17,10 @@ struct HeightTile {
 	std::vector<float> rho;
 	float min = 0.0f; // interior [0, N]^2
 	float max = 0.0f;
+	std::vector<float> repose; // relief level only, before thermal
+	std::vector<uint8_t> geology; // RGBA8, Synth::geology_side()^2
+
+	void update_bounds(const TileLayout &p_layout);
 
 	float at(const TileLayout &p_layout, int p_i, int p_j) const { return rho[size_t(p_layout.index(p_i, p_j))]; }
 };
