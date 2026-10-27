@@ -7,36 +7,62 @@
 
 namespace regolith {
 
+// The body and its air, per planet. mars() is mors's model.
+// Positions are "planet pixels": px_per_turn of them around
+// the equator, half as many pole to pole.
+struct GcmConfig {
+	// body
+	double radius = 106496.0 * 200.0 / 6.283185307179586; // m
+	double gravity = 3.711; // m/s2
+	double omega = 7.088e-5; // rad/s
+	double sol_s = 88775.0; // s, mean solar day
+	double year_sols = 668.6;
+	double obliquity_deg = 25.19;
+	double eccentricity = 0.0934;
+	double perihelion_ls = 251.0; // deg
+	double solar_flux = 586.0; // W/m2 at mean distance
+	// atmosphere
+	double scale_height = 10800.0; // m
+	double datum_pressure = 708.0; // Pa, with empty caps
+	double equivalent_depth = 3000.0; // m, shallow water
+	double r_gas = 191.8; // J/kg/K
+	double cp_air = 744.0; // J/kg/K
+	// soil: diurnal skin sqrt(sol / 2 pi) and the annual slab's
+	// sqrt(year_sols), as mors rounded them for Mars
+	double diurnal_skin = 118.9;
+	double deep_ratio = 25.9;
+	// grid
+	int gw = 356;
+	int gh = 178;
+	int ln = 160; // fine window cells a side
+	double px_per_turn = 106496.0;
+	double lcell_px = 12.5; // fine window cell, planet px
+
+	static GcmConfig mars() { return GcmConfig(); }
+};
+
 // mors's reduced Mars atmosphere (scripts/mars_atmosphere.gd,
 // physics in its RESEARCH_ATMOSPHERE.md), ported step for step:
-// forced shallow water on a 356 x 178 lat-lon grid, advected
-// vapour, three ice layers and two dust classes, a surface
-// energy balance, the CO2 and water cycles, dust lifting and
-// settling. Row j = 0 is the north pole edge; column i = 0 is
-// longitude -180. Winds: u east, v south (the grid is y-down).
+// forced shallow water on a lat-lon grid, advected vapour, three
+// ice layers and two dust classes, a surface energy balance,
+// the CO2 and water cycles, dust lifting and settling. The body
+// comes from GcmConfig; the column physics is Mars's. Row j = 0
+// is the north pole edge; column i = 0 is longitude -180.
+// Winds: u east, v south (the grid is y-down).
 class Gcm {
 public:
-	static constexpr int GW = 356;
-	static constexpr int GH = 178;
-	static constexpr int N = GW * GH;
-	static constexpr int LN = 160; // fine window cells a side
-	static constexpr double W_PX = 106496.0; // planet pixels (200 m)
-	static constexpr double H_PX = 53248.0;
-	static constexpr double GCELL_PX = W_PX / GW;
-	static constexpr double LCELL_PX = 12.5;
 	static constexpr double DT = 120.0; // s per step
-	static constexpr double SOL_S = 88775.0;
-	static constexpr double SOL_HOURS = 24.6597;
-	static constexpr double YEAR_SOLS = 668.6;
 	static constexpr double SURF_WIND = 0.55;
 	static constexpr double TAU_FLOOR = 0.10;
 	static constexpr double TAU_PER_DUST = 2.6;
-	static constexpr double R_GAS = 191.8;
+
+	explicit Gcm(const GcmConfig &p_config = GcmConfig::mars());
+	const GcmConfig &config() const { return cfg_; }
 
 	struct Inputs {
 		double ls = 40.0; // degrees
 		double mtc = 12.0; // hours at longitude 0
-		double year_sols = YEAR_SOLS; // the season clock
+		double year_sols = -1.0; // the season clock; < 0: real
 		// harness controls (mors's defaults)
 		double dust_k = -1.0; // < 0: follow the season clock
 		double edge_k = -1.0;
@@ -67,9 +93,9 @@ public:
 	double local_org_y() const { return l_org_[1]; }
 
 	// bilinear sample of a grid field at a planet pixel
-	static double sample(const Field &p_f, double p_px, double p_py);
-	static void fold_px(double &r_px, double &r_py);
-	static int index(double p_px, double p_py);
+	double sample(const Field &p_f, double p_px, double p_py) const;
+	void fold_px(double &r_px, double &r_py) const;
+	int index(double p_px, double p_py) const;
 
 	// RGBA8 packs the renderer decodes (mors's scales)
 	void pack_local(std::vector<uint8_t> &r_out) const;
@@ -96,6 +122,14 @@ public:
 	// fine window state
 	std::array<Field, 3> l_qc;
 	Field l_dust;
+
+	// derived from the config (mors's names, now per body)
+	const GcmConfig cfg_;
+	const int GW, GH, N, LN;
+	const double W_PX, H_PX, GCELL_PX, GCELL_M, LCELL_PX;
+	const double SOL_S, SOL_HOURS, YEAR_SOLS, OMEGA, OMEGA_SOL, GRAV, OBLIQUITY, ECC, PERI_LS, S_MARS;
+	const double H_MEAN, SCALE_H, P_DATUM_MAX, R_GAS, CP_AIR, RHO_H;
+	const double R_DRAG, R_HEAT, C_DIURNAL, DEEP_RATIO, TT_MEAN_TAU;
 
 private:
 	void step_waves(const Inputs &p_in);

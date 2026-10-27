@@ -8,6 +8,7 @@ using namespace godot;
 using regolith::Gcm;
 
 void RegolithGcm::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("configure", "config"), &RegolithGcm::configure);
 	ClassDB::bind_method(D_METHOD("create", "topo", "luminance", "ls", "threads"), &RegolithGcm::create);
 	ClassDB::bind_method(D_METHOD("step", "inputs", "spinup"), &RegolithGcm::step);
 	ClassDB::bind_method(D_METHOD("get_field", "name"), &RegolithGcm::get_field);
@@ -42,8 +43,38 @@ Gcm::Field *RegolithGcm::field_of(Gcm &p_g, const String &p_name) {
 	return nullptr;
 }
 
+regolith::GcmConfig RegolithGcm::config_from(const Dictionary &p_d) {
+	regolith::GcmConfig c = regolith::GcmConfig::mars();
+	c.radius = double(p_d.get("radius", c.radius));
+	c.gravity = double(p_d.get("gravity", c.gravity));
+	c.omega = double(p_d.get("omega", c.omega));
+	c.sol_s = double(p_d.get("sol_s", c.sol_s));
+	c.year_sols = double(p_d.get("year_sols", c.year_sols));
+	c.obliquity_deg = double(p_d.get("obliquity_deg", c.obliquity_deg));
+	c.eccentricity = double(p_d.get("eccentricity", c.eccentricity));
+	c.perihelion_ls = double(p_d.get("perihelion_ls", c.perihelion_ls));
+	c.solar_flux = double(p_d.get("solar_flux", c.solar_flux));
+	c.scale_height = double(p_d.get("scale_height", c.scale_height));
+	c.datum_pressure = double(p_d.get("datum_pressure", c.datum_pressure));
+	c.equivalent_depth = double(p_d.get("equivalent_depth", c.equivalent_depth));
+	c.r_gas = double(p_d.get("r_gas", c.r_gas));
+	c.cp_air = double(p_d.get("cp_air", c.cp_air));
+	c.diurnal_skin = double(p_d.get("diurnal_skin", c.diurnal_skin));
+	c.deep_ratio = double(p_d.get("deep_ratio", c.deep_ratio));
+	c.gw = int(p_d.get("gw", c.gw));
+	c.gh = int(p_d.get("gh", c.gh));
+	c.ln = int(p_d.get("ln", c.ln));
+	c.px_per_turn = double(p_d.get("px_per_turn", c.px_per_turn));
+	c.lcell_px = double(p_d.get("lcell_px", c.lcell_px));
+	return c;
+}
+
+void RegolithGcm::configure(const Dictionary &p_config) {
+	gcm_ = std::make_unique<Gcm>(config_from(p_config));
+}
+
 void RegolithGcm::create(const PackedFloat32Array &p_topo, const PackedFloat32Array &p_lum, double p_ls, int p_threads) {
-	gcm_->create(p_topo.size() == Gcm::N ? p_topo.ptr() : nullptr, p_lum.size() == Gcm::N ? p_lum.ptr() : nullptr, p_ls,
+	gcm_->create(p_topo.size() == gcm_->N ? p_topo.ptr() : nullptr, p_lum.size() == gcm_->N ? p_lum.ptr() : nullptr, p_ls,
 			p_threads);
 }
 
@@ -51,7 +82,7 @@ Gcm::Inputs RegolithGcm::inputs_from(const Dictionary &p_d) {
 	Gcm::Inputs in;
 	in.ls = double(p_d.get("ls", 40.0));
 	in.mtc = double(p_d.get("mtc", 12.0));
-	in.year_sols = double(p_d.get("year_sols", Gcm::YEAR_SOLS));
+	in.year_sols = double(p_d.get("year_sols", -1.0));
 	in.dust_k = double(p_d.get("dust_k", -1.0));
 	in.edge_k = double(p_d.get("edge_k", -1.0));
 	in.front_wind = double(p_d.get("front_wind", -1.0));

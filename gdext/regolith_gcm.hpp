@@ -17,6 +17,9 @@ class RegolithGcm : public RefCounted {
 	GDCLASS(RegolithGcm, RefCounted)
 
 public:
+	// Body and grid parameters (GcmConfig names); Mars when unset.
+	void configure(const Dictionary &p_config);
+	static regolith::GcmConfig config_from(const Dictionary &p_config);
 	void create(const PackedFloat32Array &p_topo, const PackedFloat32Array &p_lum, double p_ls, int p_threads);
 	void step(const Dictionary &p_inputs, bool p_spinup);
 	PackedFloat32Array get_field(const String &p_name) const;

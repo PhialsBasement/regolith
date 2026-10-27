@@ -19,41 +19,20 @@ constexpr double PI = std::numbers::pi;
 constexpr double TAU = 2.0 * PI;
 constexpr double DEG = PI / 180.0;
 
-constexpr int GW = Gcm::GW;
-constexpr int GH = Gcm::GH;
-constexpr int N = Gcm::N;
-constexpr int LN = Gcm::LN;
-constexpr double GCELL_M = Gcm::GCELL_PX * 200.0;
-constexpr double SOL_S = Gcm::SOL_S;
+// Body and grid constants are members, from GcmConfig; what
+// stays here is Mars's column physics.
 constexpr double DT = Gcm::DT;
-constexpr double OMEGA = 7.088e-5;
-constexpr double GRAV = 3.711;
-constexpr double H_MEAN = 3000.0;
-constexpr double R_DRAG = 1.0 / (1.1 * SOL_S);
 constexpr double SURF_WIND = Gcm::SURF_WIND;
-constexpr double R_HEAT = 1.0 / (1.0 * SOL_S);
 constexpr double TOPO_ALPHA = 0.02;
-constexpr double ECC = 0.0934;
-constexpr double PERI_LS = 251.0;
-constexpr double SCALE_H = 10800.0;
 constexpr double TAU_FLOOR = Gcm::TAU_FLOOR;
 constexpr double TAU_PER_DUST = Gcm::TAU_PER_DUST;
 constexpr double PACK_CLOUD_MAX = 1.5;
 constexpr double PACK_DUST_MAX = 2.0;
-constexpr double S_MARS = 586.0;
 constexpr double SIGMA = 5.670e-8;
 constexpr double EMIS = 0.97;
-constexpr double CP_AIR = 744.0;
-constexpr double R_GAS = Gcm::R_GAS;
-constexpr double P_DATUM_MAX = 708.0;
-constexpr double RHO_H = P_DATUM_MAX / GRAV / H_MEAN;
 constexpr double L_CO2 = 5.9e5;
 constexpr double T_REF = 200.0;
-constexpr double C_DIURNAL = 118.9;
-constexpr double DEEP_RATIO = 25.9;
-constexpr double OMEGA_SOL = TAU / SOL_S;
 constexpr double TIDE_GROUND_W = 0.09;
-constexpr double TT_MEAN_TAU = 3.0 * SOL_S;
 constexpr double TT_ANOM_MAX = 40.0;
 constexpr double MEAN_STATE_W = 0.6;
 constexpr double MEAN_STATE_MAX = 30.0;
@@ -192,18 +171,18 @@ double frost_point(double p_p) {
 	return 3182.48 / (27.9546 - std::log(std::max(p_p, 1.0)));
 }
 
-double white_flux(double p_tau_s, double p_rho) {
+double white_flux(double p_tau_s, double p_rho, double p_grav) {
 	if (p_tau_s <= TAU_STAR) {
 		return 0.0;
 	}
 	const double r = std::sqrt(TAU_STAR / p_tau_s);
-	return 2.61 * (p_tau_s / GRAV) * std::sqrt(p_tau_s / p_rho) * (1.0 - r) * (1.0 + r) * (1.0 + r);
+	return 2.61 * (p_tau_s / p_grav) * std::sqrt(p_tau_s / p_rho) * (1.0 - r) * (1.0 + r) * (1.0 + r);
 }
 
-double t_equilibrium(double p_lat, double p_dec, double p_flux, double p_alb) {
+double t_equilibrium(double p_lat, double p_dec, double p_flux, double p_alb, double p_solar) {
 	const double cosh0 = clampd(-std::tan(p_lat) * std::tan(p_dec), -1.0, 1.0);
 	const double h0 = std::acos(cosh0);
-	const double q = S_MARS * p_flux / PI *
+	const double q = p_solar * p_flux / PI *
 			(std::sin(p_lat) * std::sin(p_dec) * h0 + std::cos(p_lat) * std::cos(p_dec) * std::sin(h0));
 	const double t4 = std::max((1.0 - p_alb) * 0.88 * q, 2.0) / (0.85 * EMIS * SIGMA);
 	return clampd(std::pow(t4, 0.25), 145.0, 265.0);
@@ -243,7 +222,41 @@ void Gcm::rows(F &&p_fn) {
 	}
 }
 
-void Gcm::fold_px(double &r_px, double &r_py) {
+Gcm::Gcm(const GcmConfig &p_config) :
+		cfg_(p_config),
+		GW(p_config.gw),
+		GH(p_config.gh),
+		N(p_config.gw * p_config.gh),
+		LN(p_config.ln),
+		W_PX(p_config.px_per_turn),
+		H_PX(p_config.px_per_turn * 0.5),
+		GCELL_PX(p_config.px_per_turn / p_config.gw),
+		// metres per cell along the equator
+		GCELL_M(TAU * p_config.radius / p_config.gw),
+		LCELL_PX(p_config.lcell_px),
+		SOL_S(p_config.sol_s),
+		SOL_HOURS(p_config.sol_s / 3600.0),
+		YEAR_SOLS(p_config.year_sols),
+		OMEGA(p_config.omega),
+		OMEGA_SOL(TAU / p_config.sol_s),
+		GRAV(p_config.gravity),
+		OBLIQUITY(p_config.obliquity_deg),
+		ECC(p_config.eccentricity),
+		PERI_LS(p_config.perihelion_ls),
+		S_MARS(p_config.solar_flux),
+		H_MEAN(p_config.equivalent_depth),
+		SCALE_H(p_config.scale_height),
+		P_DATUM_MAX(p_config.datum_pressure),
+		R_GAS(p_config.r_gas),
+		CP_AIR(p_config.cp_air),
+		RHO_H(p_config.datum_pressure / p_config.gravity / p_config.equivalent_depth),
+		R_DRAG(1.0 / (1.1 * p_config.sol_s)),
+		R_HEAT(1.0 / (1.0 * p_config.sol_s)),
+		C_DIURNAL(p_config.diurnal_skin),
+		DEEP_RATIO(p_config.deep_ratio),
+		TT_MEAN_TAU(3.0 * p_config.sol_s) {}
+
+void Gcm::fold_px(double &r_px, double &r_py) const {
 	const double m = fposmod(r_py, 2.0 * H_PX);
 	if (m >= H_PX) {
 		r_px += W_PX * 0.5;
@@ -253,14 +266,14 @@ void Gcm::fold_px(double &r_px, double &r_py) {
 	}
 }
 
-int Gcm::index(double p_px, double p_py) {
+int Gcm::index(double p_px, double p_py) const {
 	fold_px(p_px, p_py);
 	const int i = posmodi(int(p_px / GCELL_PX), GW);
 	const int j = std::clamp(int(p_py / GCELL_PX), 0, GH - 1);
 	return j * GW + i;
 }
 
-double Gcm::sample(const Field &p_f, double p_px, double p_py) {
+double Gcm::sample(const Field &p_f, double p_px, double p_py) const {
 	fold_px(p_px, p_py);
 	const double fx = wrapd(p_px / GCELL_PX - 0.5, 0.0, double(GW));
 	const double fy = clampd(p_py / GCELL_PX - 0.5, 0.0, double(GH) - 1.001);
@@ -344,7 +357,7 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 	const Basin basins[5] = { { -42.0, 70.0, 12.0, 2.4 }, { -50.0, -43.0, 9.0, 2.0 }, { 25.0, -40.0, 9.0, 1.8 },
 		{ -26.0, -90.0, 10.0, 2.0 }, { 12.0, 87.0, 8.0, 1.6 } };
 	const double ls_rad = p_ls * DEG;
-	const double dec = std::asin(std::sin(25.19 * DEG) * std::sin(ls_rad));
+	const double dec = std::asin(std::sin(OBLIQUITY * DEG) * std::sin(ls_rad));
 	const double flux = std::pow((1.0 + ECC * std::cos(ls_rad - PERI_LS * DEG)) / (1.0 - ECC * ECC), 2.0);
 	double msum = 0.0, asum = 0.0;
 	for (int j = 0; j < GH; ++j) {
@@ -373,7 +386,7 @@ void Gcm::create(const float *p_topo, const float *p_lum, double p_ls, int p_thr
 			co2[k] = float(cap_mass(lat_eff, p_ls, latv > 0.0));
 			msum += co2[k] * carea_[size_t(j)];
 			asum += carea_[size_t(j)];
-			const double teq = t_equilibrium(lat_r_[size_t(j)], dec, flux, alb[k]);
+			const double teq = t_equilibrium(lat_r_[size_t(j)], dec, flux, alb[k], S_MARS);
 			ts[k] = float(teq);
 			tdeep[k] = float(teq);
 			tmean[k] = float(teq);
@@ -657,12 +670,12 @@ void Gcm::shift_profile(Field &r_arr, const std::vector<double> &p_had_up, doubl
 // cycles, dust lifting and settling
 void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 	const double ls_rad = p_in.ls * DEG;
-	const double subsolar_lat = std::asin(std::sin(25.19 * DEG) * std::sin(ls_rad));
+	const double subsolar_lat = std::asin(std::sin(OBLIQUITY * DEG) * std::sin(ls_rad));
 	const double ssl = (0.5 - p_in.mtc / SOL_HOURS) * TAU;
 	const double cs = std::cos(ssl), sn = std::sin(ssl);
 	const double flux = std::pow((1.0 + ECC * std::cos(ls_rad - PERI_LS * DEG)) / (1.0 - ECC * ECC), 2.0);
 	const double sdec = std::sin(subsolar_lat), cdec = std::cos(subsolar_lat);
-	const double season_k = YEAR_SOLS / std::max(p_in.year_sols, 1.0);
+	const double season_k = p_in.year_sols > 0.0 ? YEAR_SOLS / std::max(p_in.year_sols, 1.0) : 1.0;
 	const double dust_k = p_in.dust_k >= 0.0 ? p_in.dust_k : season_k;
 	const double edge_gain = p_in.edge_k >= 0.0 ? p_in.edge_k : EDGE_K;
 	const double front_wind = p_in.front_wind >= 0.0 ? p_in.front_wind : FRONT_WIND;
@@ -693,7 +706,7 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 	const double cap_sc = cap_scale;
 	const double s_sum = subsolar_lat > 0.0 ? 1.0 : -1.0;
 	const double peak_hemi = subsolar_lat > 0.0 ? 0.55 : 1.0;
-	const double tilt = std::pow(std::fabs(std::sin(subsolar_lat)) / std::sin(25.19 * DEG), 1.5);
+	const double tilt = std::pow(std::fabs(std::sin(subsolar_lat)) / std::sin(OBLIQUITY * DEG), 1.5);
 	const double had_s = (HAD_EQUINOX + (peak_hemi - HAD_EQUINOX) * tilt) * clampd(1.0 + had_dust_k * (tau_glob - 0.3), 1.0, 2.1);
 	std::vector<double> ubar(GH), vbar(GH), had_u(GH), had_v(GH), had_up(GH);
 	for (int j = 0; j < GH; ++j) {
@@ -976,7 +989,7 @@ void Gcm::step_tracers(const Inputs &p_in, bool p_spinup) {
 				double lift_kg = 0.0, tail_kg = 0.0;
 				for (int q = 0; q < 8; ++q) {
 					const double vq = ust * wq[q];
-					const double fq = white_flux(rho * vq * vq, rho);
+					const double fq = white_flux(rho * vq * vq, rho, GRAV);
 					lift_kg += fq;
 					if (q >= 6) {
 						tail_kg += fq;
