@@ -7,6 +7,7 @@
 #include <godot_cpp/variant/array.hpp>
 #include <godot_cpp/variant/dictionary.hpp>
 #include <godot_cpp/variant/node_path.hpp>
+#include <godot_cpp/variant/packed_float64_array.hpp>
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/transform3d.hpp>
 #include <godot_cpp/variant/vector2.hpp>
@@ -18,26 +19,48 @@ namespace godot {
 
 class Camera3D;
 class CanvasLayer;
+class Node3D;
 class RegolithBody;
+class RegolithVessel;
 class SubViewport;
 
-// Floating origin in the frame of the body with the nearest
-// surface; re-anchoring or switching bodies is one invisible
-// rigid transform. Also runs the clock, gravity and cameras.
+// Owns the reference frame everything is simulated in (see
+// docs/frames.md): a body-centred frame that turns with the
+// body near its surface and is inertial above it, a floating
+// origin, and a floating velocity. Also the clock, gravity,
+// vessels on rails and the camera passes.
 class RegolithSystem : public Node {
 	GDCLASS(RegolithSystem, Node)
 
 public:
+	struct Pose {
+		regolith::DVec3 position; // ICRF, central-body centred
+		regolith::DVec3 velocity;
+		regolith::DVec3 axes[3]; // body-fixed axes, ICRF columns
+		regolith::DVec3 omega; // angular velocity, ICRF
+		regolith::DVec3 omega_dot;
+	};
+	struct State {
+		regolith::DVec3 x; // ICRF, central-body centred
+		regolith::DVec3 v;
+	};
+
 	RegolithSystem();
 	void _ready() override;
 	void _process(double p_delta) override;
 	void _physics_process(double p_delta) override;
 
-	// The render frame expressed in p_body's own fixed axes.
+	// The render frame expressed in p_body's fixed axes.
 	regolith::RenderFrame frame_for(const RegolithBody *p_body) const;
-	// Changes whenever frame_for(p_body) does.
-	uint64_t frame_version(const RegolithBody *p_body) const;
+	// Bumps whenever the frame is rebuilt (re-anchor, switch).
+	uint64_t rebuild_count() const { return uint64_t(rebases_); }
 	RegolithBody *dominant() const { return dominant_; }
+	bool is_parked(const Node *p_node) const;
+	const Pose &pose_of(const RegolithBody *p_body) const;
+	State to_state(const Vector3 &p_pos, const Vector3 &p_vel) const;
+	void from_state(const State &p_s, Vector3 &r_pos, Vector3 &r_vel) const;
+	// Spin of p_body as seen in the render frame.
+	Vector3 render_angular_velocity(const RegolithBody *p_body) const;
 
 	String get_version() const;
 	Dictionary self_test() const;
@@ -62,31 +85,61 @@ public:
 	Vector3 get_sun_direction() const;
 	double get_sun_visible() const { return sun_visible_; }
 	Vector3 get_gravity(const Vector3 &p_pos) const;
+	Vector3 get_acceleration(const Vector3 &p_pos, const Vector3 &p_vel) const;
 	Vector3 get_up(const Vector3 &p_pos) const;
 	Vector2 get_latlon(const Vector3 &p_pos) const;
 	double get_altitude(const Vector3 &p_pos) const;
 	double get_ground_clearance(const Vector3 &p_pos) const;
 	double get_radius(const Vector3 &p_pos) const;
 	String get_dominant_name() const;
+	bool get_frame_rotating() const { return rotating_; }
+	Vector3 get_frame_velocity() const;
 	Array get_bodies_info(const Vector3 &p_pos) const;
 	Vector3 get_body_position(const String &p_name) const;
+	Dictionary get_orbit_info(Node *p_node) const;
+	PackedFloat64Array get_inertial_state(Node *p_node) const;
+	void put_in_orbit(Node *p_node, const String &p_body, double p_altitude, double p_inclination_deg);
+	// At rest relative to p_body's surface, p_height above it.
+	void put_near(Node *p_node, const String &p_body, double p_lat_deg, double p_lon_deg, double p_height);
 	int get_rebase_count() const { return rebases_; }
+	int get_shift_count() const { return shifts_; }
 
 protected:
 	static void _bind_methods();
 
 private:
-	struct Pose {
-		regolith::DVec3 position; // ICRF, central-body centred
-		regolith::DVec3 axes[3]; // body-fixed axes as ICRF columns
+	struct Live {
+		Node3D *node;
+		State s;
+		Basis basis_icrf;
+		Vector3 omega_icrf;
 	};
 
 	void anchor_at_start();
 	void update_poses();
-	const Pose &pose_of(const RegolithBody *p_body) const;
-	regolith::DVec3 to_inertial(const Vector3 &p_render) const;
-	regolith::DVec3 inertial_vec_to_render(const regolith::DVec3 &p_v) const;
-	void re_anchor(RegolithBody *p_body, const regolith::DVec3 &p_inertial);
+	const regolith::DVec3 *ref_axes() const;
+	regolith::DVec3 ref_omega() const;
+	regolith::DVec3 ref_omega_dot() const;
+	Basis render_to_icrf() const;
+	regolith::DVec3 field(const regolith::DVec3 &p_x, const RegolithBody *p_skip) const;
+	regolith::DVec3 accel_icrf(const State &p_s, bool p_coriolis) const;
+	regolith::DVec3 body_point(const RegolithBody *p_body, const Vector3 &p_pos) const;
+	RegolithBody *nearest_surface(const regolith::DVec3 &p_x) const;
+	double clearance(const RegolithBody *p_b, const regolith::DVec3 &p_x) const;
+
+	Node3D *focus_node() const;
+	bool node_state(Node3D *p_node, State &r_s) const;
+	void rebuild_frame(RegolithBody *p_body, bool p_rotating, const State &p_focus, Node3D *p_focus_node);
+	std::vector<Live> capture_live() const;
+	void restore_live(const std::vector<Live> &p_live);
+	void manage_frame(Node3D *p_focus);
+	void floating_velocity(Node3D *p_focus);
+	void update_vessels(Node3D *p_focus, double p_delta);
+	void park(RegolithVessel *p_vessel, Node3D *p_node);
+	void unpark(RegolithVessel *p_vessel, Node3D *p_node);
+	State parked_state(const RegolithVessel *p_vessel) const;
+	void place_parked(RegolithVessel *p_vessel, Node3D *p_node);
+
 	void setup_passes();
 	void update_passes(Camera3D *p_cam);
 	void update_sun();
@@ -101,12 +154,16 @@ private:
 	double time_ = 0.0; // TT seconds since J2000
 
 	std::vector<RegolithBody *> bodies_;
-	RegolithBody *dominant_ = nullptr;
 	std::unordered_map<const RegolithBody *, Pose> poses_;
-	uint64_t pose_counter_ = 0;
-	regolith::RenderFrame frame_; // in dominant_'s fixed axes
+	RegolithBody *dominant_ = nullptr;
+	bool rotating_ = true;
+	regolith::DVec3 frozen_[3]; // ref axes while inertial
+	regolith::DVec3 frame_velocity_; // ref coords, m/s
+	regolith::RenderFrame frame_; // ref coords
 	bool anchored_ = false;
 	int rebases_ = 0;
+	int shifts_ = 0;
+	Node3D *last_focus_ = nullptr;
 
 	SubViewport *far_view_ = nullptr;
 	Camera3D *far_camera_ = nullptr;

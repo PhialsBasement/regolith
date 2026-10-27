@@ -7,6 +7,7 @@
 #include "regolith_body.hpp"
 #include "regolith_collider.hpp"
 #include "regolith_system.hpp"
+#include "regolith_vessel.hpp"
 
 using namespace godot;
 
@@ -19,6 +20,7 @@ void initialize_regolith(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(RegolithSystem);
 	GDREGISTER_CLASS(RegolithBody);
 	GDREGISTER_CLASS(RegolithCollider);
+	GDREGISTER_CLASS(RegolithVessel);
 }
 
 void uninitialize_regolith(ModuleInitializationLevel p_level) {

@@ -70,7 +70,8 @@ void vertex() {
 	vec3 p = u_center.xyz + offset_of(ij, texel(layer, ivec2(ij)), dir);
 	// Morph by distance to the MAIN camera, also in shadow passes.
 	vec3 eye = MAIN_CAM_INV_VIEW_MATRIX[3].xyz;
-	float morph = clamp((distance(p, eye) - u_misc.w) / max(u_pages.w - u_misc.w, 1e-3), 0.0, 1.0);
+	vec3 p_world = (MODEL_MATRIX * vec4(p, 1.0)).xyz;
+	float morph = clamp((distance(p_world, eye) - u_misc.w) / max(u_pages.w - u_misc.w, 1e-3), 0.0, 1.0);
 	vec2 gm = g - mod(g, 2.0) * morph;
 	vec2 ijm = gm * step;
 	vec2 pij = (vec2(float(quadrant & 1), float(quadrant >> 1)) * float(intervals) + ijm) * 0.5;
@@ -106,5 +107,5 @@ void fragment() {
 	}
 	ALBEDO = albedo;
 	ROUGHNESS = 0.93;
-	NORMAL = normalize((VIEW_MATRIX * vec4(n, 0.0)).xyz);
+	NORMAL = normalize((VIEW_MATRIX * (MODEL_MATRIX * vec4(n, 0.0))).xyz);
 }

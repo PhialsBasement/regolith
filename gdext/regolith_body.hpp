@@ -43,7 +43,13 @@ public:
 	double r_ref() const { return source_.r_ref(); }
 	// Centre (m, ICRF, relative to the central body) and the
 	// body-fixed axes as ICRF columns, at TT seconds p_t.
-	void pose(double p_t, regolith::DVec3 &r_position, regolith::DVec3 r_axes[3]) const;
+	void pose(double p_t, regolith::DVec3 &r_position, regolith::DVec3 &r_velocity, regolith::DVec3 r_axes[3]) const;
+	void set_j2(double p_v) { j2_ = p_v; }
+	double get_j2() const { return j2_; }
+	void set_j2_radius(double p_v) { j2_radius_ = p_v; }
+	double get_j2_radius() const { return j2_radius_; }
+	void set_rotating_altitude(double p_v) { rotating_altitude_ = p_v; }
+	double get_rotating_altitude() const { return rotating_altitude_; }
 	// Surface radius under a direction; p_exact produces the
 	// finest tile synchronously, otherwise the deepest cached.
 	double surface_radius(const regolith::DVec3 &p_dir, bool p_exact);
@@ -98,7 +104,8 @@ private:
 		bool fine = false;
 		int self_layer = -1;
 		int parent_layer = -1;
-		uint64_t frame_version = UINT64_MAX;
+		uint64_t push_id = 0;
+		uint64_t xform_id = 0;
 		bool shadow = false;
 		uint64_t seen = 0;
 	};
@@ -111,7 +118,7 @@ private:
 	void draw(const std::vector<regolith::SelectedNode> &p_nodes);
 	void update_collision();
 	bool build_patch(uint64_t p_id, regolith::TileKey p_tile, int p_bx, int p_by);
-	void place_patch(Patch &r_patch) const;
+	void place_patch(Patch &r_patch, bool p_teleport) const;
 	void free_render_resources();
 
 	String pack_path_;
@@ -120,6 +127,9 @@ private:
 	NodePath system_path_;
 	double gm_ = 4.282837e13;
 	int rotation_model_ = ROTATION_MARS_IAU;
+	double j2_ = 1.96045e-3;
+	double j2_radius_ = 3396200.0;
+	double rotating_altitude_ = 100000.0;
 	regolith::OrbitTable orbit_;
 	bool has_orbit_ = false;
 	int max_level_ = 15;
@@ -153,9 +163,19 @@ private:
 	uint64_t frame_ = 0;
 	double occluder_radius_ = 0.0;
 
+	// Node constants are pushed in push_frame_; each frame one
+	// shared instance transform carries them into the current
+	// render frame, so a moving frame costs no re-push.
+	regolith::RenderFrame push_frame_;
+	bool push_valid_ = false;
+	uint64_t push_rebuild_ = 0;
+	uint64_t push_id_ = 0;
+	Transform3D push_xform_;
+	uint64_t xform_id_ = 0;
+
 	std::unordered_map<uint64_t, Patch> patches_;
 	uint64_t physics_tick_ = 0;
-	uint64_t last_rebase_seen_ = 0;
+	uint64_t patch_rebuild_ = 0;
 
 	// stats
 	int stat_nodes_ = 0;

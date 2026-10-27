@@ -98,6 +98,12 @@ void RegolithBody::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_orbit_path"), &RegolithBody::get_orbit_path);
 	ClassDB::bind_method(D_METHOD("set_rotation_model", "model"), &RegolithBody::set_rotation_model);
 	ClassDB::bind_method(D_METHOD("get_rotation_model"), &RegolithBody::get_rotation_model);
+	ClassDB::bind_method(D_METHOD("set_j2", "j2"), &RegolithBody::set_j2);
+	ClassDB::bind_method(D_METHOD("get_j2"), &RegolithBody::get_j2);
+	ClassDB::bind_method(D_METHOD("set_j2_radius", "metres"), &RegolithBody::set_j2_radius);
+	ClassDB::bind_method(D_METHOD("get_j2_radius"), &RegolithBody::get_j2_radius);
+	ClassDB::bind_method(D_METHOD("set_rotating_altitude", "metres"), &RegolithBody::set_rotating_altitude);
+	ClassDB::bind_method(D_METHOD("get_rotating_altitude"), &RegolithBody::get_rotating_altitude);
 	ClassDB::bind_method(D_METHOD("set_max_level", "level"), &RegolithBody::set_max_level);
 	ClassDB::bind_method(D_METHOD("get_max_level"), &RegolithBody::get_max_level);
 	ClassDB::bind_method(D_METHOD("set_collision_level", "level"), &RegolithBody::set_collision_level);
@@ -119,6 +125,9 @@ void RegolithBody::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "orbit_path", PROPERTY_HINT_FILE, "*.rge"), "set_orbit_path", "get_orbit_path");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "rotation_model", PROPERTY_HINT_ENUM, "Mars IAU,Synchronous"), "set_rotation_model",
 			"get_rotation_model");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "j2"), "set_j2", "get_j2");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "j2_radius"), "set_j2_radius", "get_j2_radius");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "rotating_altitude"), "set_rotating_altitude", "get_rotating_altitude");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "max_level"), "set_max_level", "get_max_level");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "collision_level"), "set_collision_level", "get_collision_level");
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "quads"), "set_quads", "get_quads");
@@ -441,7 +450,29 @@ void RegolithBody::draw(const std::vector<regolith::SelectedNode> &p_nodes) {
 	const regolith::TileLayout lay = source_.layout();
 	const RID scenario = get_world_3d()->get_scenario();
 	const Vector3 cam = get_viewport()->get_camera_3d()->get_global_position();
-	const uint64_t version = sys->frame_version(this);
+
+	// Re-push node constants only when the frame was rebuilt or
+	// has drifted far from the push frame; otherwise the shared
+	// instance transform follows the frame.
+	Transform3D xf;
+	if (push_valid_) {
+		xf.basis = regolith::basis_between(f, push_frame_);
+		xf.origin = regolith::to_v(f.to_local_point(push_frame_.anchor));
+	}
+	const bool drifted = xf.origin.length() > 5000.0 ||
+			(xf.basis.get_column(0) - Vector3(1, 0, 0)).length() > 0.01 ||
+			(xf.basis.get_column(1) - Vector3(0, 1, 0)).length() > 0.01;
+	if (!push_valid_ || push_rebuild_ != sys->rebuild_count() || drifted) {
+		push_frame_ = f;
+		push_valid_ = true;
+		push_rebuild_ = sys->rebuild_count();
+		++push_id_;
+		xf = Transform3D();
+	}
+	if (!xf.is_equal_approx(push_xform_) || xform_id_ == 0) {
+		push_xform_ = xf;
+		++xform_id_;
+	}
 	for (const regolith::SelectedNode &n : p_nodes) {
 		const int level = n.key.level();
 		const bool fine = level >= max_level_ - 1;
@@ -477,34 +508,37 @@ void RegolithBody::draw(const std::vector<regolith::SelectedNode> &p_nodes) {
 				spare.pop_back();
 			} else {
 				d.instance = rs->instance_create2(fine ? mesh_fine_ : mesh_coarse_, scenario);
-				rs->instance_set_transform(d.instance, Transform3D());
 			}
 			found = drawn_.emplace(n.key.bits, d).first;
 		}
 		Drawn &d = found->second;
 		const bool reveal = d.seen == 0;
 		d.seen = frame_;
-		const Vector3 centre = regolith::to_v(f.to_local_point(n.sphere.center));
+		if (d.xform_id != xform_id_) {
+			rs->instance_set_transform(d.instance, push_xform_);
+			d.xform_id = xform_id_;
+		}
+		const Vector3 centre = regolith::to_v(push_frame_.to_local_point(n.sphere.center));
 		const real_t r = real_t(n.sphere.radius);
-		const bool shadow = (centre - cam).length() - r < SHADOW_RANGE;
+		const bool shadow = (push_xform_.xform(centre) - cam).length() - r < SHADOW_RANGE;
 		if (reveal || shadow != d.shadow) {
 			rs->instance_geometry_set_cast_shadows_setting(d.instance,
 					shadow ? RenderingServer::SHADOW_CASTING_SETTING_ON : RenderingServer::SHADOW_CASTING_SETTING_OFF);
 			d.shadow = shadow;
 		}
-		if (d.self_layer == self_layer && d.parent_layer == parent_layer && d.frame_version == version) {
+		if (d.self_layer == self_layer && d.parent_layer == parent_layer && d.push_id == push_id_) {
 			continue;
 		}
 		d.self_layer = self_layer;
 		d.parent_layer = parent_layer;
-		d.frame_version = version;
+		d.push_id = push_id_;
 		const RID inst = d.instance;
 
 		float lo = 0.0f, hi = 0.0f;
 		selector_.rho_bounds(n.key, lo, hi);
 		const double rho_c = 0.5 * (double(lo) + double(hi));
 		const regolith::PatchSpec spec{ n.key, lay.intervals };
-		const regolith::NodeConstants c = regolith::node_constants(spec, source_.r_ref() + rho_c, f);
+		const regolith::NodeConstants c = regolith::node_constants(spec, source_.r_ref() + rho_c, push_frame_);
 		rs->instance_geometry_set_shader_parameter(inst, "u_center", Vector4(c.center.x, c.center.y, c.center.z, c.r_center));
 		rs->instance_geometry_set_shader_parameter(inst, "u_axis_u", Vector4(c.axis_u.x, c.axis_u.y, c.axis_u.z, c.s_c));
 		rs->instance_geometry_set_shader_parameter(inst, "u_axis_v", Vector4(c.axis_v.x, c.axis_v.y, c.axis_v.z, c.t_c));
@@ -557,16 +591,18 @@ void RegolithBody::_enter_tree() {
 	add_to_group("regolith_body");
 }
 
-void RegolithBody::pose(double p_t, DVec3 &r_position, DVec3 r_axes[3]) const {
+void RegolithBody::pose(double p_t, DVec3 &r_position, DVec3 &r_velocity, DVec3 r_axes[3]) const {
 	if (has_orbit_) {
 		const regolith::OrbitState s = orbit_.state(p_t);
 		r_position = s.position;
+		r_velocity = s.velocity;
 		if (rotation_model_ == ROTATION_SYNCHRONOUS) {
 			regolith::synchronous_axes(s, r_axes);
 			return;
 		}
 	} else {
 		r_position = DVec3(0.0, 0.0, 0.0);
+		r_velocity = DVec3(0.0, 0.0, 0.0);
 	}
 	r_axes[0] = regolith::mars_body_to_inertial(p_t, DVec3(1.0, 0.0, 0.0));
 	r_axes[1] = regolith::mars_body_to_inertial(p_t, DVec3(0.0, 1.0, 0.0));
@@ -588,7 +624,7 @@ void RegolithBody::update_collision() {
 	for (int i = 0; i < colliders.size(); ++i) {
 		RegolithCollider *c = Object::cast_to<RegolithCollider>(colliders[i]);
 		Node3D *anchor = c ? Object::cast_to<Node3D>(c->get_parent()) : nullptr;
-		if (!anchor) {
+		if (!anchor || sys->is_parked(anchor)) {
 			continue;
 		}
 		Vector3 vel;
@@ -649,11 +685,13 @@ void RegolithBody::update_collision() {
 			++it;
 		}
 	}
-	if (uint64_t(sys->get_rebase_count()) != last_rebase_seen_) {
-		last_rebase_seen_ = uint64_t(sys->get_rebase_count());
-		for (auto &entry : patches_) {
-			place_patch(entry.second);
-		}
+	// The frame may move or turn every tick (floating velocity,
+	// inertial mode), so the ground is re-placed every tick; a
+	// rebuilt frame is a teleport, not motion.
+	const bool rebuilt = sys->rebuild_count() != patch_rebuild_;
+	patch_rebuild_ = sys->rebuild_count();
+	for (auto &entry : patches_) {
+		place_patch(entry.second, rebuilt);
 	}
 }
 
@@ -704,23 +742,47 @@ bool RegolithBody::build_patch(uint64_t p_id, TileKey p_tile, int p_bx, int p_by
 	data["backface_collision"] = true;
 	ps->shape_set_data(p.shape, data);
 	p.body = ps->body_create();
-	ps->body_set_mode(p.body, PhysicsServer3D::BODY_MODE_STATIC);
+	// Kinematic: the ground can move through the frame, and
+	// contacts must see that velocity.
+	ps->body_set_mode(p.body, PhysicsServer3D::BODY_MODE_KINEMATIC);
 	ps->body_add_shape(p.body, p.shape);
-	ps->body_set_space(p.body, get_world_3d()->get_space());
 	p.origin = origin;
 	p.used = physics_tick_;
-	place_patch(p);
+	place_patch(p, true);
+	ps->body_set_space(p.body, get_world_3d()->get_space());
 	patches_[p_id] = p;
 	return true;
 }
 
-void RegolithBody::place_patch(Patch &r_patch) const {
-	const regolith::RenderFrame f = system()->frame_for(this);
+void RegolithBody::place_patch(Patch &r_patch, bool p_teleport) const {
+	RegolithSystem *sys = system();
+	const regolith::RenderFrame f = sys->frame_for(this);
 	const regolith::RenderFrame pf = regolith::RenderFrame::at(r_patch.origin);
 	Transform3D xf;
 	xf.basis = regolith::basis_between(f, pf);
 	xf.origin = regolith::to_v(f.to_local_point(r_patch.origin));
-	PhysicsServer3D::get_singleton()->body_set_state(r_patch.body, PhysicsServer3D::BODY_STATE_TRANSFORM, xf);
+	// Velocity of this piece of ground in the render frame.
+	const RegolithSystem::Pose &bp = sys->pose_of(this);
+	RegolithSystem::State s;
+	s.x = bp.position + bp.axes[0] * r_patch.origin.x + bp.axes[1] * r_patch.origin.y + bp.axes[2] * r_patch.origin.z;
+	s.v = bp.velocity + regolith::cross(bp.omega, s.x - bp.position);
+	Vector3 unused, vel;
+	sys->from_state(s, unused, vel);
+	PhysicsServer3D *ps = PhysicsServer3D::get_singleton();
+	// Jolt sweeps a kinematic body to a new transform over the
+	// next step. A rebuilt frame must be a true teleport, done
+	// outside the space, or the sweep bats away whatever is in
+	// its path.
+	const RID space = ps->body_get_space(r_patch.body);
+	if (p_teleport && space.is_valid()) {
+		ps->body_set_space(r_patch.body, RID());
+	}
+	ps->body_set_state(r_patch.body, PhysicsServer3D::BODY_STATE_TRANSFORM, xf);
+	if (p_teleport && space.is_valid()) {
+		ps->body_set_space(r_patch.body, space);
+	}
+	ps->body_set_state(r_patch.body, PhysicsServer3D::BODY_STATE_LINEAR_VELOCITY, vel);
+	ps->body_set_state(r_patch.body, PhysicsServer3D::BODY_STATE_ANGULAR_VELOCITY, sys->render_angular_velocity(this));
 }
 
 bool RegolithBody::is_collision_ready_at(const Vector3 &p_pos) const {

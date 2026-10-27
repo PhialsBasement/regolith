@@ -26,6 +26,7 @@ add_library(regolith_core STATIC
 	core/src/cube.cpp
 	core/src/ephemeris.cpp
 	core/src/height_tile.cpp
+	core/src/kepler.cpp
 	core/src/orbit.cpp
 	core/src/pack.cpp
 	core/src/patch.cpp
@@ -61,6 +62,7 @@ if(REGOLITH_BUILD_TESTS)
 		tests/test_cube.cpp
 		tests/test_ephemeris.cpp
 		tests/test_fold.cpp
+		tests/test_kepler.cpp
 		tests/test_patch.cpp
 		tests/test_select.cpp
 		tests/test_tiles.cpp
@@ -78,6 +80,7 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		gdext/regolith_body.cpp
 		gdext/regolith_collider.cpp
 		gdext/regolith_system.cpp
+		gdext/regolith_vessel.cpp
 	)
 	target_link_libraries(regolith PRIVATE godot::cpp regolith_core)
 	target_compile_options(regolith PRIVATE ${REGOLITH_FP_FLAGS})
