@@ -25,6 +25,7 @@ add_library(regolith_core STATIC
 	core/src/codec.cpp
 	core/src/cube.cpp
 	core/src/ephemeris.cpp
+	core/src/gcm.cpp
 	core/src/height_tile.cpp
 	core/src/horizon.cpp
 	core/src/kepler.cpp
@@ -90,6 +91,7 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		gdext/regolith_atmosphere.cpp
 		gdext/regolith_body.cpp
 		gdext/regolith_collider.cpp
+		gdext/regolith_gcm.cpp
 		gdext/regolith_system.cpp
 		gdext/regolith_vessel.cpp
 	)

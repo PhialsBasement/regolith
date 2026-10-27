@@ -91,6 +91,17 @@ DVec3 earth_heliocentric(double p_seconds) {
 	return heliocentric(EARTH_ELEMENTS, p_seconds);
 }
 
+double mars_solar_longitude(double p_seconds) {
+	const DVec3 r = mars_heliocentric(p_seconds);
+	const DVec3 n = normalize(cross(r, mars_heliocentric(p_seconds + 3600.0) - mars_heliocentric(p_seconds - 3600.0)));
+	const DVec3 pole = mars_body_to_inertial(p_seconds, DVec3(0, 0, 1));
+	// the sun crosses the equator northward along this direction
+	const DVec3 eq = normalize(cross(pole, n));
+	const DVec3 s = normalize(r * -1.0);
+	const double ls = std::atan2(dot(s, cross(n, eq)), dot(s, eq)) * 180.0 / std::numbers::pi;
+	return ls < 0.0 ? ls + 360.0 : ls;
+}
+
 DVec3 galactic_pole() {
 	// RA 192.85948, Dec 27.12825 (ICRF)
 	const double ra = 192.85948 * DEG, dec = 27.12825 * DEG;

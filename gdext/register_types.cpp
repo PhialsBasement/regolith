@@ -6,6 +6,7 @@
 
 #include "regolith_atmosphere.hpp"
 #include "regolith_body.hpp"
+#include "regolith_gcm.hpp"
 #include "regolith_collider.hpp"
 #include "regolith_system.hpp"
 #include "regolith_vessel.hpp"
@@ -23,6 +24,7 @@ void initialize_regolith(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(RegolithCollider);
 	GDREGISTER_CLASS(RegolithVessel);
 	GDREGISTER_CLASS(RegolithAtmosphere);
+	GDREGISTER_CLASS(RegolithGcm);
 }
 
 void uninitialize_regolith(ModuleInitializationLevel p_level) {

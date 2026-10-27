@@ -23,6 +23,10 @@ DVec3 mars_inertial_to_body(double p_seconds, const DVec3 &p_inertial);
 // Unit vector to the sun, Mars body-fixed coordinates.
 DVec3 mars_sun_direction(double p_seconds);
 
+// Areocentric solar longitude Ls, degrees 0..360: the sun's
+// place on Mars's orbit from the northern spring equinox.
+double mars_solar_longitude(double p_seconds);
+
 // Local true solar time (0..24 h) at an east longitude.
 double mars_local_solar_time(double p_seconds, double p_lon_deg);
 

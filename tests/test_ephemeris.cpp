@@ -27,6 +27,40 @@ TEST_CASE(mars_seasons) {
 	CHECK(r > 1.38 && r < 1.67);
 }
 
+namespace {
+
+// Allison and McEwen 2000 (Mars24), eq. B-4 to B-5: an
+// independent Ls from TT days since J2000.
+double ls_mars24(double p_dt) {
+	constexpr double D = std::numbers::pi / 180.0;
+	const double m = (19.3871 + 0.52402073 * p_dt) * D;
+	const double afms = 270.3871 + 0.524038496 * p_dt;
+	constexpr double A[7] = { 0.0071, 0.0057, 0.0039, 0.0037, 0.0021, 0.0020, 0.0018 };
+	constexpr double TAU[7] = { 2.2353, 2.7543, 1.1177, 15.7866, 2.1354, 2.4694, 32.8493 };
+	constexpr double PHI[7] = { 49.409, 168.173, 191.837, 21.736, 15.704, 95.528, 49.095 };
+	double pbs = 0.0;
+	for (int i = 0; i < 7; ++i) {
+		pbs += A[i] * std::cos((0.985626 * p_dt / TAU[i] + PHI[i]) * D);
+	}
+	const double nu_m = (10.691 + 3.0e-7 * p_dt) * std::sin(m) + 0.623 * std::sin(2 * m) + 0.050 * std::sin(3 * m) +
+			0.005 * std::sin(4 * m) + 0.0005 * std::sin(5 * m) + pbs;
+	return std::fmod(afms + nu_m + 3600.0, 360.0);
+}
+
+} // namespace
+
+TEST_CASE(solar_longitude_matches_mars24) {
+	double worst = 0.0;
+	for (int k = 0; k < 120; ++k) {
+		// one Mars year from 2023, every 5.7 days
+		const double t = j2000_seconds_from_unix(1672531200.0) + k * 686.98 / 120.0 * 86400.0;
+		const double err = std::fabs(std::remainder(mars_solar_longitude(t) - ls_mars24(t / 86400.0), 360.0));
+		worst = std::fmax(worst, err);
+	}
+	std::printf("  Ls against Mars24 over a Mars year: worst %.3f deg\n", worst);
+	CHECK(worst < 0.1);
+}
+
 TEST_CASE(earth_at_mars_opposition) {
 	// Mars opposition 2025-01-16 02:32 UTC: from Mars, Earth sits
 	// in front of the sun (inferior conjunction).
