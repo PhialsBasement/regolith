@@ -7,6 +7,7 @@
 #include <random>
 
 #include <godot_cpp/classes/camera3d.hpp>
+#include <godot_cpp/classes/visual_instance3d.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
 #include <godot_cpp/classes/character_body3d.hpp>
 #include <godot_cpp/classes/collision_object3d.hpp>
@@ -809,7 +810,24 @@ void RegolithSystem::update_passes(Camera3D *p_cam) {
 	if (std::isnan(h)) {
 		h = get_altitude(p_cam->get_global_position());
 	}
-	const double near_plane = std::clamp(std::fmax(h, 0.0) * 0.002, 0.05, 100.0);
+	double near_plane = std::clamp(std::fmax(h, 0.0) * 0.002, 0.05, 100.0);
+	// never past the nearest point of what the camera looks at: a
+	// chase camera 30 m behind a craft high up clipped it at 100 m.
+	// The focus's extent is its meshes' bounding sphere.
+	if (Node3D *f = focus_node()) {
+		const Vector3 c = f->get_global_position();
+		double r = 0.0;
+		TypedArray<Node> meshes = f->find_children("*", "VisualInstance3D", true, false);
+		for (int i = 0; i < meshes.size(); ++i) {
+			const VisualInstance3D *vi = Object::cast_to<VisualInstance3D>(meshes[i]);
+			const AABB box = vi->get_global_transform().xform(vi->get_aabb());
+			for (int k = 0; k < 8; ++k) {
+				r = std::fmax(r, (box.get_endpoint(k) - c).length());
+			}
+		}
+		const double d = (c - p_cam->get_global_position()).length();
+		near_plane = std::fmax(std::fmin(near_plane, d - r), 0.05);
+	}
 	const double split = near_plane * PASS_RATIO;
 	p_cam->set_near(real_t(near_plane));
 	// One pass: reverse-Z float depth spans the solar system.
