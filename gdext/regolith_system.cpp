@@ -151,6 +151,7 @@ void RegolithSystem::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_surface_point", "body", "lat_deg", "lon_deg", "height"),
 			&RegolithSystem::get_surface_point);
 	ClassDB::bind_method(D_METHOD("get_ground_points", "body", "latlon_deg"), &RegolithSystem::get_ground_points);
+	ClassDB::bind_method(D_METHOD("get_body_point", "body", "lat_deg", "lon_deg", "radius"), &RegolithSystem::get_body_point);
 
 	ClassDB::bind_method(D_METHOD("set_body_path", "path"), &RegolithSystem::set_body_path);
 	ClassDB::bind_method(D_METHOD("get_body_path"), &RegolithSystem::get_body_path);
@@ -1116,6 +1117,21 @@ Vector3 RegolithSystem::get_surface_point(const String &p_body, double p_lat_deg
 		const DVec3 x = bp.position + to_icrf(bp.axes, dir * (rs + p_height));
 		Vector3 pos, vel;
 		from_state({ x, bp.velocity }, pos, vel);
+		return pos;
+	}
+	return Vector3();
+}
+
+Vector3 RegolithSystem::get_body_point(const String &p_body, double p_lat_deg, double p_lon_deg, double p_radius) {
+	for (RegolithBody *b : bodies_) {
+		if (String(b->get_name()) != p_body) {
+			continue;
+		}
+		const double lat = p_lat_deg * DEG, lon = p_lon_deg * DEG;
+		const DVec3 dir(std::cos(lat) * std::cos(lon), std::cos(lat) * std::sin(lon), std::sin(lat));
+		const Pose &bp = pose_of(b);
+		Vector3 pos, vel;
+		from_state({ bp.position + to_icrf(bp.axes, dir * p_radius), bp.velocity }, pos, vel);
 		return pos;
 	}
 	return Vector3();

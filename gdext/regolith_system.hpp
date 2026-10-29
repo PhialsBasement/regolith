@@ -120,6 +120,9 @@ public:
 	// ground points for (lat, lon) degree pairs in one call, from
 	// cached heights; NaN where the ground is not streamed yet
 	PackedVector3Array get_ground_points(const String &p_body, const PackedFloat64Array &p_latlon);
+	// The render point at (lat, lon) and a fixed radius from the
+	// body's centre: body-fixed, whatever the terrain cache holds
+	Vector3 get_body_point(const String &p_body, double p_lat_deg, double p_lon_deg, double p_radius);
 	int get_rebase_count() const { return rebases_; }
 	int get_shift_count() const { return shifts_; }
 	Dictionary get_stats() const { return stats_; }
