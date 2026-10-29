@@ -239,6 +239,7 @@ void RegolithBody::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_debug_mode", "mode"), &RegolithBody::set_debug_mode);
 	ClassDB::bind_method(D_METHOD("get_debug_mode"), &RegolithBody::get_debug_mode);
 	ClassDB::bind_method(D_METHOD("get_stats"), &RegolithBody::get_stats);
+	ClassDB::bind_method(D_METHOD("get_geology", "lat_deg", "lon_deg"), &RegolithBody::get_geology);
 	ClassDB::bind_method(D_METHOD("set_synthesis", "profile"), &RegolithBody::set_synthesis);
 	ClassDB::bind_method(D_METHOD("get_synthesis"), &RegolithBody::get_synthesis);
 	ClassDB::bind_method(D_METHOD("set_dark_map_path", "path"), &RegolithBody::set_dark_map_path);
@@ -1097,6 +1098,15 @@ bool RegolithBody::is_collision_ready_at(const Vector3 &p_pos) const {
 	const DVec3 x = regolith::to_body_point(sys->frame_for(this), regolith::to_d(p_pos));
 	const regolith::FaceCoord fc = regolith::dir_to_face(regolith::normalize(x));
 	return patches_.count(key_at(fc, collision_level_ + PATCH_SPLIT_LEVELS).bits) != 0;
+}
+
+Color RegolithBody::get_geology(double p_lat_deg, double p_lon_deg) const {
+	uint8_t g[4] = { 0, 0, 0, 0 };
+	if (synth_) {
+		const double lat = p_lat_deg * Math::PI / 180.0, lon = p_lon_deg * Math::PI / 180.0;
+		synth_->geology_at(regolith::DVec3(std::cos(lat) * std::cos(lon), std::cos(lat) * std::sin(lon), std::sin(lat)), g);
+	}
+	return Color(g[0] / 255.0f, g[1] / 255.0f, g[2] / 255.0f, g[3] / 255.0f);
 }
 
 Dictionary RegolithBody::get_stats() const {

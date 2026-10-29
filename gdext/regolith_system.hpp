@@ -117,6 +117,9 @@ public:
 	// render-space point p_height above a body's surface (from
 	// cached heights: it never blocks on a tile read)
 	Vector3 get_surface_point(const String &p_body, double p_lat_deg, double p_lon_deg, double p_height);
+	// ground points for (lat, lon) degree pairs in one call, from
+	// cached heights; NaN where the ground is not streamed yet
+	PackedVector3Array get_ground_points(const String &p_body, const PackedFloat64Array &p_latlon);
 	int get_rebase_count() const { return rebases_; }
 	int get_shift_count() const { return shifts_; }
 	Dictionary get_stats() const { return stats_; }

@@ -149,6 +149,7 @@ void RegolithSystem::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("put_near", "node", "body", "lat_deg", "lon_deg", "height"), &RegolithSystem::put_near);
 	ClassDB::bind_method(D_METHOD("get_surface_point", "body", "lat_deg", "lon_deg", "height"),
 			&RegolithSystem::get_surface_point);
+	ClassDB::bind_method(D_METHOD("get_ground_points", "body", "latlon_deg"), &RegolithSystem::get_ground_points);
 
 	ClassDB::bind_method(D_METHOD("set_body_path", "path"), &RegolithSystem::set_body_path);
 	ClassDB::bind_method(D_METHOD("get_body_path"), &RegolithSystem::get_body_path);
@@ -1096,4 +1097,33 @@ Vector3 RegolithSystem::get_surface_point(const String &p_body, double p_lat_deg
 		return pos;
 	}
 	return Vector3();
+}
+
+PackedVector3Array RegolithSystem::get_ground_points(const String &p_body, const PackedFloat64Array &p_latlon) {
+	PackedVector3Array out;
+	for (RegolithBody *b : bodies_) {
+		if (String(b->get_name()) != p_body) {
+			continue;
+		}
+		const Pose &bp = pose_of(b);
+		const int64_t n = p_latlon.size() / 2;
+		out.resize(n);
+		const double *ll = p_latlon.ptr();
+		Vector3 *w = out.ptrw();
+		for (int64_t i = 0; i < n; ++i) {
+			const double lat = ll[i * 2] * DEG, lon = ll[i * 2 + 1] * DEG;
+			const DVec3 dir(std::cos(lat) * std::cos(lon), std::cos(lat) * std::sin(lon), std::sin(lat));
+			// cached heights only, as get_surface_point; NaN marks
+			// ground not streamed yet, for the caller to retry
+			const double rs = b->surface_radius(dir, false);
+			if (std::isnan(rs)) {
+				w[i] = Vector3(NAN, NAN, NAN);
+				continue;
+			}
+			Vector3 vel;
+			from_state({ bp.position + to_icrf(bp.axes, dir * rs), bp.velocity }, w[i], vel);
+		}
+		break;
+	}
+	return out;
 }

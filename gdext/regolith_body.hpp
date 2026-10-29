@@ -98,6 +98,9 @@ public:
 	void set_material_param(const StringName &p_name, const Variant &p_value);
 	Ref<Image> bake_iso_map(int p_width, int p_height, const PackedColorArray &p_layer_means, int p_level);
 	Dictionary get_stats() const;
+	// The ground shader's geology at a lat/lon: r gravel province,
+	// g bedrock patch (both noise remapped to 0..1), b ice, a dark
+	Color get_geology(double p_lat_deg, double p_lon_deg) const;
 	bool is_collision_ready_at(const Vector3 &p_pos) const;
 
 protected:
