@@ -827,6 +827,10 @@ void RegolithSystem::update_passes(Camera3D *p_cam) {
 		}
 		const double d = (c - p_cam->get_global_position()).length();
 		near_plane = std::fmax(std::fmin(near_plane, d - r), 0.05);
+		// what surrounds the camera, the game knows (a cabin's walls)
+		if (f->has_meta("regolith_near_max")) {
+			near_plane = std::fmin(near_plane, double(f->get_meta("regolith_near_max")));
+		}
 	}
 	const double split = near_plane * PASS_RATIO;
 	p_cam->set_near(real_t(near_plane));
