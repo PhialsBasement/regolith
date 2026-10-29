@@ -152,6 +152,7 @@ void RegolithSystem::_bind_methods() {
 			&RegolithSystem::get_surface_point);
 	ClassDB::bind_method(D_METHOD("get_ground_points", "body", "latlon_deg"), &RegolithSystem::get_ground_points);
 	ClassDB::bind_method(D_METHOD("get_body_point", "body", "lat_deg", "lon_deg", "radius"), &RegolithSystem::get_body_point);
+	ClassDB::bind_method(D_METHOD("get_solar_longitude_today"), &RegolithSystem::get_solar_longitude_today);
 
 	ClassDB::bind_method(D_METHOD("set_body_path", "path"), &RegolithSystem::set_body_path);
 	ClassDB::bind_method(D_METHOD("get_body_path"), &RegolithSystem::get_body_path);
@@ -1120,6 +1121,11 @@ Vector3 RegolithSystem::get_surface_point(const String &p_body, double p_lat_deg
 		return pos;
 	}
 	return Vector3();
+}
+
+double RegolithSystem::get_solar_longitude_today() const {
+	return regolith::mars_solar_longitude(
+			regolith::j2000_seconds_from_unix(Time::get_singleton()->get_unix_time_from_system()));
 }
 
 Vector3 RegolithSystem::get_body_point(const String &p_body, double p_lat_deg, double p_lon_deg, double p_radius) {

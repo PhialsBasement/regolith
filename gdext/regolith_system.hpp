@@ -123,6 +123,9 @@ public:
 	// The render point at (lat, lon) and a fixed radius from the
 	// body's centre: body-fixed, whatever the terrain cache holds
 	Vector3 get_body_point(const String &p_body, double p_lat_deg, double p_lon_deg, double p_radius);
+	// Mars's solar longitude Ls (deg) for today's date, the date the
+	// clock starts from: usable before the system anchors
+	double get_solar_longitude_today() const;
 	int get_rebase_count() const { return rebases_; }
 	int get_shift_count() const { return shifts_; }
 	Dictionary get_stats() const { return stats_; }
