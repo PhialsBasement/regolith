@@ -1,5 +1,9 @@
 #pragma once
 
+#include <algorithm>
+#include <climits>
+#include <list>
+#include <map>
 #include <memory>
 #include <unordered_map>
 #include <vector>
@@ -7,8 +11,10 @@
 #include <godot_cpp/classes/image.hpp>
 #include <godot_cpp/classes/node3d.hpp>
 #include <godot_cpp/classes/shader.hpp>
+#include <godot_cpp/variant/packed_byte_array.hpp>
 #include <godot_cpp/variant/rid.hpp>
 #include <godot_cpp/variant/string.hpp>
+#include <godot_cpp/variant/vector4.hpp>
 
 #include "regolith/height_tile.hpp"
 #include "regolith/horizon.hpp"
@@ -83,9 +89,12 @@ public:
 	int get_dense_levels() const { return dense_levels_; }
 	void set_quads(int p_v) { quads_ = p_v; }
 	int get_quads() const { return quads_; }
+	// Clipmap ring width in quads (a multiple of 4); 0 draws the
+	// old per-tile CDLOD instead.
+	void set_clip_quads(int p_v) { clip_quads_ = p_v <= 0 ? 0 : std::max(8, p_v / 4 * 4); }
+	int get_clip_quads() const { return clip_quads_; }
 	void set_range_factor(double p_v) { range_factor_ = p_v; }
-	double get_range_factor() const { return range_factor_; }
-	void set_page_capacity(int p_v) { page_capacity_ = p_v; }
+	double get_range_factor() const { return range_factor_; }	void set_page_capacity(int p_v) { page_capacity_ = p_v; }
 	int get_page_capacity() const { return page_capacity_; }
 	void set_debug_mode(int p_v);
 	int get_debug_mode() const { return debug_mode_; }
@@ -110,6 +119,44 @@ private:
 	struct Page {
 		int layer = -1;
 		uint64_t used = 0;
+		// place in lru_, oldest first; pinned pages are kept out
+		std::list<uint64_t>::iterator lru;
+		bool pinned = false;
+	};
+	// One clipmap ring: a fixed grid around the camera, one
+	// render instance, constants pushed when its centre moves.
+	struct Ring {
+		RID instance;
+		bool visible = false;
+		bool full = false; // the finest drawn: no hole
+		bool shadow = false;
+		int64_t cx = INT64_MIN; // centre, face0 lattice units
+		int64_t cy = INT64_MIN;
+		int face = -1;
+		uint64_t push_id = 0;
+		uint64_t xform_id = 0;
+		Vector4 hole;
+		// texture window origin (grid steps, absolute) and face it
+		// was filled for; complete: no coarser data stood in
+		int64_t kx0 = INT64_MIN;
+		int64_t ky0 = INT64_MIN;
+		int64_t qx0 = INT64_MIN;
+		int64_t qy0 = INT64_MIN;
+		int tex_face = -1;
+		bool complete = false;
+		std::vector<float> heights; // T x T, toroidal
+		std::vector<uint8_t> hor_a; // Tq x Tq RGBA8, directions 0-3
+		std::vector<uint8_t> hor_b; // directions 4-7
+		std::vector<uint8_t> geo; // Tq x Tq RGBA8
+	};
+	// One ring's lattice: data level, stride, centre (face0 grid)
+	struct RingGeo {
+		int level;
+		int64_t s;
+		int64_t m;
+		int64_t cx, cy;
+		double spacing;
+		bool ready;
 	};
 	struct Patch {
 		RID body;
@@ -141,7 +188,22 @@ private:
 	// computes one
 	bool upload(regolith::TileKey p_key, bool p_make_horizon = false);
 	void draw(const std::vector<regolith::SelectedNode> &p_nodes);
+	// the push frame, sun and eye for this frame; false: no camera
+	bool update_push_frame(regolith::DVec3 &r_cam_body);
+	void draw_clipmap();
+	// Bring ring r's textures to its current window, writing only
+	// texels that entered it (all of them after a face change or
+	// when coarser data stood in and pages arrived since).
+	void update_ring_textures(int p_r, const RingGeo &p_g, int p_face0, bool p_pages_changed);
+	// rho at a face lattice point, from the finest cached tile at
+	// or above p_level; false when a coarser tile stood in
+	bool ring_rho(int p_face, int p_level, int64_t p_gi, int64_t p_gj, float &r_rho);
+	RID make_ring_mesh(int p_quads, bool p_full);
+	void touch_page(uint64_t p_bits);
+	void update_page_table(const regolith::DVec3 &p_cam_dir);
 	void push_texture_domains(RID p_inst, regolith::TileKey p_key, double p_rho_c);
+	// p_s, p_t: the linear face parameters of the domain origin
+	void push_domains(RID p_inst, double p_s, double p_t, double p_rho_c);
 	void update_collision();
 	bool build_patch(uint64_t p_id, regolith::TileKey p_tile, int p_bx, int p_by);
 	void place_patch(Patch &r_patch, bool p_teleport) const;
@@ -192,7 +254,29 @@ private:
 	std::vector<RID> spare_coarse_;
 	std::vector<RID> spare_fine_;
 	std::unordered_map<uint64_t, Page> pages_;
+	std::list<uint64_t> lru_;
 	std::unordered_map<uint64_t, std::pair<float, float>> page_bounds_;
+	// clipmap
+	int clip_quads_ = 256;
+	RID mesh_ring_;
+	RID mesh_ring_full_;
+	std::vector<Ring> rings_;
+	// per ring layer: heights (T = clip_quads + 4) and, at quarter
+	// resolution (Tq = clip_quads / 4 + 4), horizon and geology
+	RID ring_heights_;
+	RID ring_horizon_[2];
+	RID ring_geology_;
+	int ring_t_ = 0;
+	int ring_tq_ = 0;
+	// last tile looked up while filling (texels mostly share one)
+	uint64_t memo_key_ = UINT64_MAX;
+	regolith::HeightTilePtr memo_tile_;
+	// (face, level, tile) -> atlas layer, a W x W toroidal window
+	// per face and level around the camera; see update_page_table
+	RID page_table_;
+	PackedByteArray page_bytes_;
+	std::vector<int64_t> page_origin_; // window origin per face/level
+	bool page_dirty_ = true;
 	std::vector<int> free_layers_;
 	std::vector<regolith::TileKey> to_upload_;
 	uint64_t frame_ = 0;
@@ -219,6 +303,19 @@ private:
 	int stat_wanted_ = 0;
 	double stat_select_ms_ = 0.0;
 	double stat_draw_ms_ = 0.0;
+	struct FineLevelStat {
+		int count = 0;
+		double dmin = 1e300;
+		double dmax = 0.0;
+	};
+	std::map<int, FineLevelStat> stat_fine_levels_; // drawn fine tiles
+	struct TileStat {
+		uint64_t rid = 0;
+		int level = 0;
+		bool fine = false;
+		double dist = 0.0;
+	};
+	std::vector<TileStat> stat_tiles_; // every tile drawn last frame
 	double stat_upload_ms_ = 0.0;
 	double stat_collision_ms_ = 0.0;
 	uint64_t stat_builds_ = 0;

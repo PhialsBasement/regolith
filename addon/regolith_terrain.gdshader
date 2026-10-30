@@ -42,6 +42,11 @@ uniform int border = 2;
 uniform int geology_side = 55;
 uniform float face_edge_m = 5324000.0;
 uniform int debug_mode = 0;
+// profiling: each set bit skips one section, neutral output;
+// 1 heights normal, 2 sun, 4 noise, 8<<id blend layer id,
+// 512 macro, 2048 full work in depth passes; vertex: 4096
+// morph probe, 8192 height fetches, 16384 tangents
+uniform int prof_skip = 0;
 uniform vec3 u_eye; // main camera, push-frame metres
 // Dust optical depth: sets how much sunlight arrives direct
 // (shadowable) and how much as scattered skylight.
@@ -136,7 +141,8 @@ void vertex() {
 	vec3 dir;
 	float q_len_out;
 	vec2 ij = g * step;
-	vec3 p = u_center.xyz + offset_of(ij, texel(layer, ivec2(ij)), dir, q_len_out);
+	// profiling 4096: no morph probe, distance from the tile centre
+	vec3 p = (prof_skip & 4096) == 0 ? u_center.xyz + offset_of(ij, texel(layer, ivec2(ij)), dir, q_len_out) : u_center.xyz;
 	// Morph by distance to the MAIN camera, also in shadow passes.
 	// Push-frame metres on both sides: small, so float32 is exact
 	// enough at any distance from the world origin.
@@ -144,18 +150,25 @@ void vertex() {
 	vec2 gm = g - mod(g, 2.0) * morph;
 	vec2 ijm = gm * step;
 	vec2 pij = (vec2(float(quadrant & 1), float(quadrant >> 1)) * float(intervals) + ijm) * 0.5;
-	float h = mix(bilinear(layer, ijm), bilinear(parent_layer, pij), morph);
+	// profiling 8192: no height fetches, the tile's centre height
+	float h = (prof_skip & 8192) == 0 ? mix(bilinear(layer, ijm), bilinear(parent_layer, pij), morph) : u_debug.z;
 	p = u_center.xyz + offset_of(ijm, h, dir, q_len_out);
 	// Surface tangents per unit ij, analytic: d(dir)/di times
 	// the radius, with dq/di = axis * QP * 2/m / cos^2(QP * s).
-	float n_i = float(intervals);
-	float cs = cos(QP * (u_axis_u.w + (2.0 * ijm.x - n_i) * u_misc.z));
-	float ct = cos(QP * (u_axis_v.w + (2.0 * ijm.y - n_i) * u_misc.z));
-	vec3 dq_s = u_axis_u.xyz * (QP * 2.0 * u_misc.z / (cs * cs));
-	vec3 dq_t = u_axis_v.xyz * (QP * 2.0 * u_misc.z / (ct * ct));
-	float rad = (u_center.w + h - u_debug.z) / q_len_out;
-	v_ts = (dq_s - dir * dot(dir, dq_s)) * rad;
-	v_tt = (dq_t - dir * dot(dir, dq_t)) * rad;
+	if ((prof_skip & 16384) == 0) {
+		float n_i = float(intervals);
+		float cs = cos(QP * (u_axis_u.w + (2.0 * ijm.x - n_i) * u_misc.z));
+		float ct = cos(QP * (u_axis_v.w + (2.0 * ijm.y - n_i) * u_misc.z));
+		vec3 dq_s = u_axis_u.xyz * (QP * 2.0 * u_misc.z / (cs * cs));
+		vec3 dq_t = u_axis_v.xyz * (QP * 2.0 * u_misc.z / (ct * ct));
+		float rad = (u_center.w + h - u_debug.z) / q_len_out;
+		v_ts = (dq_s - dir * dot(dir, dq_s)) * rad;
+		v_tt = (dq_t - dir * dot(dir, dq_t)) * rad;
+	} else {
+		// profiling 16384: the face axes as tangents
+		v_ts = u_axis_u.xyz;
+		v_tt = u_axis_v.xyz;
+	}
 	if (skirt) {
 		p -= dir * u_debug.w;
 	}
@@ -277,14 +290,24 @@ float domain_scale(int id) {
 void fragment() {
 	int layer = int(u_pages.x);
 	vec2 ij = v_ij;
-	float hx = bilinear(layer, ij + vec2(1.0, 0.0)) - bilinear(layer, ij - vec2(1.0, 0.0));
-	float hy = bilinear(layer, ij + vec2(0.0, 1.0)) - bilinear(layer, ij - vec2(0.0, 1.0));
+	float hx = 0.0;
+	float hy = 0.0;
+	if ((prof_skip & 1) == 0) {
+		hx = bilinear(layer, ij + vec2(1.0, 0.0)) - bilinear(layer, ij - vec2(1.0, 0.0));
+		hy = bilinear(layer, ij + vec2(0.0, 1.0)) - bilinear(layer, ij - vec2(0.0, 1.0));
+	}
 	vec3 up = normalize(v_up);
 	vec3 n = normalize(cross(v_ts + up * (0.5 * hx), v_tt + up * (0.5 * hy)));
 	mat3 to_world = mat3(MODEL_MATRIX);
 	vec3 n_view = normalize((VIEW_MATRIX * vec4(to_world * n, 0.0)).xyz);
+	// depth, normal-roughness and shadow passes: the ground's shape
+	// is all SSAO and shadows read, so no texture work there
+	if (IN_DEPTH_PREPASS && (prof_skip & 2048) == 0) {
+		NORMAL = n_view;
+		ROUGHNESS = roughness_floor;
+	} else {
 	// camera-relative: world origins differ in double builds
-	v_sun_vis = sun_visibility(up, v_ts, v_tt, v_ij, u_pages.x, mat3(INV_VIEW_MATRIX) * VERTEX);
+	v_sun_vis = (prof_skip & 2) == 0 ? sun_visibility(up, v_ts, v_tt, v_ij, u_pages.x, mat3(INV_VIEW_MATRIX) * VERTEX) : 1.0;
 	v_up_view = normalize(mat3(VIEW_MATRIX) * (mat3(MODEL_MATRIX) * up));
 	v_spec = 0.5; // Godot's default
 	// height of the eye over this ground: -VERTEX is the view
@@ -317,14 +340,15 @@ void fragment() {
 		float slope = clamp(1.0 - dot(n, up), 0.0, 1.0);
 		float n_prov = color_map.r;
 		float n_patch = color_map.g;
-		float n_mot = texture(noise_texture, wm * 0.0004 + vec2(0.29)).r;
-		float n_f1 = tnoise(wm * 0.03 + vec2(0.13));
-		float n_f2 = tnoise(wm * 0.0025 + vec2(0.77));
-		float n_f3 = tnoise(wm * 0.004 + vec2(0.52));
+		bool noise_on = (prof_skip & 4) == 0;
+		float n_mot = noise_on ? texture(noise_texture, wm * 0.0004 + vec2(0.29)).r : 0.5;
+		float n_f1 = noise_on ? tnoise(wm * 0.03 + vec2(0.13)) : 0.5;
+		float n_f2 = noise_on ? tnoise(wm * 0.0025 + vec2(0.77)) : 0.5;
+		float n_f3 = noise_on ? tnoise(wm * 0.004 + vec2(0.52)) : 0.5;
 
 		float w_ice = color_map.b;
 		float w_rock = smoothstep(slope_rock_start, slope_rock_start + 0.12, slope);
-		float loc = smoothstep(0.35, 0.75, tnoise(wm * 0.001 + vec2(0.23))) * (1.0 - color_map.a);
+		float loc = smoothstep(0.35, 0.75, noise_on ? tnoise(wm * 0.001 + vec2(0.23)) : 0.5) * (1.0 - color_map.a);
 		float bed_l = smoothstep(0.60, 0.70, n_f2 * 0.75 + n_f1 * 0.25) * loc;
 		float w_bed = max(smoothstep(1.0 - bedrock_amount * 0.5, 1.0 - bedrock_amount * 0.5 + 0.10,
 			n_patch * 0.72 + n_mot * 0.28), bed_l) * clamp(1.0 - slope * 4.0, 0.0, 1.0) * (1.0 - w_rock);
@@ -350,8 +374,8 @@ void fragment() {
 		float ao_strength = 0.;
 		float total_weight = 0.;
 		float sharp = fma(10.0, blend_sharpness, 2.0);
-		vec2 wrp = (vec2(texture(noise_texture, wm * 0.0007).r,
-			texture(noise_texture, wm * 0.0007 + vec2(0.41)).r) - 0.5) * 8.0;
+		vec2 wrp = noise_on ? (vec2(texture(noise_texture, wm * 0.0007).r,
+			texture(noise_texture, wm * 0.0007 + vec2(0.41)).r) - 0.5) * 8.0 : vec2(0.0);
 		for (int id = 0; id < 6; id++) {
 			float w = wgt[id];
 			if (w < 0.004) {
@@ -362,7 +386,11 @@ void fragment() {
 			vec4 i_dd = base_dd * s;
 			vec4 alb;
 			vec4 nrm;
-			if (id == 1) {
+			if ((prof_skip & (8 << id)) != 0) {
+				// profiling: this layer's sampling off, a flat mid tone
+				alb = vec4(0.5, 0.5, 0.5, 0.5);
+				nrm = vec4(0.5, 0.5, 1.0, 0.8);
+			} else if (id == 1) {
 				// cliff: planar and projected domains by steepness
 				float proj_f = smoothstep(0.12, 0.30, slope);
 				alb = vec4(0.);
@@ -404,7 +432,7 @@ void fragment() {
 		ao_strength *= weight_inv;
 
 		vec3 macrov = vec3(1.);
-		if (enable_macro_variation) {
+		if (enable_macro_variation && (prof_skip & 512) == 0) {
 			float noise1 = tnoise(wm * 0.00125);
 			float noise2 = tnoise(wm * 0.007 + vec2(0.61));
 			macrov = mix(macro_variation1, vec3(1.), noise1);
@@ -466,6 +494,7 @@ void fragment() {
 		ALBEDO *= 1.0 - orbit;
 		EMISSION = col * orbit;
 	}
+	} // the depth-pass branch above
 }
 
 // Godot's Burley diffuse and GGX specular. The sun splits by the

@@ -111,7 +111,7 @@ if(REGOLITH_BUILD_GDEXTENSION)
 	configure_file(addon/regolith_terrain.gdshader
 		"${REGOLITH_ADDON_DIR}/regolith_terrain.gdshader" COPYONLY)
 	foreach(f regolith_sky.gdshader regolith_clouds.gdshader regolith_clouds.gdshaderinc
-			regolith_cloud_shadow.gdshader)
+			regolith_cloud_shadow.gdshader regolith_clipmap.gdshader)
 		configure_file(addon/${f} "${REGOLITH_ADDON_DIR}/${f}" COPYONLY)
 	endforeach()
 endif()
