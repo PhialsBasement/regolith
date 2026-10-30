@@ -1766,6 +1766,14 @@ Color RegolithBody::get_geology(double p_lat_deg, double p_lon_deg) const {
 
 Dictionary RegolithBody::get_stats() const {
 	Dictionary d;
+	// how far the drawn terrain is from where it belongs now: the
+	// push frame placed into the render frame as of this call
+	RegolithSystem *sys = system();
+	if (sys && push_valid_) {
+		const regolith::RenderFrame f = sys->frame_for(this);
+		const Vector3 now = regolith::to_v(f.to_local_point(push_frame_.anchor));
+		d["push_lag_m"] = double((now - push_xform_.origin).length());
+	}
 	// fine tiles last draw: [level, count, edge m, quads per edge,
 	// nearest m, farthest m]
 	Array fine;

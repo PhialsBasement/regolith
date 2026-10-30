@@ -510,7 +510,9 @@ void RegolithSystem::rebuild_frame(RegolithBody *p_body, bool p_rotating, const 
 	// Keep the focus's small render velocity: the rest of its
 	// true velocity becomes the frame's.
 	const DVec3 v_ref = from_icrf(a, p_focus.v - o.velocity - regolith::cross(ref_omega(), r));
-	if (floating_velocity_enabled_ && regolith::length(v_ref) > SHIFT_LOW) {
+	// Only in orbit: a moving frame near the ground drags every
+	// planet-fixed node (rocks, lights, machines) along with it.
+	if (floating_velocity_enabled_ && !rotating_ && regolith::length(v_ref) > SHIFT_LOW) {
 		const Vector3 keep = render_to_icrf().transposed().xform(old_ra.xform(old_focus_vel));
 		frame_velocity_ = v_ref - regolith::to_body_vec(frame_, regolith::to_d(keep));
 	}
@@ -740,7 +742,9 @@ void RegolithSystem::_physics_process(double p_delta) {
 	Node3D *focus = focus_node();
 	if (focus) {
 		manage_frame(focus);
-		if (floating_velocity_enabled_) {
+		// the rotating (surface) frame stays planet-fixed: the
+		// leash rebuild carries it, so static nodes stay put
+		if (floating_velocity_enabled_ && !rotating_) {
 			floating_velocity(focus);
 		}
 	}
