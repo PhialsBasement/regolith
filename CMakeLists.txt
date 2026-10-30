@@ -18,8 +18,25 @@ else()
 	set(REGOLITH_FP_FLAGS -ffp-contract=off -fno-fast-math)
 endif()
 
-find_package(PkgConfig REQUIRED)
-pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+# zstd: the system's, or for a cross build (no target zstd on the
+# host) compiled in from a zstd source tree (its lib/ directory)
+set(REGOLITH_ZSTD_SOURCE "" CACHE PATH "zstd lib sources to compile in")
+if(REGOLITH_ZSTD_SOURCE)
+	enable_language(C)
+	file(GLOB REGOLITH_ZSTD_SRC
+		"${REGOLITH_ZSTD_SOURCE}/common/*.c"
+		"${REGOLITH_ZSTD_SOURCE}/compress/*.c"
+		"${REGOLITH_ZSTD_SOURCE}/decompress/*.c")
+	add_library(regolith_zstd STATIC ${REGOLITH_ZSTD_SRC})
+	target_include_directories(regolith_zstd PUBLIC "${REGOLITH_ZSTD_SOURCE}")
+	target_compile_definitions(regolith_zstd PRIVATE ZSTD_DISABLE_ASM)
+	set_target_properties(regolith_zstd PROPERTIES POSITION_INDEPENDENT_CODE ON)
+	set(REGOLITH_ZSTD regolith_zstd)
+else()
+	find_package(PkgConfig REQUIRED)
+	pkg_check_modules(ZSTD REQUIRED IMPORTED_TARGET libzstd)
+	set(REGOLITH_ZSTD PkgConfig::ZSTD)
+endif()
 
 add_library(regolith_core STATIC
 	core/src/codec.cpp
@@ -40,7 +57,7 @@ target_include_directories(regolith_core PRIVATE thirdparty/fastnoiselite)
 find_package(Threads REQUIRED)
 target_link_libraries(regolith_core PUBLIC Threads::Threads)
 target_include_directories(regolith_core PUBLIC core/include)
-target_link_libraries(regolith_core PUBLIC PkgConfig::ZSTD)
+target_link_libraries(regolith_core PUBLIC ${REGOLITH_ZSTD})
 target_compile_options(regolith_core PRIVATE ${REGOLITH_FP_FLAGS})
 
 option(REGOLITH_BUILD_BAKER "Build the regolith_bake tool" ON)

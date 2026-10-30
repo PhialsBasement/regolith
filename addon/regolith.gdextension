@@ -10,5 +10,7 @@ linux.debug.double.x86_64 = "res://addons/regolith/bin/libregolith.linux.templat
 linux.release.double.x86_64 = "res://addons/regolith/bin/libregolith.linux.template_release.double.x86_64.so"
 linux.debug.x86_64 = "res://addons/regolith/bin/libregolith.linux.template_debug.x86_64.so"
 linux.release.x86_64 = "res://addons/regolith/bin/libregolith.linux.template_release.x86_64.so"
+windows.debug.double.x86_64 = "res://addons/regolith/bin/libregolith.windows.template_debug.double.x86_64.dll"
+windows.release.double.x86_64 = "res://addons/regolith/bin/libregolith.windows.template_release.double.x86_64.dll"
 windows.debug.x86_64 = "res://addons/regolith/bin/libregolith.windows.template_debug.x86_64.dll"
 windows.release.x86_64 = "res://addons/regolith/bin/libregolith.windows.template_release.x86_64.dll"
