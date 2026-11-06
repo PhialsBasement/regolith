@@ -31,12 +31,6 @@ uniform sampler2DArray horizon_b : filter_linear, repeat_disable;
 uniform int horizon_side = 55;
 // Cloud shadows: sun transmittance on a ground-plane map around
 // the eye (RegolithWeather); clear outside it.
-uniform sampler2D cloud_shadow : filter_linear, repeat_disable;
-uniform vec3 cloud_origin; // relative to the camera
-uniform vec3 cloud_e;
-uniform vec3 cloud_s;
-uniform float cloud_size = 100000.0;
-uniform bool has_cloud_shadow = false;
 uniform int intervals = 208;
 uniform int border = 2;
 uniform int geology_side = 55;
@@ -91,7 +85,7 @@ varying vec3 v_ts;
 varying vec3 v_tt;
 varying vec3 v_up;
 varying float v_morph;
-varying float v_sun_vis; // terrain x clouds, for the sun only
+varying float v_sun_vis; // terrain shadow, for the sun only
 varying vec3 v_up_view; // local vertical, view space
 varying float v_spec; // the material's SPECULAR, for light()
 
@@ -252,7 +246,7 @@ float horizon_dir(vec3 hp, int k) {
 }
 
 // Terrain shadow: the sun against the horizon in its own grid
-// direction, soft over the solar disc; then the clouds.
+// direction, soft over the solar disc.
 float sun_visibility(vec3 up, vec3 ts, vec3 tt, vec2 ij, float page, vec3 world) {
 	vec3 s = normalize(transpose(u_to_body) * sun_body);
 	float s_e = dot(s, up);
@@ -268,15 +262,7 @@ float sun_visibility(vec3 up, vec3 ts, vec3 tt, vec2 ij, float page, vec3 world)
 	int k1 = (k0 + 1) % 8;
 	vec3 hp = vec3((ij * 0.25 + 1.5) / float(horizon_side), page);
 	float hz = mix(horizon_dir(hp, k0), horizon_dir(hp, k1), fract(f));
-	float vis = smoothstep(-0.006, 0.006, asin(clamp(s_e, -1.0, 1.0)) - hz);
-	if (has_cloud_shadow) {
-		vec3 dw = world - cloud_origin;
-		vec2 uv = vec2(dot(dw, cloud_e), dot(dw, cloud_s)) / cloud_size + 0.5;
-		if (all(greaterThan(uv, vec2(0.0))) && all(lessThan(uv, vec2(1.0)))) {
-			vis *= texture(cloud_shadow, uv).r;
-		}
-	}
-	return vis;
+	return smoothstep(-0.006, 0.006, asin(clamp(s_e, -1.0, 1.0)) - hz);
 }
 
 vec4 domain(int id) {

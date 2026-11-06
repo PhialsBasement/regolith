@@ -6,7 +6,7 @@
 
 #include "regolith_atmosphere.hpp"
 #include "regolith_body.hpp"
-#include "regolith_gcm.hpp"
+#include "regolith_clouds.hpp"
 #include "regolith_weather.hpp"
 #include "regolith_collider.hpp"
 #include "regolith_system.hpp"
@@ -25,8 +25,9 @@ void initialize_regolith(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(RegolithCollider);
 	GDREGISTER_CLASS(RegolithVessel);
 	GDREGISTER_CLASS(RegolithAtmosphere);
-	GDREGISTER_CLASS(RegolithGcm);
 	GDREGISTER_CLASS(RegolithWeather);
+	GDREGISTER_CLASS(RegolithCloudEffect);
+	GDREGISTER_CLASS(RegolithClouds);
 }
 
 void uninitialize_regolith(ModuleInitializationLevel p_level) {

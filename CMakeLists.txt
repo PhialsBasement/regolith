@@ -41,8 +41,8 @@ endif()
 add_library(regolith_core STATIC
 	core/src/codec.cpp
 	core/src/cube.cpp
+	core/src/climate.cpp
 	core/src/ephemeris.cpp
-	core/src/gcm.cpp
 	core/src/height_tile.cpp
 	core/src/horizon.cpp
 	core/src/kepler.cpp
@@ -108,10 +108,10 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		gdext/regolith_atmosphere.cpp
 		gdext/regolith_body.cpp
 		gdext/regolith_collider.cpp
-		gdext/regolith_gcm.cpp
 		gdext/regolith_system.cpp
 		gdext/regolith_vessel.cpp
 		gdext/regolith_weather.cpp
+		gdext/regolith_clouds.cpp
 	)
 	target_link_libraries(regolith PRIVATE godot::cpp regolith_core)
 	target_compile_options(regolith PRIVATE ${REGOLITH_FP_FLAGS})
@@ -127,8 +127,9 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		"${REGOLITH_ADDON_DIR}/regolith.gdextension" COPYONLY)
 	configure_file(addon/regolith_terrain.gdshader
 		"${REGOLITH_ADDON_DIR}/regolith_terrain.gdshader" COPYONLY)
-	foreach(f regolith_sky.gdshader regolith_clouds.gdshader regolith_clouds.gdshaderinc
-			regolith_cloud_shadow.gdshader regolith_clipmap.gdshader)
+	foreach(f regolith_sky.gdshader regolith_clipmap.gdshader regolith_cloud_common.glsli
+			regolith_cloud_noise.glsl regolith_cloud_light.glsl regolith_cloud_march.glsl regolith_cloud_composite.glsl
+			regolith_cloud_mip.glsl regolith_cloud_resolve.glsl)
 		configure_file(addon/${f} "${REGOLITH_ADDON_DIR}/${f}" COPYONLY)
 	endforeach()
 endif()

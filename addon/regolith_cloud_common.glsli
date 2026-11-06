@@ -1,0 +1,151 @@
+// Shared by the cloud passes: the parameters, the light
+// cascades, and the one cloud density every pass evaluates.
+// Body frame: z north, x longitude 0; positions in metres.
+
+const int NC = 4;
+const int NL = 8;
+const float PI = 3.14159265358979;
+const ivec3 LIGHT = ivec3(96, 96, 32);
+const int SHAPE_N = 128;
+const int DETAIL_N = 32;
+// Mars's ice clouds: thin sheets every few km, streaked
+const float SHEET_GAP = 3000.0;
+const float SHEET_THICK = 600.0;
+const float STREAK = 6.0;
+
+struct Cascade {
+	vec4 a; // anchor direction, w half width (m)
+	vec4 e; // east at the anchor, w horizontal voxel (m)
+	vec4 n; // north at the anchor, w 1 once built
+	vec4 z; // x min, y max altitude (m)
+	vec4 off; // xyz wind drift since the bake (m)
+};
+
+layout(set = 0, binding = 0, std140) uniform Params {
+	Cascade c[NC];
+	vec4 planet; // x datum radius, y frame, z max steps, w job
+	vec4 edges0, edges1; // weather level edges 0..7 (m)
+	vec4 look; // x edge 8, y density, z coverage gain, w period
+	vec4 drift; // xyz noise offset (m), w detail period
+	vec4 sun; // xyz sun direction, w energy
+	vec4 sun_color; // rgb, w forward phase g
+	vec4 ambient; // rgb sky light, w pixel angle (rad)
+	vec4 fog; // rgb, w density (1/m)
+	vec4 eye; // xyz eye, w its radius
+	vec4 body_r0, body_r1, body_r2; // render to body, rows
+	vec4 cam_x, cam_y, cam_z; // view axes in render space
+	mat4 inv_proj;
+	vec4 size; // xy march size, zw full size
+	mat4 prev_proj;
+	vec4 prev_x, prev_y, prev_z; // last view axes, w valid
+	vec4 prev_move; // eye's move since last frame (render)
+	vec4 tile; // xy traced size (a quarter), zw this frame's cell
+} p;
+
+// the weather: tau per level (lon, lat, level), the ground,
+// and per column the cloudy band (R low, G high, m over
+// ground) and B its peak extinction, a cell wider
+layout(set = 0, binding = 20) uniform sampler3D tau_tex;
+layout(set = 0, binding = 21) uniform sampler2D topo_tex;
+layout(set = 0, binding = 22) uniform sampler3D shape_tex;
+layout(set = 0, binding = 23) uniform sampler3D detail_tex;
+layout(set = 0, binding = 24) uniform sampler2D band_tex;
+
+float remap(float v, float lo, float hi, float nlo, float nhi) {
+	return nlo + (v - lo) / (hi - lo) * (nhi - nlo);
+}
+
+vec2 lonlat(vec3 d) {
+	return vec2(atan(d.y, d.x) / (2.0 * PI) + 0.5, 0.5 - asin(clamp(d.z, -1.0, 1.0)) / PI);
+}
+
+float edge(int i) {
+	return i < 4 ? p.edges0[i] : (i < 8 ? p.edges1[i - 4] : p.look.x);
+}
+
+float level_sigma(vec2 ll, int l) {
+	float tau = texture(tau_tex, vec3(ll, (float(l) + 0.5) / float(NL))).r;
+	return tau / (edge(l + 1) - edge(l));
+}
+
+// Mean extinction (1/m) at a height over the ground, linear
+// between the level centres, fading out through the top level.
+float sigma_bar(vec2 ll, float h) {
+	if (h <= 0.0 || h >= edge(NL)) {
+		return 0.0;
+	}
+	if (h <= 0.5 * (edge(0) + edge(1))) {
+		return level_sigma(ll, 0);
+	}
+	for (int l = 0; l < NL - 1; l++) {
+		float a = 0.5 * (edge(l) + edge(l + 1));
+		float b = 0.5 * (edge(l + 1) + edge(l + 2));
+		if (h <= b) {
+			return mix(level_sigma(ll, l), level_sigma(ll, l + 1), (h - a) / (b - a));
+		}
+	}
+	float a = 0.5 * (edge(NL - 1) + edge(NL));
+	return level_sigma(ll, NL - 1) * (1.0 - smoothstep(a, edge(NL), h));
+}
+
+// The cloud: extinction (1/m) at a body point, the same field
+// from any distance. foot is the sample's footprint (m): it
+// only filters detail once that detail is under a pixel.
+float cloud_density(vec3 pb, float foot) {
+	float r = length(pb);
+	vec3 d = pb / r;
+	vec2 ll = lonlat(d);
+	float h = r - p.planet.x - texture(topo_tex, ll).r;
+	float sb = sigma_bar(ll, h);
+	float cov = clamp(sb * p.look.z, 0.0, 0.9);
+	if (cov < 0.004) {
+		return 0.0;
+	}
+	// squashed along the pole: fibres run east to west
+	vec3 q = (pb - p.drift.xyz) / p.look.w;
+	q.z *= STREAK;
+	float lod = clamp(log2(foot * float(SHAPE_N) / p.look.w), 0.0, 7.0);
+	vec4 n = textureLod(shape_tex, q, lod);
+	float low = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
+	float base = clamp(remap(n.r, low - 1.0, 1.0, 0.0, 1.0), 0.0, 1.0);
+	// broad patches: the coverage itself wanders
+	float big = textureLod(shape_tex, q * 0.21 + vec3(0.37, 0.11, 0.73), max(lod - 2.0, 0.0)).r;
+	float c2 = clamp(cov * mix(0.35, 1.65, big), 0.0, 0.95);
+	float dd = clamp(remap(base, 1.0 - c2, 1.0, 0.0, 1.0), 0.0, 1.0);
+	if (dd <= 0.0) {
+		return 0.0;
+	}
+	// thin sheets whose heights wander with the noise
+	float wave = textureLod(shape_tex, q * 0.09 + vec3(0.5, 0.2, 0.9), max(lod - 3.0, 0.0)).g;
+	float s = fract(h / SHEET_GAP + wave * 1.6) - 0.5;
+	float sheet = exp(-pow(s * SHEET_GAP / SHEET_THICK, 2.0));
+	// streaked detail frays the edges into fibres
+	vec3 dq = (pb - p.drift.xyz) / p.drift.w;
+	dq.z *= STREAK * 0.5;
+	float dlod = clamp(log2(foot * float(DETAIL_N) / p.drift.w), 0.0, 5.0);
+	vec3 dn = textureLod(detail_tex, dq, dlod).rgb;
+	float det = dn.r * 0.625 + dn.g * 0.25 + dn.b * 0.125;
+	float er = clamp(remap(dd, det * 0.6, 1.0, 0.0, 1.0), 0.0, 1.0);
+	// the column keeps the weather's mean extinction
+	float fill = SHEET_THICK * 1.77 / SHEET_GAP;
+	return er * sheet * sb / (max(c2, 0.05) * 0.35 * fill) * p.look.y;
+}
+
+// A body point in cascade k: xy on its gnomonic plane at the
+// datum, z by altitude; 0..1 inside. d is the unit direction.
+vec3 to_uvw(int k, vec3 d, float r) {
+	float ca = max(dot(d, p.c[k].a.xyz), 1e-3);
+	vec2 g = vec2(dot(d, p.c[k].e.xyz), dot(d, p.c[k].n.xyz)) / ca * p.planet.x;
+	float z = (r - p.planet.x - p.c[k].z.x) / (p.c[k].z.y - p.c[k].z.x);
+	return vec3(g / (2.0 * p.c[k].a.w) + 0.5, z);
+}
+
+vec3 from_uvw(int k, vec3 uvw) {
+	vec2 g = (uvw.xy - 0.5) * 2.0 * p.c[k].a.w / p.planet.x;
+	vec3 d = normalize(p.c[k].a.xyz + p.c[k].e.xyz * g.x + p.c[k].n.xyz * g.y);
+	return d * (p.planet.x + mix(p.c[k].z.x, p.c[k].z.y, uvw.z));
+}
+
+bool inside(vec3 uvw, float m) {
+	return all(greaterThan(uvw, vec3(m, m, 0.0))) && all(lessThan(uvw, vec3(1.0 - m, 1.0 - m, 1.0)));
+}
