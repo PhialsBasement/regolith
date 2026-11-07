@@ -20,6 +20,10 @@ night sky, with orbital mechanics between the planets.
 Everything above is the included example, rendered in engine: Mars
 (MOLA/HRSC), Mercury (MESSENGER) and Phobos at their real positions.
 
+**Built on Regolith: [MORS](https://store.steampowered.com/app/4950970/MORS/),
+a game set on true-scale Mars. If you like what you see, wishlist it on
+Steam.**
+
 ## Orbital mechanics
 
 `RegolithSystem` flies vessels the way KSP does, at true scale: gravity
