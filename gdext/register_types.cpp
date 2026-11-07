@@ -1,5 +1,6 @@
 #include <gdextension_interface.h>
 
+#include <godot_cpp/classes/editor_plugin_registration.hpp>
 #include <godot_cpp/core/class_db.hpp>
 #include <godot_cpp/core/defs.hpp>
 #include <godot_cpp/godot.hpp>
@@ -7,6 +8,7 @@
 #include "regolith_atmosphere.hpp"
 #include "regolith_body.hpp"
 #include "regolith_clouds.hpp"
+#include "regolith_editor.hpp"
 #include "regolith_weather.hpp"
 #include "regolith_collider.hpp"
 #include "regolith_system.hpp"
@@ -17,6 +19,11 @@ using namespace godot;
 namespace {
 
 void initialize_regolith(ModuleInitializationLevel p_level) {
+	if (p_level == MODULE_INITIALIZATION_LEVEL_EDITOR) {
+		GDREGISTER_INTERNAL_CLASS(RegolithEditorPlugin);
+		EditorPlugins::add_by_type<RegolithEditorPlugin>();
+		return;
+	}
 	if (p_level != MODULE_INITIALIZATION_LEVEL_SCENE) {
 		return;
 	}

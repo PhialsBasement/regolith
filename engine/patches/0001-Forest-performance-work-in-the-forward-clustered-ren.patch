@@ -1,0 +1,2121 @@
+From c2d4213b2700ecd06da2ef3014e4b396048d9bf1 Mon Sep 17 00:00:00 2001
+From: PhialsBasement <155454343+PhialsBasement@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 16:22:06 +1100
+Subject: [PATCH 1/3] Forest performance work in the forward clustered renderer
+
+Occlusion and cluster changes for dense vegetation: forest_occ.h,
+forest_cluster.cpp, and the scene cull, cluster builder, light and
+mesh storage, forward clustered and rendering device changes that
+use them.
+---
+ servers/rendering/forest_occ.h                | 386 ++++++++++++++
+ .../renderer_rd/cluster_builder_rd.h          |  11 +
+ .../forward_clustered/forest_cluster.cpp      | 488 ++++++++++++++++++
+ .../render_forward_clustered.cpp              | 318 +++++++++++-
+ .../render_forward_clustered.h                |  64 ++-
+ .../scene_forward_clustered.glsl              |   8 +-
+ .../scene_forward_clustered_inc.glsl          |   3 +-
+ .../renderer_rd/storage_rd/light_storage.h    |  14 +
+ .../renderer_rd/storage_rd/mesh_storage.h     |   6 +
+ servers/rendering/renderer_scene_cull.cpp     | 252 ++++++++-
+ servers/rendering/renderer_scene_cull.h       |  47 ++
+ servers/rendering/rendering_device.cpp        |   4 +
+ .../rendering/rendering_server_default.cpp    |  13 +
+ 13 files changed, 1597 insertions(+), 17 deletions(-)
+ create mode 100644 servers/rendering/forest_occ.h
+ create mode 100644 servers/rendering/renderer_rd/forward_clustered/forest_cluster.cpp
+
+diff --git a/servers/rendering/forest_occ.h b/servers/rendering/forest_occ.h
+new file mode 100644
+index 0000000000..b48c06a8e6
+--- /dev/null
++++ b/servers/rendering/forest_occ.h
+@@ -0,0 +1,386 @@
++/**************************************************************************/
++/*  forest_occ.h                                                          */
++/**************************************************************************/
++
++#pragma once
++
++#include "core/math/projection.h"
++#include "core/math/transform_3d.h"
++#include "core/templates/local_vector.h"
++
++// forest-perf: camera occlusion from the GPU depth prepass.
++// The renderer reduces the prepass depth to a tile grid of the
++// farthest planar depth per tile; the culler tests instance AABBs
++// against the latest grid with the camera it was captured with.
++// forest-perf: CPU phase timers, microseconds summed per window
++struct ForestTime {
++	enum {
++		DRAW,
++		SCENE_UPDATE,
++		CULL_PREP,
++		CULL,
++		RENDER_SCENE,
++		RS_FILL_SORT,
++		RS_SHADOW_SETUP,
++		RS_RECORD,
++		RECV_BUILD,
++		SLOT_MAX
++	};
++	static inline uint64_t acc[SLOT_MAX] = {};
++	static inline uint64_t frames = 0;
++	static inline const char *names[SLOT_MAX] = { "draw", "scene_update", "cull_prep", "cull", "render_scene", "rs_fill_sort", "rs_shadows", "rs_record", "recv_build" };
++};
++
++struct ForestOcc {
++	static inline bool enabled = false;
++	static inline LocalVector<float> tiles;
++	static inline int w = 0;
++	static inline int h = 0;
++	static inline Projection capture_vp; // correction * proj * view
++	static inline Vector3 capture_pos;
++	static inline Vector3 cam_now;
++	static inline uint64_t culled = 0;
++	static inline uint64_t tested = 0;
++
++	static inline bool shadow_cull = false;
++	static inline uint64_t sh_tested = 0;
++	static inline uint64_t sh_culled = 0;
++	static inline uint64_t version = 0;
++	static inline Vector3 last_travel;
++
++	// Light-space 2D grid of everything the camera can see (surfaces
++	// and the air in front of them). A caster matters only if its
++	// light-space footprint touches a marked cell.
++	static constexpr int RG = 400;
++	static constexpr real_t RCELL = 2.0;
++	// one grid per cascade, each holding the visible points (and air)
++	// inside that cascade's camera depth slice
++	static constexpr int RCASC = 4;
++	static inline LocalVector<uint32_t> recv_sat[RCASC];
++	static inline uint64_t recv_version = 0;
++	static inline Vector3 rl_x, rl_y, rl_origin;
++	static inline real_t splits[RCASC + 1] = { 0, 1e6, 1e6, 1e6, 1e6 };
++	static inline int split_count = 0;
++
++	static inline LocalVector<uint8_t> recv_scratch[RCASC];
++	// per tile-group corner: ray direction and 1/cos to the view axis
++	static constexpr int RGROUP = 4;
++	static inline LocalVector<Vector3> grp_dir;
++	static inline LocalVector<real_t> grp_inv_cos;
++	static inline LocalVector<float> grp_far;
++	static inline int grp_w = 0, grp_h = 0;
++	static inline Vector3 build_travel;
++
++	static void _fill_poly(Vector2 *p_pts, int p_n, uint8_t *p_dst) {
++		// convex hull (monotone chain), then scanline fill
++		for (int i = 1; i < p_n; i++) {
++			for (int j = i; j > 0 && (p_pts[j].x < p_pts[j - 1].x || (p_pts[j].x == p_pts[j - 1].x && p_pts[j].y < p_pts[j - 1].y)); j--) {
++				SWAP(p_pts[j], p_pts[j - 1]);
++			}
++		}
++		Vector2 hull[24];
++		int k = 0;
++		for (int pass = 0; pass < 2; pass++) {
++			int start = k;
++			for (int ii = 0; ii < p_n; ii++) {
++				int i = pass == 0 ? ii : p_n - 1 - ii;
++				while (k >= start + 2 && (hull[k - 1] - hull[k - 2]).cross(p_pts[i] - hull[k - 2]) <= 0) {
++					k--;
++				}
++				hull[k++] = p_pts[i];
++			}
++			k--;
++		}
++		if (k < 3) {
++			k = MAX(k, 1);
++		}
++		real_t ymin = 1e30, ymax = -1e30;
++		for (int i = 0; i < k; i++) {
++			ymin = MIN(ymin, hull[i].y);
++			ymax = MAX(ymax, hull[i].y);
++		}
++		int r0 = CLAMP(int(Math::floor(ymin)), 0, RG - 1);
++		int r1 = CLAMP(int(Math::floor(ymax)), 0, RG - 1);
++		for (int r = r0; r <= r1; r++) {
++			// x extent of the hull inside the band [r, r + 1]
++			real_t y0 = r, y1 = r + 1;
++			real_t xl = 1e30, xr = -1e30;
++			for (int i = 0; i < k; i++) {
++				Vector2 a = hull[i], b = hull[(i + 1) % k];
++				real_t lo = MIN(a.y, b.y), hi = MAX(a.y, b.y);
++				if (hi < y0 || lo > y1) {
++					continue;
++				}
++				if (hi - lo < 1e-6) {
++					xl = MIN(xl, MIN(a.x, b.x));
++					xr = MAX(xr, MAX(a.x, b.x));
++					continue;
++				}
++				real_t ta = (CLAMP(y0, lo, hi) - a.y) / (b.y - a.y);
++				real_t tb = (CLAMP(y1, lo, hi) - a.y) / (b.y - a.y);
++				real_t xa = a.x + (b.x - a.x) * ta;
++				real_t xb = a.x + (b.x - a.x) * tb;
++				xl = MIN(xl, MIN(xa, xb));
++				xr = MAX(xr, MAX(xa, xb));
++			}
++			if (xl > xr) {
++				continue;
++			}
++			int c0 = CLAMP(int(Math::floor(xl)) - 1, 0, RG - 1);
++			int c1 = CLAMP(int(Math::floor(xr)) + 1, 0, RG - 1);
++			memset(p_dst + r * RG + c0, 1, c1 - c0 + 1);
++		}
++	}
++
++	// Shared setup on the calling thread; slices then build in
++	// parallel (build_slice is safe per distinct p_k).
++	static int prepare_receivers(const Vector3 &p_travel) {
++		recv_version = version;
++		build_travel = p_travel;
++		Vector3 up = Math::abs(p_travel.y) < 0.99 ? Vector3(0, 1, 0) : Vector3(1, 0, 0);
++		rl_x = p_travel.cross(up).normalized();
++		rl_y = p_travel.cross(rl_x).normalized();
++		rl_origin = capture_pos;
++		Projection inv = capture_vp.inverse();
++		auto unproject = [&](real_t nx, real_t ny) -> Vector3 {
++			Vector3 p = inv.xform(Vector3(nx, ny, 0.5));
++			return (p - capture_pos).normalized();
++		};
++		Vector3 fwd = unproject(0, 0);
++		grp_w = (w + RGROUP - 1) / RGROUP;
++		grp_h = (h + RGROUP - 1) / RGROUP;
++		grp_dir.resize((grp_w + 1) * (grp_h + 1));
++		grp_inv_cos.resize((grp_w + 1) * (grp_h + 1));
++		for (int y = 0; y <= grp_h; y++) {
++			for (int x = 0; x <= grp_w; x++) {
++				real_t nx = CLAMP(real_t(x * RGROUP) / w * 2.0 - 1.0, -1.0, 1.0);
++				real_t ny = CLAMP(real_t(y * RGROUP) / h * 2.0 - 1.0, -1.0, 1.0);
++				Vector3 d = unproject(nx, ny);
++				grp_dir[y * (grp_w + 1) + x] = d;
++				grp_inv_cos[y * (grp_w + 1) + x] = 1.0 / MAX(d.dot(fwd), (real_t)0.05);
++			}
++		}
++		// farthest planar depth of each group
++		grp_far.resize(grp_w * grp_h);
++		for (int gy = 0; gy < grp_h; gy++) {
++			for (int gx = 0; gx < grp_w; gx++) {
++				float far_d = 0;
++				for (int yy = gy * RGROUP; yy < MIN((gy + 1) * RGROUP, h); yy++) {
++					for (int xx = gx * RGROUP; xx < MIN((gx + 1) * RGROUP, w); xx++) {
++						far_d = MAX(far_d, tiles[yy * w + xx]);
++					}
++				}
++				grp_far[gy * grp_w + gx] = MIN(far_d, 400.0f) + 1.0f;
++			}
++		}
++		return CLAMP(split_count, 1, RCASC);
++	}
++
++	static void build_slice(uint32_t p_k) {
++		// slice k; with no split info the whole range in one grid
++		real_t d0 = split_count > 0 ? splits[p_k] : 0.0;
++		real_t d1 = split_count > 0 ? splits[p_k + 1] : 1e6;
++		d0 = MAX(d0 - 2.0, (real_t)0.0);
++		d1 += 2.0;
++		LocalVector<uint8_t> &buf = recv_scratch[p_k];
++		buf.resize(RG * RG);
++		memset(buf.ptr(), 0, RG * RG);
++		auto to_grid = [&](const Vector3 &p) -> Vector2 {
++			Vector3 d = p - rl_origin;
++			return Vector2(d.dot(rl_x) / RCELL + RG * 0.5, d.dot(rl_y) / RCELL + RG * 0.5);
++		};
++		const int GW = grp_w + 1;
++		for (int gy = 0; gy < grp_h; gy++) {
++			for (int gx = 0; gx < grp_w; gx++) {
++				real_t far_d = grp_far[gy * grp_w + gx];
++				if (far_d < d0) {
++					continue; // this group sees nothing in the slice
++				}
++				real_t a1 = MIN(far_d, d1);
++				Vector2 pts[8];
++				for (int c = 0; c < 4; c++) {
++					int ci = (gy + ((c & 2) ? 1 : 0)) * GW + gx + ((c & 1) ? 1 : 0);
++					const Vector3 &dir = grp_dir[ci];
++					real_t ic = grp_inv_cos[ci];
++					pts[c] = to_grid(capture_pos + dir * (d0 * ic));
++					pts[4 + c] = to_grid(capture_pos + dir * (a1 * ic));
++				}
++				_fill_poly(pts, 8, buf.ptr());
++			}
++		}
++		LocalVector<uint32_t> &sat = recv_sat[p_k];
++		const int W = RG + 1;
++		sat.resize(W * W);
++		memset(sat.ptr(), 0, W * sizeof(uint32_t));
++		for (int r = 0; r < RG; r++) {
++			uint32_t row_sum = 0;
++			sat[(r + 1) * W] = 0;
++			for (int c = 0; c < RG; c++) {
++				row_sum += buf[r * RG + c];
++				sat[(r + 1) * W + c + 1] = sat[r * W + c + 1] + row_sum;
++			}
++		}
++	}
++
++	// Light-space footprint rect of a caster in grid cells; false
++	// when it leaves the grid (then the caster is always kept).
++	static bool footprint(const real_t p_b[6], const Vector3 &p_travel, int r_rect[4]) {
++		if (w == 0 || tiles.is_empty()) {
++			return false;
++		}
++		last_travel = p_travel;
++		if (recv_version != version || recv_sat[0].is_empty()) {
++			return false; // built on the cull thread entry, not here
++		}
++		sh_tested++;
++		real_t x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30;
++		for (int j = 0; j < 8; j++) {
++			Vector3 c(j & 1 ? p_b[0] : p_b[3], j & 2 ? p_b[1] : p_b[4], j & 4 ? p_b[2] : p_b[5]);
++			Vector3 d = c - rl_origin;
++			real_t gx = d.dot(rl_x) / RCELL + RG * 0.5;
++			real_t gy = d.dot(rl_y) / RCELL + RG * 0.5;
++			x0 = MIN(x0, gx);
++			x1 = MAX(x1, gx);
++			y0 = MIN(y0, gy);
++			y1 = MAX(y1, gy);
++		}
++		// penumbra, motion and cascade reuse pad, in cells
++		real_t pad = (3.0 + cam_now.distance_to(capture_pos) * 2.0) / RCELL;
++		r_rect[0] = int(Math::floor(x0 - pad));
++		r_rect[1] = int(Math::floor(x1 + pad));
++		r_rect[2] = int(Math::floor(y0 - pad));
++		r_rect[3] = int(Math::floor(y1 + pad));
++		return r_rect[0] >= 0 && r_rect[2] >= 0 && r_rect[1] < RG && r_rect[3] < RG;
++	}
++
++	// True when the caster's footprint touches no visible point of
++	// cascade p_k's slice.
++	static bool unseen_in(const int p_rect[4], int p_k) {
++		int k = split_count > 0 ? CLAMP(p_k, 0, RCASC - 1) : 0;
++		if (recv_sat[k].is_empty()) {
++			return false;
++		}
++		const uint32_t *s = recv_sat[k].ptr();
++		const int W = RG + 1;
++		int c0 = p_rect[0], c1 = p_rect[1], r0 = p_rect[2], r1 = p_rect[3];
++		uint32_t n = s[(r1 + 1) * W + c1 + 1] - s[r0 * W + c1 + 1] - s[(r1 + 1) * W + c0] + s[r0 * W + c0];
++		if (n > 0) {
++			return false;
++		}
++		sh_culled++;
++		return true;
++	}
++
++	// True when every camera-visible point lies in front of this box,
++	// or the box is off screen: nothing visible can sample it.
++	static bool box_unseen(const Vector3 &p_lo, const Vector3 &p_hi) {
++		real_t x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30, zmin = 1e30;
++		const Projection &m = capture_vp;
++		for (int j = 0; j < 8; j++) {
++			Vector3 c(j & 1 ? p_lo.x : p_hi.x, j & 2 ? p_lo.y : p_hi.y, j & 4 ? p_lo.z : p_hi.z);
++			real_t cx = m.columns[0][0] * c.x + m.columns[1][0] * c.y + m.columns[2][0] * c.z + m.columns[3][0];
++			real_t cy = m.columns[0][1] * c.x + m.columns[1][1] * c.y + m.columns[2][1] * c.z + m.columns[3][1];
++			real_t cw = m.columns[0][3] * c.x + m.columns[1][3] * c.y + m.columns[2][3] * c.z + m.columns[3][3];
++			if (cw < 0.5) {
++				return false;
++			}
++			x0 = MIN(x0, cx / cw);
++			x1 = MAX(x1, cx / cw);
++			y0 = MIN(y0, cy / cw);
++			y1 = MAX(y1, cy / cw);
++			zmin = MIN(zmin, cw);
++		}
++		if (x1 < -1.0 || x0 > 1.0 || y1 < -1.0 || y0 > 1.0) {
++			return true;
++		}
++		zmin -= cam_now.distance_to(capture_pos) * 2.0 + 0.5;
++		int tx0 = CLAMP(int((x0 * 0.5 + 0.5) * w) - 1, 0, w - 1);
++		int tx1 = CLAMP(int((x1 * 0.5 + 0.5) * w) + 1, 0, w - 1);
++		int ty0 = CLAMP(int((y0 * 0.5 + 0.5) * h) - 1, 0, h - 1);
++		int ty1 = CLAMP(int((y1 * 0.5 + 0.5) * h) + 1, 0, h - 1);
++		if ((tx1 - tx0 + 1) * (ty1 - ty0 + 1) > 4096) {
++			return false;
++		}
++		for (int y = ty0; y <= ty1; y++) {
++			const float *row = tiles.ptr() + y * w;
++			for (int x = tx0; x <= tx1; x++) {
++				if (row[x] >= zmin) {
++					return false;
++				}
++			}
++		}
++		return true;
++	}
++
++	// Caster whose whole shadow sweep (and penumbra pad) is unseen.
++	static bool shadow_unseen(const real_t p_b[6], const Vector3 &p_light_travel) {
++		if (w == 0 || tiles.is_empty()) {
++			return false;
++		}
++		sh_tested++;
++		Vector3 lo(MIN(p_b[0], p_b[3]), MIN(p_b[1], p_b[4]), MIN(p_b[2], p_b[5]));
++		Vector3 hi(MAX(p_b[0], p_b[3]), MAX(p_b[1], p_b[4]), MAX(p_b[2], p_b[5]));
++		real_t down = MAX(-p_light_travel.y, (real_t)0.2);
++		real_t len = (hi.y - lo.y + 40.0) / down;
++		int steps = MAX(1, int(Math::ceil(len / 6.0)));
++		Vector3 pad(2.0, 2.0, 2.0);
++		for (int s = 0; s < steps; s++) {
++			Vector3 a = p_light_travel * (len * s / steps);
++			Vector3 b = p_light_travel * (len * (s + 1) / steps);
++			Vector3 slo = lo + a.min(b) - pad;
++			Vector3 shi = hi + a.max(b) + pad;
++			if (!box_unseen(slo, shi)) {
++				return false;
++			}
++		}
++		sh_culled++;
++		return true;
++	}
++
++	static bool occluded(const real_t p_b[6]) {
++		if (w == 0) {
++			return false;
++		}
++		tested++;
++		real_t x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30, zmin = 1e30;
++		for (int j = 0; j < 8; j++) {
++			Vector3 c(j & 1 ? p_b[0] : p_b[3], j & 2 ? p_b[1] : p_b[4], j & 4 ? p_b[2] : p_b[5]);
++			const Projection &m = capture_vp;
++			real_t cx = m.columns[0][0] * c.x + m.columns[1][0] * c.y + m.columns[2][0] * c.z + m.columns[3][0];
++			real_t cy = m.columns[0][1] * c.x + m.columns[1][1] * c.y + m.columns[2][1] * c.z + m.columns[3][1];
++			real_t cw = m.columns[0][3] * c.x + m.columns[1][3] * c.y + m.columns[2][3] * c.z + m.columns[3][3];
++			if (cw < 0.5) {
++				return false; // crosses the near region
++			}
++			real_t nx = cx / cw, ny = cy / cw;
++			if (nx < -1.0 || nx > 1.0 || ny < -1.0 || ny > 1.0) {
++				return false; // not fully inside the captured view
++			}
++			x0 = MIN(x0, nx);
++			x1 = MAX(x1, nx);
++			y0 = MIN(y0, ny);
++			y1 = MAX(y1, ny);
++			zmin = MIN(zmin, cw);
++		}
++		// parallax slack for camera motion since capture
++		real_t slack = cam_now.distance_to(capture_pos) * 2.0 + 0.5;
++		zmin -= slack;
++		int tx0 = CLAMP(int((x0 * 0.5 + 0.5) * w) - 1, 0, w - 1);
++		int tx1 = CLAMP(int((x1 * 0.5 + 0.5) * w) + 1, 0, w - 1);
++		int ty0 = CLAMP(int((y0 * 0.5 + 0.5) * h) - 1, 0, h - 1);
++		int ty1 = CLAMP(int((y1 * 0.5 + 0.5) * h) + 1, 0, h - 1);
++		if ((tx1 - tx0 + 1) * (ty1 - ty0 + 1) > 2048) {
++			return false;
++		}
++		for (int y = ty0; y <= ty1; y++) {
++			const float *row = tiles.ptr() + y * w;
++			for (int x = tx0; x <= tx1; x++) {
++				if (row[x] >= zmin) {
++					return false;
++				}
++			}
++		}
++		culled++;
++		return true;
++	}
++};
+diff --git a/servers/rendering/renderer_rd/cluster_builder_rd.h b/servers/rendering/renderer_rd/cluster_builder_rd.h
+index 49b039a997..b80458f33c 100644
+--- a/servers/rendering/renderer_rd/cluster_builder_rd.h
++++ b/servers/rendering/renderer_rd/cluster_builder_rd.h
+@@ -233,6 +233,17 @@ public:
+ 
+ 	void begin(const Transform3D &p_view_transform, const Projection &p_cam_projection, bool p_flip_y);
+ 
++	// forest-perf: bit per element type with at least one element
++	_FORCE_INLINE_ uint32_t get_type_mask() const {
++		uint32_t m = 0;
++		for (uint32_t i = 0; i < ELEMENT_TYPE_MAX; i++) {
++			if (cluster_count_by_type[i] > 0) {
++				m |= 1u << i;
++			}
++		}
++		return m;
++	}
++
+ 	_FORCE_INLINE_ void add_light(LightType p_type, const Transform3D &p_transform, float p_radius, float p_spot_aperture, const Vector2 &p_area_size) {
+ 		if (p_type == LIGHT_TYPE_OMNI && cluster_count_by_type[ELEMENT_TYPE_OMNI_LIGHT] == max_elements_by_type) {
+ 			return; // Max number elements reached.
+diff --git a/servers/rendering/renderer_rd/forward_clustered/forest_cluster.cpp b/servers/rendering/renderer_rd/forward_clustered/forest_cluster.cpp
+new file mode 100644
+index 0000000000..6965b82ae3
+--- /dev/null
++++ b/servers/rendering/renderer_rd/forward_clustered/forest_cluster.cpp
+@@ -0,0 +1,488 @@
++/**************************************************************************/
++/*  forest_cluster.cpp                                                    */
++/**************************************************************************/
++
++// forest-perf: GPU cluster culling for dense foliage. Chosen mesh
++// surfaces are split into 128-triangle clusters; each frame a compute
++// pass tests every cluster of every drawn instance against the camera
++// frustum and the previous frame's depth tiles, compacts the visible
++// clusters into an index buffer and writes one indirect draw per
++// instance. The camera prepass and colour pass draw those instead of
++// the full surface. Shadow passes keep the full surface.
++
++#include "render_forward_clustered.h"
++
++#include "core/os/os.h"
++#include "servers/rendering/forest_occ.h"
++#include "servers/rendering/renderer_rd/storage_rd/mesh_storage.h"
++#include "servers/rendering/renderer_rd/uniform_set_cache_rd.h"
++#include "servers/rendering/rendering_server.h"
++
++using namespace RendererSceneRenderImplementation;
++
++static const char *forest_cl_glsl = R"(
++#version 450
++layout(local_size_x = 256) in;
++struct Cluster {
++	vec4 mn;
++	vec4 mx;
++};
++layout(set = 0, binding = 0, std430) readonly buffer Clusters { Cluster cl[]; };
++layout(set = 0, binding = 1, std430) readonly buffer Insts { vec4 inst[]; };
++layout(set = 0, binding = 2, std430) readonly buffer Params {
++	mat4 prev_vp;
++	vec4 planes[6];
++	vec4 cam;
++	uvec4 a;
++} P;
++layout(set = 0, binding = 3, std430) readonly buffer Tiles { float tiles[]; };
++layout(set = 0, binding = 4, std430) buffer Counts { uint counts[]; };
++layout(set = 0, binding = 5, std430) buffer Vis { uint vis[]; };
++layout(set = 0, binding = 6, std430) buffer Indirect { uint cmd[]; };
++layout(set = 0, binding = 7, std430) readonly buffer Src { uint src[]; };
++layout(set = 0, binding = 8, std430) buffer Dst { uint dst[]; };
++layout(push_constant, std430) uniform PC {
++	uint mode;
++	uint inst_count;
++	uint cluster_count;
++	uint slot_base;
++	uint full_count;
++	uint cap;
++	uint pad0;
++	uint pad1;
++} pc;
++
++shared uint s_cnt;
++shared uint s_base;
++shared uint s_scan[256];
++
++bool cluster_visible(uint ii, uint c) {
++	vec4 r0 = inst[ii * 4u];
++	vec4 r1 = inst[ii * 4u + 1u];
++	vec4 r2 = inst[ii * 4u + 2u];
++	vec3 mn = cl[c].mn.xyz;
++	vec3 mx = cl[c].mx.xyz;
++	vec3 oc = (mn + mx) * 0.5;
++	vec3 oe = (mx - mn) * 0.5;
++	vec3 wc = vec3(dot(r0.xyz, oc) + r0.w, dot(r1.xyz, oc) + r1.w, dot(r2.xyz, oc) + r2.w);
++	vec3 we = vec3(dot(abs(r0.xyz), oe), dot(abs(r1.xyz), oe), dot(abs(r2.xyz), oe));
++	for (int p = 0; p < 6; p++) {
++		vec4 pl = P.planes[p];
++		if (dot(pl.xyz, wc) - pl.w - dot(abs(pl.xyz), we) > 0.0) {
++			return false;
++		}
++	}
++	if (P.a.z == 0u) {
++		return true;
++	}
++	float x0 = 1e30, y0 = 1e30, x1 = -1e30, y1 = -1e30, zmin = 1e30;
++	for (int j = 0; j < 8; j++) {
++		vec3 s = vec3((j & 1) != 0 ? 1.0 : -1.0, (j & 2) != 0 ? 1.0 : -1.0, (j & 4) != 0 ? 1.0 : -1.0);
++		vec4 cp = P.prev_vp * vec4(wc + we * s, 1.0);
++		if (cp.w < 0.5) {
++			return true;
++		}
++		vec2 nd = cp.xy / cp.w;
++		if (nd.x < -1.0 || nd.x > 1.0 || nd.y < -1.0 || nd.y > 1.0) {
++			return true;
++		}
++		x0 = min(x0, nd.x);
++		x1 = max(x1, nd.x);
++		y0 = min(y0, nd.y);
++		y1 = max(y1, nd.y);
++		zmin = min(zmin, cp.w);
++	}
++	zmin -= P.cam.w;
++	int W = int(P.a.x);
++	int H = int(P.a.y);
++	int tx0 = clamp(int((x0 * 0.5 + 0.5) * float(W)) - 1, 0, W - 1);
++	int tx1 = clamp(int((x1 * 0.5 + 0.5) * float(W)) + 1, 0, W - 1);
++	int ty0 = clamp(int((y0 * 0.5 + 0.5) * float(H)) - 1, 0, H - 1);
++	int ty1 = clamp(int((y1 * 0.5 + 0.5) * float(H)) + 1, 0, H - 1);
++	if ((tx1 - tx0 + 1) * (ty1 - ty0 + 1) > 256) {
++		return true;
++	}
++	for (int y = ty0; y <= ty1; y++) {
++		for (int x = tx0; x <= tx1; x++) {
++			if (tiles[y * W + x] >= zmin) {
++				return true;
++			}
++		}
++	}
++	return false;
++}
++
++void main() {
++	uint tid = gl_LocalInvocationID.x;
++	uint ii = gl_WorkGroupID.x;
++	uint vw = (pc.cluster_count + 31u) / 32u;
++	if (pc.mode == 0u) {
++		if (tid == 0u) {
++			s_cnt = 0u;
++		}
++		barrier();
++		for (uint c = tid; c < pc.cluster_count; c += 256u) {
++			if (cluster_visible(ii, c)) {
++				atomicOr(vis[ii * vw + c / 32u], 1u << (c % 32u));
++				atomicAdd(s_cnt, floatBitsToUint(cl[c].mx.w));
++			}
++		}
++		barrier();
++		if (tid == 0u) {
++			counts[ii] = s_cnt;
++		}
++	} else if (pc.mode == 1u) {
++		if (tid == 0u && ii == 0u) {
++			uint off = 0u;
++			for (uint k = 0u; k < pc.inst_count; k++) {
++				uint n = counts[k];
++				uint first_inst = floatBitsToUint(inst[k * 4u + 3u].x);
++				uint b = (pc.slot_base + k) * 5u;
++				if (off + n > pc.cap) {
++					// overflow: draw the full surface from region 0
++					cmd[b] = pc.full_count;
++					cmd[b + 2u] = 0u;
++					counts[k] = 0xFFFFFFFFu;
++				} else {
++					cmd[b] = n;
++					cmd[b + 2u] = pc.full_count + off;
++					counts[k] = off;
++					off += n;
++				}
++				cmd[b + 1u] = 1u;
++				cmd[b + 3u] = 0u;
++				cmd[b + 4u] = first_inst;
++			}
++		}
++	} else {
++		uint off = counts[ii];
++		if (off == 0xFFFFFFFFu) {
++			return;
++		}
++		if (tid == 0u) {
++			s_base = 0u;
++		}
++		barrier();
++		for (uint c0 = 0u; c0 < pc.cluster_count; c0 += 256u) {
++			uint c = c0 + tid;
++			uint n = 0u;
++			if (c < pc.cluster_count && (vis[ii * vw + c / 32u] & (1u << (c % 32u))) != 0u) {
++				n = floatBitsToUint(cl[c].mx.w);
++			}
++			s_scan[tid] = n;
++			barrier();
++			for (uint s = 1u; s < 256u; s <<= 1u) {
++				uint v = tid >= s ? s_scan[tid - s] : 0u;
++				barrier();
++				s_scan[tid] += v;
++				barrier();
++			}
++			uint local_off = s_base + s_scan[tid] - n;
++			if (n > 0u) {
++				uint first = floatBitsToUint(cl[c].mn.w);
++				uint d = pc.full_count + off + local_off;
++				for (uint k = 0u; k < n; k++) {
++					dst[d + k] = src[first + k];
++				}
++			}
++			barrier();
++			if (tid == 255u) {
++				s_base += s_scan[255];
++			}
++			barrier();
++		}
++	}
++	// keep every binding referenced in every mode
++	if (pc.mode == 99u) {
++		dst[0] = src[0] + uint(tiles[0]) + cmd[0] + vis[0] + counts[0] + uint(P.cam.x) + uint(inst[0].x) + uint(cl[0].mn.x);
++	}
++}
++)";
++
++static uint32_t forest_morton3(uint32_t x, uint32_t y, uint32_t z) {
++	auto spread = [](uint32_t v) -> uint32_t {
++		v &= 0x3ff;
++		v = (v | (v << 16)) & 0x030000FF;
++		v = (v | (v << 8)) & 0x0300F00F;
++		v = (v | (v << 4)) & 0x030C30C3;
++		v = (v | (v << 2)) & 0x09249249;
++		return v;
++	};
++	return spread(x) | (spread(y) << 1) | (spread(z) << 2);
++}
++
++int RenderForwardClustered::_forest_cluster_mesh_index(GeometryInstanceSurfaceDataCache *p_surf) {
++	for (uint32_t m = 0; m < forest_cmeshes.size(); m++) {
++		if (forest_cmeshes[m].surface == p_surf->surface) {
++			return m;
++		}
++	}
++	for (uint32_t m = 0; m < forest_cluster_skip.size(); m++) {
++		if (forest_cluster_skip[m] == (uint32_t)(uintptr_t)p_surf->surface) {
++			return -1;
++		}
++	}
++	RendererRD::MeshStorage *ms = RendererRD::MeshStorage::get_singleton();
++	uint32_t ic = ms->forest_mesh_surface_get_index_count(p_surf->surface);
++	bool want = false;
++	for (uint32_t t : forest_cluster_tris) {
++		if (ic == t * 3) {
++			want = true;
++		}
++	}
++	if (!want || (p_surf->owner->base_flags & (INSTANCE_DATA_FLAG_MULTIMESH | INSTANCE_DATA_FLAG_PARTICLES)) || p_surf->owner->mesh_instance.is_valid()) {
++		forest_cluster_skip.push_back((uint32_t)(uintptr_t)p_surf->surface);
++		return -1;
++	}
++
++	// build clusters from the surface arrays, once
++	RenderingServerTypes::SurfaceData sd = static_cast<RendererMeshStorage *>(ms)->mesh_get_surface(p_surf->owner->data->base, p_surf->surface_index);
++	Array arr = RenderingServer::get_singleton()->mesh_create_arrays_from_surface_data(sd);
++	PackedVector3Array verts = arr[RSE::ARRAY_VERTEX];
++	PackedInt32Array idx = arr[RSE::ARRAY_INDEX];
++	uint32_t tri_count = idx.size() / 3;
++	ERR_FAIL_COND_V(tri_count == 0, -1);
++	AABB box;
++	box.position = verts[0];
++	for (const Vector3 &v : verts) {
++		box.expand_to(v);
++	}
++	Vector3 inv = Vector3(1, 1, 1) / box.size.maxf(1e-4);
++	struct Tri {
++		uint32_t key;
++		uint32_t t;
++	};
++	LocalVector<Tri> tris;
++	tris.resize(tri_count);
++	for (uint32_t t = 0; t < tri_count; t++) {
++		Vector3 c = (verts[idx[t * 3]] + verts[idx[t * 3 + 1]] + verts[idx[t * 3 + 2]]) / 3.0;
++		Vector3 n = (c - box.position) * inv * 1023.0;
++		tris[t] = { forest_morton3(uint32_t(n.x), uint32_t(n.y), uint32_t(n.z)), t };
++	}
++	struct ByKey {
++		_FORCE_INLINE_ bool operator()(const Tri &a, const Tri &b) const { return a.key < b.key; }
++	};
++	SortArray<Tri, ByKey> sorter;
++	sorter.sort(tris.ptr(), tri_count);
++
++	const uint32_t CT = 128;
++	const real_t wind_pad = 0.35; // largest wind displacement
++	uint32_t ncl = (tri_count + CT - 1) / CT;
++	LocalVector<uint32_t> sorted;
++	sorted.resize(tri_count * 3);
++	LocalVector<float> cl;
++	cl.resize(ncl * 8);
++	for (uint32_t c = 0; c < ncl; c++) {
++		AABB cb;
++		bool first = true;
++		uint32_t t0 = c * CT, t1 = MIN(tri_count, t0 + CT);
++		for (uint32_t k = t0; k < t1; k++) {
++			for (int e = 0; e < 3; e++) {
++				uint32_t vi = idx[tris[k].t * 3 + e];
++				sorted[k * 3 + e] = vi;
++				if (first) {
++					cb.position = verts[vi];
++					first = false;
++				} else {
++					cb.expand_to(verts[vi]);
++				}
++			}
++		}
++		cb = cb.grow(wind_pad);
++		uint32_t fi = t0 * 3, cnt = (t1 - t0) * 3;
++		float *o = cl.ptr() + c * 8;
++		o[0] = cb.position.x;
++		o[1] = cb.position.y;
++		o[2] = cb.position.z;
++		memcpy(&o[3], &fi, 4);
++		o[4] = cb.position.x + cb.size.x;
++		o[5] = cb.position.y + cb.size.y;
++		o[6] = cb.position.z + cb.size.z;
++		memcpy(&o[7], &cnt, 4);
++	}
++	RD *rd = RD::get_singleton();
++	ForestClusterMesh fm;
++	fm.surface = p_surf->surface;
++	fm.cluster_count = ncl;
++	fm.index_count = tri_count * 3;
++	fm.sorted_idx = rd->storage_buffer_create(sorted.size() * 4, Span<uint8_t>((uint8_t *)sorted.ptr(), sorted.size() * 4));
++	fm.clusters = rd->storage_buffer_create(cl.size() * 4, Span<uint8_t>((uint8_t *)cl.ptr(), cl.size() * 4));
++	// region 0 holds the full sorted surface, for overflow
++	fm.out_cap = MAX(fm.index_count * 48u, 32u * 1024u * 1024u);
++	fm.out_idx = rd->index_buffer_create(fm.index_count + fm.out_cap, RD::INDEX_BUFFER_FORMAT_UINT32, Span<uint8_t>(), false, RD::BUFFER_CREATION_AS_STORAGE_BIT);
++	rd->buffer_update(fm.out_idx, 0, fm.index_count * 4, sorted.ptr());
++	fm.out_array = rd->index_array_create(fm.out_idx, 0, fm.index_count + fm.out_cap);
++	forest_cmeshes.push_back(fm);
++	print_line(vformat("FOREST cluster mesh: %d tris, %d clusters", tri_count, ncl));
++	return forest_cmeshes.size() - 1;
++}
++
++void RenderForwardClustered::_forest_cluster_prepare(RenderDataRD *p_render_data) {
++	RenderList &rl = render_list[RENDER_LIST_OPAQUE];
++	uint32_t n = rl.elements.size();
++	forest_cl_slot.resize(n);
++	forest_cl_mesh_of.resize(n);
++	for (uint32_t i = 0; i < n; i++) {
++		forest_cl_slot[i] = -1;
++		forest_cl_mesh_of[i] = -1;
++	}
++	if (forest_cluster_tris.is_empty() || n == 0) {
++		return;
++	}
++	for (ForestClusterMesh &fm : forest_cmeshes) {
++		fm.slot_count = 0;
++		fm.inst_data.clear();
++	}
++	// walk draw groups exactly as _render_list_template does
++	for (uint32_t i = 0; i < n;) {
++		uint32_t rep = MAX(rl.element_info[i].repeat, 1u);
++		for (uint32_t k = 0; k < rep && i + k < n; k++) {
++			GeometryInstanceSurfaceDataCache *s = rl.elements[i + k];
++			int m = _forest_cluster_mesh_index(s);
++			if (m < 0) {
++				continue;
++			}
++			ForestClusterMesh &fm = forest_cmeshes[m];
++			forest_cl_mesh_of[i + k] = m;
++			forest_cl_slot[i + k] = fm.slot_count++;
++			const Transform3D &xf = s->owner->transform;
++			for (int r = 0; r < 3; r++) {
++				fm.inst_data.push_back(xf.basis.rows[r].x);
++				fm.inst_data.push_back(xf.basis.rows[r].y);
++				fm.inst_data.push_back(xf.basis.rows[r].z);
++				fm.inst_data.push_back(xf.origin[r]);
++			}
++			uint32_t fi = k;
++			float ff;
++			memcpy(&ff, &fi, 4);
++			fm.inst_data.push_back(ff);
++			fm.inst_data.push_back(0);
++			fm.inst_data.push_back(0);
++			fm.inst_data.push_back(0);
++		}
++		i += rep;
++	}
++	uint32_t total = 0;
++	for (ForestClusterMesh &fm : forest_cmeshes) {
++		fm.first_slot = total;
++		total += fm.slot_count;
++	}
++	if (total == 0) {
++		return;
++	}
++	for (uint32_t i = 0; i < n; i++) {
++		if (forest_cl_mesh_of[i] >= 0) {
++			forest_cl_slot[i] += forest_cmeshes[forest_cl_mesh_of[i]].first_slot;
++		}
++	}
++
++	RD *rd = RD::get_singleton();
++	if (forest_cl_shader.is_null()) {
++		String err;
++		Vector<uint8_t> spirv = rd->shader_compile_spirv_from_source(RD::SHADER_STAGE_COMPUTE, forest_cl_glsl, RD::SHADER_LANGUAGE_GLSL, &err);
++		ERR_FAIL_COND_MSG(spirv.is_empty(), "forest cluster shader: " + err);
++		Vector<RD::ShaderStageSPIRVData> stages;
++		RD::ShaderStageSPIRVData sdata;
++		sdata.shader_stage = RD::SHADER_STAGE_COMPUTE;
++		sdata.spirv = spirv;
++		stages.push_back(sdata);
++		forest_cl_shader = rd->shader_create_from_spirv(stages, "ForestCluster");
++		forest_cl_pipeline = rd->compute_pipeline_create(forest_cl_shader);
++		forest_cl_params = rd->storage_buffer_create(256);
++	}
++	if (total > forest_cl_indirect_cap) {
++		if (forest_cl_indirect.is_valid()) {
++			rd->free_rid(forest_cl_indirect);
++		}
++		forest_cl_indirect_cap = MAX(total * 2, 1024u);
++		forest_cl_indirect = rd->storage_buffer_create(forest_cl_indirect_cap * 20, Span<uint8_t>(), RD::STORAGE_BUFFER_USAGE_DISPATCH_INDIRECT);
++	}
++
++	// camera planes, previous-frame depth tiles and their camera
++	struct {
++		float prev_vp[16];
++		float planes[24];
++		float cam[4];
++		uint32_t a[4];
++	} params = {};
++	Projection pvp = forest_occ_last_vp;
++	for (int c = 0; c < 4; c++) {
++		for (int r = 0; r < 4; r++) {
++			params.prev_vp[c * 4 + r] = pvp.columns[c][r];
++		}
++	}
++	Vector<Plane> planes = p_render_data->scene_data->cam_projection.get_projection_planes(p_render_data->scene_data->cam_transform);
++	for (int p = 0; p < MIN(planes.size(), 6); p++) {
++		params.planes[p * 4 + 0] = planes[p].normal.x;
++		params.planes[p * 4 + 1] = planes[p].normal.y;
++		params.planes[p * 4 + 2] = planes[p].normal.z;
++		params.planes[p * 4 + 3] = planes[p].d;
++	}
++	Vector3 cam_now = p_render_data->scene_data->cam_transform.origin;
++	params.cam[0] = cam_now.x;
++	params.cam[1] = cam_now.y;
++	params.cam[2] = cam_now.z;
++	params.cam[3] = cam_now.distance_to(forest_occ_last_pos) * 2.0 + 0.5;
++	bool occ_on = forest_occ_last_valid && forest_occ_buffer.is_valid() && ForestOcc::w > 0;
++	params.a[0] = occ_on ? ForestOcc::w : 0;
++	params.a[1] = occ_on ? ForestOcc::h : 0;
++	params.a[2] = occ_on ? 1 : 0;
++	rd->buffer_update(forest_cl_params, 0, sizeof(params), &params);
++	RID tiles = occ_on ? forest_occ_buffer : forest_cl_params;
++
++	for (ForestClusterMesh &fm : forest_cmeshes) {
++		if (fm.slot_count == 0) {
++			continue;
++		}
++		uint32_t vw = (fm.cluster_count + 31) / 32;
++		if (fm.slot_count > fm.inst_cap) {
++			if (fm.inst_buf.is_valid()) {
++				rd->free_rid(fm.inst_buf);
++				rd->free_rid(fm.counts_buf);
++				rd->free_rid(fm.vis_buf);
++			}
++			fm.inst_cap = MAX(fm.slot_count * 2, 64u);
++			fm.inst_buf = rd->storage_buffer_create(fm.inst_cap * 64);
++			fm.counts_buf = rd->storage_buffer_create(fm.inst_cap * 4);
++			fm.vis_buf = rd->storage_buffer_create(fm.inst_cap * vw * 4);
++		}
++		rd->buffer_update(fm.inst_buf, 0, fm.inst_data.size() * 4, fm.inst_data.ptr());
++		rd->buffer_clear(fm.vis_buf, 0, fm.slot_count * vw * 4);
++		RD::Uniform u0(RD::UNIFORM_TYPE_STORAGE_BUFFER, 0, fm.clusters);
++		RD::Uniform u1(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, fm.inst_buf);
++		RD::Uniform u2(RD::UNIFORM_TYPE_STORAGE_BUFFER, 2, forest_cl_params);
++		RD::Uniform u3(RD::UNIFORM_TYPE_STORAGE_BUFFER, 3, tiles);
++		RD::Uniform u4(RD::UNIFORM_TYPE_STORAGE_BUFFER, 4, fm.counts_buf);
++		RD::Uniform u5(RD::UNIFORM_TYPE_STORAGE_BUFFER, 5, fm.vis_buf);
++		RD::Uniform u6(RD::UNIFORM_TYPE_STORAGE_BUFFER, 6, forest_cl_indirect);
++		RD::Uniform u7(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, fm.sorted_idx);
++		RD::Uniform u8(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, fm.out_idx);
++		RID uset = UniformSetCacheRD::get_singleton()->get_cache(forest_cl_shader, 0, u0, u1, u2, u3, u4, u5, u6, u7, u8);
++		struct {
++			uint32_t mode, inst_count, cluster_count, slot_base, full_count, cap, p0, p1;
++		} pc = { 0, fm.slot_count, fm.cluster_count, fm.first_slot, fm.index_count, fm.out_cap, 0, 0 };
++		RD::ComputeListID cl = rd->compute_list_begin();
++		rd->compute_list_bind_compute_pipeline(cl, forest_cl_pipeline);
++		rd->compute_list_bind_uniform_set(cl, uset, 0);
++		rd->compute_list_set_push_constant(cl, &pc, sizeof(pc));
++		rd->compute_list_dispatch(cl, fm.slot_count, 1, 1);
++		rd->compute_list_add_barrier(cl);
++		pc.mode = 1;
++		rd->compute_list_set_push_constant(cl, &pc, sizeof(pc));
++		rd->compute_list_dispatch(cl, 1, 1, 1);
++		rd->compute_list_add_barrier(cl);
++		pc.mode = 2;
++		rd->compute_list_set_push_constant(cl, &pc, sizeof(pc));
++		rd->compute_list_dispatch(cl, fm.slot_count, 1, 1);
++		rd->compute_list_end();
++		if (Engine::get_singleton()->get_frames_drawn() % 120 == 0) {
++			Vector<uint8_t> d = rd->buffer_get_data(forest_cl_indirect, fm.first_slot * 20, fm.slot_count * 20);
++			const uint32_t *c = (const uint32_t *)d.ptr();
++			uint64_t drawn = 0;
++			for (uint32_t k = 0; k < fm.slot_count; k++) {
++				drawn += c[k * 5];
++			}
++			print_line(vformat("FOREST cluster instances=%d indices drawn=%d of %d (%.1f%%)", fm.slot_count, drawn, (uint64_t)fm.slot_count * fm.index_count, 100.0 * drawn / MAX(1.0, double(fm.slot_count) * fm.index_count)));
++		}
++	}
++}
+diff --git a/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp b/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
+index 370d3b66ce..2baf65d258 100644
+--- a/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
++++ b/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
+@@ -31,6 +31,9 @@
+ #include "render_forward_clustered.h"
+ 
+ #include "core/config/project_settings.h"
++#include "core/object/callable_mp.h"
++#include "core/os/os.h"
++#include "servers/rendering/forest_occ.h"
+ #include "servers/rendering/renderer_rd/environment/fog.h"
+ #include "servers/rendering/renderer_rd/framebuffer_cache_rd.h"
+ #include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
+@@ -537,8 +540,23 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
+ 			}
+ 		}
+ 
++		if (pipeline_valid && forest_draw_profile) {
++			forest_draws_total++;
++			if (pipeline_key.ubershader) {
++				forest_draws_uber++;
++			}
++		}
++		// forest-perf: cluster-culled surface in the camera passes
++		int forest_slot = -1;
++		if constexpr (p_pass_mode == PASS_MODE_COLOR || p_pass_mode == PASS_MODE_DEPTH || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS || p_pass_mode == PASS_MODE_DEPTH_NORMAL_ROUGHNESS_VOXEL_GI) {
++			if (p_params->elements == render_list[RENDER_LIST_OPAQUE].elements.ptr() && i < forest_cl_slot.size()) {
++				forest_slot = forest_cl_slot[i];
++			}
++		}
+ 		if (pipeline_valid) {
+-			if (!emulate_point_size) {
++			if (forest_slot >= 0) {
++				index_array_rd = forest_cmeshes[forest_cl_mesh_of[i]].out_array;
++			} else if (!emulate_point_size) {
+ 				index_array_rd = mesh_storage->mesh_surface_get_index_array(mesh_surface, element_info.lod_index);
+ 			} else {
+ 				index_array_rd = RID();
+@@ -602,7 +620,10 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
+ 
+ 			bool indirect = bool(surf->owner->base_flags & INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT);
+ 
+-			if (emulate_point_size) {
++			if (forest_slot >= 0) {
++				// one indirect command per instance, consecutive slots
++				RD::get_singleton()->draw_list_draw_indirect(draw_list, true, forest_cl_indirect, forest_slot * 20, element_info.repeat, 20);
++			} else if (emulate_point_size) {
+ 				if (indirect) {
+ 					WARN_PRINT("Indirect draws are not supported when emulating point size.");
+ 				}
+@@ -683,11 +704,224 @@ void RenderForwardClustered::_render_list_with_draw_list(RenderListParameters *p
+ 	RD::FramebufferFormatID fb_format = RD::get_singleton()->framebuffer_get_format(p_framebuffer);
+ 	p_params->framebuffer_format = fb_format;
+ 
++	if (forest_draw_profile && RSG::utilities->capturing_timestamps && p_params->element_count > 0) {
++		_forest_profiled_list(p_params, p_framebuffer, p_draw_flags, p_clear_color_values, p_clear_depth_value, p_clear_stencil_value, p_region, Rect2i());
++		return;
++	}
+ 	RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(p_framebuffer, p_draw_flags, p_clear_color_values, p_clear_depth_value, p_clear_stencil_value, p_region);
+ 	_render_list(draw_list, fb_format, p_params, 0, p_params->element_count);
+ 	RD::get_singleton()->draw_list_end();
+ }
+ 
++static const char *forest_occ_glsl = R"(
++#version 450
++layout(local_size_x = 16, local_size_y = 16) in;
++layout(set = 0, binding = 0) uniform sampler2D depth_tex;
++layout(set = 0, binding = 1, std430) buffer Out { float tiles[]; };
++layout(push_constant, std430) uniform PC {
++	mat4 inv_proj;
++	ivec2 size;
++	ivec2 tiles_n;
++} pc;
++shared float smin[256];
++void main() {
++	ivec2 t = ivec2(gl_WorkGroupID.xy);
++	ivec2 l = ivec2(gl_LocalInvocationID.xy);
++	ivec2 tp = (pc.size + pc.tiles_n - 1) / pc.tiles_n;
++	float m = 1.0;
++	for (int y = l.y; y < tp.y; y += 16) {
++		for (int x = l.x; x < tp.x; x += 16) {
++			ivec2 p = t * tp + ivec2(x, y);
++			if (p.x < pc.size.x && p.y < pc.size.y) {
++				m = min(m, texelFetch(depth_tex, p, 0).r);
++			}
++		}
++	}
++	uint li = uint(l.y * 16 + l.x);
++	smin[li] = m;
++	barrier();
++	for (uint s = 128u; s > 0u; s >>= 1u) {
++		if (li < s) {
++			smin[li] = min(smin[li], smin[li + s]);
++		}
++		barrier();
++	}
++	if (li == 0u) {
++		float d = smin[0];
++		float dist = 1e30;
++		if (d > 0.0) {
++			vec4 v = pc.inv_proj * vec4(0.0, 0.0, d, 1.0);
++			dist = -v.z / v.w;
++		}
++		tiles[t.y * pc.tiles_n.x + t.x] = dist;
++	}
++}
++)";
++
++static LocalVector<Pair<Projection, Vector3>> forest_occ_pending;
++
++static void forest_occ_ready(const Vector<uint8_t> &p_data) {
++	if (forest_occ_pending.is_empty()) {
++		return;
++	}
++	Pair<Projection, Vector3> cam = forest_occ_pending[0];
++	forest_occ_pending.remove_at(0);
++	int n = ForestOcc::w * ForestOcc::h;
++	if (p_data.size() < n * 4) {
++		return;
++	}
++	ForestOcc::tiles.resize(n);
++	memcpy(ForestOcc::tiles.ptr(), p_data.ptr(), n * 4);
++	ForestOcc::capture_vp = cam.first;
++	ForestOcc::capture_pos = cam.second;
++	ForestOcc::version++;
++}
++
++void RenderForwardClustered::_forest_occ_dispatch(RenderDataRD *p_render_data, RID p_depth, const Size2i &p_size) {
++	RD *rd = RD::get_singleton();
++	if (forest_occ_shader.is_null()) {
++		String err;
++		Vector<uint8_t> spirv = rd->shader_compile_spirv_from_source(RD::SHADER_STAGE_COMPUTE, forest_occ_glsl, RD::SHADER_LANGUAGE_GLSL, &err);
++		ERR_FAIL_COND_MSG(spirv.is_empty(), "forest occ shader: " + err);
++		Vector<RD::ShaderStageSPIRVData> stages;
++		RD::ShaderStageSPIRVData sd;
++		sd.shader_stage = RD::SHADER_STAGE_COMPUTE;
++		sd.spirv = spirv;
++		stages.push_back(sd);
++		forest_occ_shader = rd->shader_create_from_spirv(stages, "ForestOcc");
++		forest_occ_pipeline = rd->compute_pipeline_create(forest_occ_shader);
++	}
++	static int tile_px = OS::get_singleton()->get_environment("FOREST_OCC_TILE").is_empty() ? 8 : OS::get_singleton()->get_environment("FOREST_OCC_TILE").to_int();
++	int tw = Math::division_round_up(p_size.width, tile_px);
++	int th = Math::division_round_up(p_size.height, tile_px);
++	if (tw != ForestOcc::w || th != ForestOcc::h || forest_occ_buffer.is_null()) {
++		if (forest_occ_buffer.is_valid()) {
++			rd->free_rid(forest_occ_buffer);
++		}
++		forest_occ_buffer = rd->storage_buffer_create(tw * th * 4);
++		ForestOcc::w = tw;
++		ForestOcc::h = th;
++		ForestOcc::tiles.clear();
++		forest_occ_pending.clear();
++	}
++	if (forest_occ_pending.size() > 4) {
++		return; // readbacks still in flight
++	}
++	Projection proj = p_render_data->scene_data->get_cam_projection();
++	Transform3D xf = p_render_data->scene_data->cam_transform;
++	RID sampler = RendererRD::MaterialStorage::get_singleton()->sampler_rd_get_default(RSE::CANVAS_ITEM_TEXTURE_FILTER_NEAREST, RSE::CANVAS_ITEM_TEXTURE_REPEAT_DISABLED);
++	RD::Uniform u_depth(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, 0, Vector<RID>({ sampler, p_depth }));
++	RD::Uniform u_out(RD::UNIFORM_TYPE_STORAGE_BUFFER, 1, forest_occ_buffer);
++	RID uset = UniformSetCacheRD::get_singleton()->get_cache(forest_occ_shader, 0, u_depth, u_out);
++	struct {
++		float inv_proj[16];
++		int32_t size[2];
++		int32_t tiles_n[2];
++	} pc;
++	Projection inv = proj.inverse();
++	for (int c = 0; c < 4; c++) {
++		for (int r = 0; r < 4; r++) {
++			pc.inv_proj[c * 4 + r] = inv.columns[c][r];
++		}
++	}
++	pc.size[0] = p_size.width;
++	pc.size[1] = p_size.height;
++	pc.tiles_n[0] = tw;
++	pc.tiles_n[1] = th;
++	RD::ComputeListID cl = rd->compute_list_begin();
++	rd->compute_list_bind_compute_pipeline(cl, forest_occ_pipeline);
++	rd->compute_list_bind_uniform_set(cl, uset, 0);
++	rd->compute_list_set_push_constant(cl, &pc, sizeof(pc));
++	rd->compute_list_dispatch(cl, tw, th, 1);
++	rd->compute_list_end();
++	forest_occ_pending.push_back(Pair<Projection, Vector3>(proj * Projection(xf.affine_inverse()), xf.origin));
++	// GPU cluster culling next frame reads these tiles directly
++	forest_occ_last_vp = proj * Projection(xf.affine_inverse());
++	forest_occ_last_pos = xf.origin;
++	forest_occ_last_valid = true;
++	rd->buffer_get_data_async(forest_occ_buffer, callable_mp_static(&forest_occ_ready));
++}
++
++void RenderForwardClustered::_forest_order_runs_front_to_back(RenderList &p_list, uint32_t p_from, uint32_t p_count) {
++	// Batches of one surface stay contiguous (instancing intact);
++	// batches are reordered by their nearest instance.
++	struct Run {
++		uint32_t from;
++		uint32_t count;
++		float depth;
++	};
++	LocalVector<Run> runs;
++	uint32_t n = p_count == UINT32_MAX ? p_list.elements.size() : p_from + p_count;
++	uint32_t from = p_from;
++	while (from < n) {
++		GeometryInstanceSurfaceDataCache *s0 = p_list.elements[from];
++		uint32_t to = from + 1;
++		while (to < n && p_list.elements[to]->sort.sort_key1 == s0->sort.sort_key1 && p_list.elements[to]->sort.sort_key2 == s0->sort.sort_key2) {
++			to++;
++		}
++		runs.push_back({ from, to - from, s0->owner->depth });
++		from = to;
++	}
++	struct ByDepth {
++		_FORCE_INLINE_ bool operator()(const Run &a, const Run &b) const {
++			return a.depth < b.depth;
++		}
++	};
++	SortArray<Run, ByDepth> sorter;
++	sorter.sort(runs.ptr(), runs.size());
++	forest_reorder_tmp.resize(n - p_from);
++	uint32_t w = 0;
++	for (const Run &r : runs) {
++		for (uint32_t i = 0; i < r.count; i++) {
++			forest_reorder_tmp[w++] = p_list.elements[r.from + i];
++		}
++	}
++	for (uint32_t i = 0; i < w; i++) {
++		p_list.elements[p_from + i] = forest_reorder_tmp[i];
++	}
++}
++
++void RenderForwardClustered::_forest_profiled_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags, const Vector<Color> &p_clear_color_values, float p_clear_depth_value, uint32_t p_clear_stencil_value, const Rect2 &p_region, const Rect2i &p_scissor) {
++	// forest-perf: split the list into runs of one mesh surface and
++	// material, each in its own draw list behind a GPU timestamp
++	RD *rd = RD::get_singleton();
++	RD::FramebufferFormatID fb_format = rd->framebuffer_get_format(p_framebuffer);
++	p_params->framebuffer_format = fb_format;
++	uint32_t n = p_params->element_count;
++	uint32_t from = 0;
++	bool first = true;
++	while (from < n) {
++		const GeometryInstanceSurfaceDataCache *s0 = p_params->elements[from];
++		uint32_t to = from + 1;
++		while (to < n) {
++			const GeometryInstanceSurfaceDataCache *s = p_params->elements[to];
++			if (s->surface != s0->surface || s->material != s0->material || s->owner->data->base != s0->owner->data->base) {
++				break;
++			}
++			to++;
++		}
++		rd->capture_timestamp(vformat("D|%s|%d|%d", forest_pass_label, (int64_t)s0->owner->data->base.get_id(), s0->surface_index));
++		BitField<RD::DrawFlags> fl = first ? p_draw_flags : BitField<RD::DrawFlags>(RD::DRAW_DEFAULT_ALL);
++		RD::DrawListID dl = rd->draw_list_begin(p_framebuffer, fl, p_clear_color_values, p_clear_depth_value, p_clear_stencil_value, p_region);
++		if (forest_diag_geo_only) {
++			// isolation: every triangle is processed, no pixels drawn
++			rd->draw_list_enable_scissor(dl, Rect2(0, 0, 1, 1));
++		} else if (p_scissor.get_area() > 0) {
++			rd->draw_list_enable_scissor(dl, p_scissor);
++		}
++		_render_list(dl, fb_format, p_params, from, to);
++		rd->draw_list_end();
++		first = false;
++		from = to;
++	}
++	rd->capture_timestamp(vformat("D|%s|end", forest_pass_label));
++	if (Engine::get_singleton()->get_frames_drawn() % 240 == 0) {
++		print_line(vformat("FOREST draws %s total=%d uber=%d", forest_pass_label, forest_draws_total, forest_draws_uber));
++	}
++	forest_draws_total = 0;
++	forest_draws_uber = 0;
++}
++
+ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render_data, bool p_no_fog, const Size2i &p_screen_size, const Size2 &p_viewport_size, const Color &p_default_bg_color, bool p_opaque_render_buffers, bool p_apply_alpha_multiplier, bool p_pancake_shadows) {
+ 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+ 
+@@ -721,6 +955,8 @@ uint32_t RenderForwardClustered::_setup_environment(const RenderDataRD *p_render
+ 		scene_state.ubo.cluster_type_size = cluster_screen_width * cluster_screen_height * (scene_state.ubo.max_cluster_element_count_div_32 + 32);
+ 		scene_state.ubo.cluster_width = cluster_screen_width;
+ 	}
++	// forest-perf: shaders skip cluster loops for absent types
++	scene_state.ubo.cluster_type_mask = (forest_cluster_mask && current_cluster_builder) ? current_cluster_builder->get_type_mask() : 0xFFFFFFFFu;
+ 
+ 	scene_state.ubo.gi_upscale_for_msaa = false;
+ 	scene_state.ubo.volumetric_fog_enabled = false;
+@@ -1569,8 +1805,12 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
+ 		if (p_render_data->directional_shadows.size()) {
+ 			//open the pass for directional shadows
+ 			light_storage->update_directional_shadow_atlas();
+-			RD::get_singleton()->draw_list_begin(light_storage->direction_shadow_get_fb(), RD::DRAW_CLEAR_DEPTH, Vector<Color>(), 0.0f);
+-			RD::get_singleton()->draw_list_end();
++			// forest-perf: reused cascades keep their texels, so each
++			// rendered cascade clears only its own rect instead
++			if (!forest_shadow_amort) {
++				RD::get_singleton()->draw_list_begin(light_storage->direction_shadow_get_fb(), RD::DRAW_CLEAR_DEPTH, Vector<Color>(), 0.0f);
++				RD::get_singleton()->draw_list_end();
++			}
+ 		}
+ 	}
+ 
+@@ -1593,7 +1833,7 @@ void RenderForwardClustered::_pre_opaque_render(RenderDataRD *p_render_data, boo
+ 
+ 		//render directional shadows
+ 		for (uint32_t i = 0; i < p_render_data->directional_shadows.size(); i++) {
+-			_render_shadow_pass(p_render_data->render_shadows[p_render_data->directional_shadows[i]].light, p_render_data->shadow_atlas, p_render_data->render_shadows[p_render_data->directional_shadows[i]].pass, p_render_data->render_shadows[p_render_data->directional_shadows[i]].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, false, i == p_render_data->directional_shadows.size() - 1, false, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform);
++			_render_shadow_pass(p_render_data->render_shadows[p_render_data->directional_shadows[i]].light, p_render_data->shadow_atlas, p_render_data->render_shadows[p_render_data->directional_shadows[i]].pass, p_render_data->render_shadows[p_render_data->directional_shadows[i]].instances, lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, false, i == p_render_data->directional_shadows.size() - 1, forest_shadow_amort, p_render_data->render_info, viewport_size, p_render_data->scene_data->cam_transform);
+ 		}
+ 		//render positional shadows
+ 		for (uint32_t i = 0; i < p_render_data->shadows.size(); i++) {
+@@ -1910,8 +2150,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
+ 	// May have changed due to the above (light buffer enlarged, as an example).
+ 	_update_render_base_uniform_set();
+ 
++	uint64_t ffs0 = OS::get_singleton()->get_ticks_usec();
+ 	_fill_render_list(RENDER_LIST_OPAQUE, p_render_data, PASS_MODE_COLOR, using_sdfgi, using_sdfgi || using_voxelgi, using_motion_pass);
+ 	render_list[RENDER_LIST_OPAQUE].sort_by_key();
++	if (forest_batch_f2b) {
++		_forest_order_runs_front_to_back(render_list[RENDER_LIST_OPAQUE], 0, UINT32_MAX);
++	}
+ 	render_list[RENDER_LIST_MOTION].sort_by_key();
+ 	render_list[RENDER_LIST_ALPHA].sort_by_reverse_depth_and_priority();
+ 
+@@ -1919,6 +2163,12 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
+ 	_fill_instance_data(RENDER_LIST_OPAQUE, render_info);
+ 	_fill_instance_data(RENDER_LIST_MOTION, render_info);
+ 	_fill_instance_data(RENDER_LIST_ALPHA, render_info);
++	ForestTime::acc[ForestTime::RS_FILL_SORT] += OS::get_singleton()->get_ticks_usec() - ffs0;
++	if (!is_reflection_probe) {
++		_forest_cluster_prepare(p_render_data);
++	} else {
++		forest_cl_slot.clear();
++	}
+ 
+ 	RD::get_singleton()->draw_command_end_label();
+ 
+@@ -2138,6 +2388,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
+ 
+ 		bool finish_depth = using_ssao || using_ssil || using_sdfgi || using_voxelgi || ce_pre_opaque_resolved_depth || ce_post_opaque_resolved_depth;
+ 		RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, depth_pass_mode, 0, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
++		forest_pass_label = "PRE";
+ 		_render_list_with_draw_list(&render_list_params, depth_framebuffer, RD::DrawFlags(needs_pre_resolve ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_ALL), depth_pass_clear, 0.0f, 0u, p_render_data->render_region);
+ 
+ 		RD::get_singleton()->draw_command_end_label();
+@@ -2158,6 +2409,10 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
+ 		}
+ 	}
+ 
++	if (ForestOcc::enabled && depth_pre_pass && rb.is_valid() && !is_reflection_probe) {
++		_forest_occ_dispatch(p_render_data, rb->get_depth_texture(0), rb->get_internal_size());
++	}
++
+ 	{
+ 		if (ce_pre_opaque_resolved_color) {
+ 			// We haven't rendered color data yet so...
+@@ -2179,7 +2434,9 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
+ 			normal_roughness_views[v] = rb_data->get_normal_roughness(v);
+ 		}
+ 	}
++	uint64_t fpo0 = OS::get_singleton()->get_ticks_usec();
+ 	_pre_opaque_render(p_render_data, using_ssao, using_ssil, using_ssr, using_sdfgi || using_voxelgi, normal_roughness_views, rb_data.is_valid() && rb_data->has_voxelgi() ? rb_data->get_voxelgi() : RID());
++	ForestTime::acc[ForestTime::RS_SHADOW_SETUP] += OS::get_singleton()->get_ticks_usec() - fpo0;
+ 
+ 	if (current_cluster_builder) {
+ 		base_specialization.cluster_has_area_light = current_cluster_builder->get_cluster_count_by_type(ClusterBuilderRD::ELEMENT_TYPE_AREA_LIGHT) != 0;
+@@ -2221,6 +2478,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
+ 			uint32_t opaque_color_pass_flags = using_motion_pass ? (color_pass_flags & ~uint32_t(COLOR_PASS_FLAG_MOTION_VECTORS)) : color_pass_flags;
+ 			RID opaque_framebuffer = using_motion_pass ? rb_data->get_color_pass_fb(opaque_color_pass_flags) : color_framebuffer;
+ 			RenderListParameters render_list_params(render_list[RENDER_LIST_OPAQUE].elements.ptr(), render_list[RENDER_LIST_OPAQUE].element_info.ptr(), render_list[RENDER_LIST_OPAQUE].elements.size(), reverse_cull, PASS_MODE_COLOR, opaque_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
++			forest_pass_label = "OPQ";
+ 			_render_list_with_draw_list(&render_list_params, opaque_framebuffer, RD::DrawFlags(load_color ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_COLOR_ALL) | (depth_pre_pass ? RD::DRAW_DEFAULT_ALL : RD::DRAW_CLEAR_DEPTH), c, 0.0f, 0u, p_render_data->render_region);
+ 		}
+ 
+@@ -2423,6 +2681,7 @@ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Co
+ 
+ 		RID alpha_framebuffer = rb_data.is_valid() ? rb_data->get_color_pass_fb(transparent_color_pass_flags) : color_only_framebuffer;
+ 		RenderListParameters render_list_params(render_list[RENDER_LIST_ALPHA].elements.ptr(), render_list[RENDER_LIST_ALPHA].element_info.ptr(), render_list[RENDER_LIST_ALPHA].elements.size(), reverse_cull, PASS_MODE_COLOR, transparent_color_pass_flags, rb_data.is_null(), p_render_data->directional_light_soft_shadows, rp_uniform_set, get_debug_draw_mode() == RSE::VIEWPORT_DEBUG_DRAW_WIREFRAME, Vector2(), p_render_data->scene_data->lod_distance_multiplier, p_render_data->scene_data->screen_mesh_lod_threshold, p_render_data->scene_data->view_count, 0, base_specialization);
++		forest_pass_label = "ALP";
+ 		_render_list_with_draw_list(&render_list_params, alpha_framebuffer, RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0u, p_render_data->render_region);
+ 	}
+ 
+@@ -2790,6 +3049,16 @@ void RenderForwardClustered::_render_shadow_pass(RID p_light, RID p_shadow_atlas
+ 	} else {
+ 		//render shadow
+ 		_render_shadow_append(render_fb, p_instances, light_projection, light_transform, zfar, 0, 0, reverse_cull_face, using_dual_paraboloid, using_dual_paraboloid_flip, use_pancake, p_lod_distance_multiplier, p_screen_mesh_lod_threshold, atlas_rect, flip_y, p_clear_region, p_open_pass, p_close_pass, p_render_info, p_viewport_size, p_main_cam_transform);
++		if (light_storage->light_get_type(base) == RSE::LIGHT_DIRECTIONAL) {
++			// forest-perf: fill only texels the cascade can be sampled at
++			Rect2 sc = light_storage->light_instance_get_shadow_scissor(p_light, p_pass);
++			if (sc.get_area() < 0.999) {
++				Vector2 sz = atlas_rect.size;
++				Point2i a = (sc.position * sz).floor();
++				Point2i b = ((sc.position + sc.size) * sz).ceil();
++				scene_state.shadow_passes[scene_state.shadow_passes.size() - 1].scissor = Rect2i(a, b - a);
++			}
++		}
+ 	}
+ }
+ 
+@@ -2847,6 +3116,9 @@ void RenderForwardClustered::_render_shadow_append(RID p_framebuffer, const Page
+ 	_fill_render_list(RENDER_LIST_SECONDARY, &render_data, pass_mode, false, false, false, true);
+ 	uint32_t render_list_size = render_list[RENDER_LIST_SECONDARY].elements.size() - render_list_from;
+ 	render_list[RENDER_LIST_SECONDARY].sort_by_key_range(render_list_from, render_list_size);
++	if (forest_batch_f2b_shadow) {
++		_forest_order_runs_front_to_back(render_list[RENDER_LIST_SECONDARY], render_list_from, render_list_size);
++	}
+ 	_fill_instance_data(RENDER_LIST_SECONDARY, p_render_info ? p_render_info->info[RSE::VIEWPORT_RENDER_INFO_TYPE_SHADOW] : (int *)nullptr, render_list_from, render_list_size, false);
+ 
+ 	{
+@@ -2898,9 +3170,22 @@ void RenderForwardClustered::_render_shadow_process() {
+ void RenderForwardClustered::_render_shadow_end() {
+ 	RD::get_singleton()->draw_command_begin_label("Shadow Render");
+ 
++	int sh_index = 0;
+ 	for (SceneState::ShadowPass &shadow_pass : scene_state.shadow_passes) {
+ 		RenderListParameters render_list_parameters(render_list[RENDER_LIST_SECONDARY].elements.ptr() + shadow_pass.element_from, render_list[RENDER_LIST_SECONDARY].element_info.ptr() + shadow_pass.element_from, shadow_pass.element_count, shadow_pass.flip_cull, shadow_pass.pass_mode, 0, true, false, shadow_pass.rp_uniform_set, false, Vector2(), shadow_pass.lod_distance_multiplier, shadow_pass.screen_mesh_lod_threshold, 1, shadow_pass.element_from);
+-		_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
++		forest_pass_label = vformat("SH%d", sh_index++);
++		if (forest_draw_profile && RSG::utilities->capturing_timestamps && shadow_pass.element_count > 0) {
++			_forest_profiled_list(&render_list_parameters, shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect, shadow_pass.scissor);
++		} else if (shadow_pass.scissor.get_area() > 0) {
++			RD::FramebufferFormatID fb_format = RD::get_singleton()->framebuffer_get_format(shadow_pass.framebuffer);
++			render_list_parameters.framebuffer_format = fb_format;
++			RD::DrawListID draw_list = RD::get_singleton()->draw_list_begin(shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
++			RD::get_singleton()->draw_list_enable_scissor(draw_list, shadow_pass.scissor);
++			_render_list(draw_list, fb_format, &render_list_parameters, 0, render_list_parameters.element_count);
++			RD::get_singleton()->draw_list_end();
++		} else {
++			_render_list_with_draw_list(&render_list_parameters, shadow_pass.framebuffer, shadow_pass.clear_depth ? RD::DRAW_CLEAR_DEPTH : RD::DRAW_DEFAULT_ALL, Vector<Color>(), 0.0f, 0, shadow_pass.rect);
++		}
+ 	}
+ 
+ 	RD::get_singleton()->draw_command_end_label();
+@@ -5102,6 +5387,21 @@ void RenderForwardClustered::_update_shader_quality_settings() {
+ 
+ RenderForwardClustered::RenderForwardClustered() {
+ 	singleton = this;
++	forest_draw_profile = OS::get_singleton()->get_environment("FOREST_DRAW_PROFILE") == "1";
++	forest_shadow_amort = OS::get_singleton()->get_environment("FOREST_SHADOW_AMORT") != "0";
++	forest_batch_f2b = OS::get_singleton()->get_environment("FOREST_BATCH_F2B") != "0";
++	forest_diag_geo_only = OS::get_singleton()->get_environment("FOREST_DIAG_GEO_ONLY") == "1";
++	forest_cluster_mask = OS::get_singleton()->get_environment("FOREST_CLUSTER_MASK") != "0";
++	ForestOcc::enabled = OS::get_singleton()->get_environment("FOREST_GPU_OCC") != "0";
++	ForestOcc::shadow_cull = OS::get_singleton()->get_environment("FOREST_SHADOW_RECV") != "0";
++	{
++		// triangle counts of the surfaces to cluster-cull, e.g. 370140
++		Vector<String> parts = OS::get_singleton()->get_environment("FOREST_CLUSTER_TRIS").split(",", false);
++		for (const String &p : parts) {
++			forest_cluster_tris.push_back(p.to_int());
++		}
++	}
++	forest_batch_f2b_shadow = OS::get_singleton()->get_environment("FOREST_BATCH_F2B_SHADOW") != "0";
+ 
+ 	/* SCENE SHADER */
+ 
+@@ -5246,6 +5546,12 @@ RenderForwardClustered::RenderForwardClustered() {
+ }
+ 
+ RenderForwardClustered::~RenderForwardClustered() {
++	if (forest_occ_buffer.is_valid()) {
++		RD::get_singleton()->free_rid(forest_occ_buffer);
++	}
++	if (forest_occ_shader.is_valid()) {
++		RD::get_singleton()->free_rid(forest_occ_shader);
++	}
+ 	if (ss_effects != nullptr) {
+ 		memdelete(ss_effects);
+ 		ss_effects = nullptr;
+diff --git a/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h b/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h
+index be97ee2d96..08c6ed906a 100644
+--- a/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h
++++ b/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h
+@@ -302,7 +302,7 @@ private:
+ 			uint32_t ss_effects_flags;
+ 			float ssao_light_affect;
+ 			float ssao_ao_affect;
+-			uint32_t pad1;
++			uint32_t cluster_type_mask;
+ 
+ 			float sdf_to_bounds[16];
+ 
+@@ -434,6 +434,8 @@ private:
+ 
+ 			RID framebuffer;
+ 			Rect2i rect;
++			// forest-perf: scissor relative to rect, empty = whole rect
++			Rect2i scissor;
+ 			bool clear_depth;
+ 			bool flip_cull;
+ 
+@@ -473,6 +475,21 @@ private:
+ 	_FORCE_INLINE_ void _render_list_template(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element);
+ 	void _render_list(RenderingDevice::DrawListID p_draw_list, RenderingDevice::FramebufferFormatID p_framebuffer_Format, RenderListParameters *p_params, uint32_t p_from_element, uint32_t p_to_element);
+ 	void _render_list_with_draw_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags = RD::DRAW_DEFAULT_ALL, const Vector<Color> &p_clear_color_values = Vector<Color>(), float p_clear_depth_value = 0.0, uint32_t p_clear_stencil_value = 0, const Rect2 &p_region = Rect2());
++	// forest-perf: FOREST_DRAW_PROFILE=1 with --gpu-profile times
++	// every mesh surface run in every pass
++	void _forest_profiled_list(RenderListParameters *p_params, RID p_framebuffer, BitField<RD::DrawFlags> p_draw_flags, const Vector<Color> &p_clear_color_values, float p_clear_depth_value, uint32_t p_clear_stencil_value, const Rect2 &p_region, const Rect2i &p_scissor);
++	bool forest_draw_profile = false;
++	bool forest_shadow_amort = false;
++	RID forest_occ_shader;
++	RID forest_occ_pipeline;
++	RID forest_occ_buffer;
++	void _forest_occ_dispatch(RenderDataRD *p_render_data, RID p_depth, const Size2i &p_size);
++	bool forest_cluster_mask = true;
++	bool forest_diag_geo_only = false;
++	bool forest_batch_f2b = true;
++	uint64_t forest_draws_total = 0;
++	uint64_t forest_draws_uber = 0;
++	String forest_pass_label = "X";
+ 
+ 	void _fill_instance_data(RenderListType p_render_list, int *p_render_info = nullptr, uint32_t p_offset = 0, int32_t p_max_elements = -1, bool p_update_buffer = true);
+ 	void _fill_render_list(RenderListType p_render_list, const RenderDataRD *p_render_data, PassMode p_pass_mode, bool p_using_sdfgi = false, bool p_using_opaque_gi = false, bool p_using_motion_pass = false, bool p_append = false);
+@@ -693,7 +710,14 @@ private:
+ 
+ 		struct SortByKey {
+ 			_FORCE_INLINE_ bool operator()(const GeometryInstanceSurfaceDataCache *A, const GeometryInstanceSurfaceDataCache *B) const {
+-				return (A->sort.sort_key2 == B->sort.sort_key2) ? (A->sort.sort_key1 < B->sort.sort_key1) : (A->sort.sort_key2 < B->sort.sort_key2);
++				if (A->sort.sort_key2 != B->sort.sort_key2) {
++					return A->sort.sort_key2 < B->sort.sort_key2;
++				}
++				if (A->sort.sort_key1 != B->sort.sort_key1) {
++					return A->sort.sort_key1 < B->sort.sort_key1;
++				}
++				// forest-perf: same batch, so draw front to back
++				return A->owner->depth < B->owner->depth;
+ 			}
+ 		};
+ 
+@@ -738,6 +762,42 @@ private:
+ 
+ 	RenderList render_list[RENDER_LIST_MAX];
+ 
++	// forest-perf: GPU cluster culling of chosen mesh surfaces in the
++	// camera prepass and colour pass (FOREST_CLUSTER_TRIS)
++	struct ForestClusterMesh {
++		void *surface = nullptr;
++		RID sorted_idx;
++		RID clusters;
++		uint32_t cluster_count = 0;
++		uint32_t index_count = 0;
++		uint32_t first_slot = 0;
++		uint32_t slot_count = 0;
++		LocalVector<float> inst_data;
++		RID out_idx;
++		RID out_array;
++		RID uset;
++		uint32_t out_cap = 0;
++		uint32_t inst_cap = 0;
++		RID inst_buf, counts_buf, vis_buf;
++	};
++	LocalVector<ForestClusterMesh> forest_cmeshes;
++	LocalVector<uint32_t> forest_cluster_tris;
++	LocalVector<uint32_t> forest_cluster_skip;
++	RID forest_cl_shader, forest_cl_pipeline;
++	RID forest_cl_params, forest_cl_indirect;
++	uint32_t forest_cl_indirect_cap = 0;
++	// per opaque-list element: global indirect slot, or -1
++	LocalVector<int32_t> forest_cl_slot;
++	LocalVector<int32_t> forest_cl_mesh_of;
++	Projection forest_occ_last_vp;
++	Vector3 forest_occ_last_pos;
++	bool forest_occ_last_valid = false;
++	int _forest_cluster_mesh_index(GeometryInstanceSurfaceDataCache *p_surf);
++	void _forest_cluster_prepare(RenderDataRD *p_render_data);
++	LocalVector<GeometryInstanceSurfaceDataCache *> forest_reorder_tmp;
++	void _forest_order_runs_front_to_back(RenderList &p_list, uint32_t p_from, uint32_t p_count);
++	bool forest_batch_f2b_shadow = true;
++
+ 	virtual void _update_shader_quality_settings() override;
+ 
+ 	/* Effects */
+diff --git a/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl b/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl
+index 431f4800b9..aa6ecaeed6 100644
+--- a/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl
++++ b/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl
+@@ -1549,7 +1549,7 @@ void fragment_shader(in SceneData scene_data) {
+ 	vec3 vertex_ddx = dFdx(vertex);
+ 	vec3 vertex_ddy = dFdy(vertex);
+ 
+-	{ // process decals
++	if (bool(implementation_data.cluster_type_mask & 8u)) { // process decals
+ 
+ 		uint cluster_decal_offset = cluster_offset + implementation_data.cluster_type_size * 3;
+ 
+@@ -2035,7 +2035,7 @@ void fragment_shader(in SceneData scene_data) {
+ 		ao_light_affect = mix(ao_light_affect, max(ao_light_affect, implementation_data.ssao_light_affect), implementation_data.ssao_ao_affect);
+ 	}
+ 
+-	{ // process reflections
++	if (bool(implementation_data.cluster_type_mask & 16u)) { // process reflections
+ 
+ 		vec4 reflection_accum = vec4(0.0, 0.0, 0.0, 0.0);
+ 		vec4 ambient_accum = vec4(0.0, 0.0, 0.0, 0.0);
+@@ -2695,7 +2695,7 @@ void fragment_shader(in SceneData scene_data) {
+ 	}
+ 
+ #ifndef USE_VERTEX_LIGHTING
+-	{ //omni lights
++	if (bool(implementation_data.cluster_type_mask & 1u)) { //omni lights
+ 
+ 		uint cluster_omni_offset = cluster_offset;
+ 
+@@ -2756,7 +2756,7 @@ void fragment_shader(in SceneData scene_data) {
+ 		}
+ 	}
+ 
+-	{ //spot lights
++	if (bool(implementation_data.cluster_type_mask & 2u)) { //spot lights
+ 
+ 		uint cluster_spot_offset = cluster_offset + implementation_data.cluster_type_size;
+ 
+diff --git a/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl b/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl
+index 4fc3ce2bc7..1d7e182e6a 100644
+--- a/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl
++++ b/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl
+@@ -326,7 +326,8 @@ struct ImplementationData {
+ 	uint ss_effects_flags;
+ 	float ssao_light_affect;
+ 	float ssao_ao_affect;
+-	uint pad1;
++	// bit per cluster element type present this frame
++	uint cluster_type_mask;
+ 
+ 	mat4 sdf_to_bounds;
+ 
+diff --git a/servers/rendering/renderer_rd/storage_rd/light_storage.h b/servers/rendering/renderer_rd/storage_rd/light_storage.h
+index 71043e449b..e2a3a86125 100644
+--- a/servers/rendering/renderer_rd/storage_rd/light_storage.h
++++ b/servers/rendering/renderer_rd/storage_rd/light_storage.h
+@@ -101,6 +101,8 @@ private:
+ 			float range_begin = 0.0;
+ 			Rect2 atlas_rect;
+ 			Vector2 uv_scale;
++			// forest-perf: samplable part of the cascade, normalized
++			Rect2 scissor = Rect2(0, 0, 1, 1);
+ 		};
+ 
+ 		RSE::LightType light_type = RSE::LIGHT_DIRECTIONAL;
+@@ -775,6 +777,18 @@ public:
+ 		return li->shadow_transform[p_index].atlas_rect;
+ 	}
+ 
++	_FORCE_INLINE_ void light_instance_set_shadow_scissor(RID p_light_instance, int p_index, const Rect2 &p_rect) {
++		LightInstance *li = light_instance_owner.get_or_null(p_light_instance);
++		ERR_FAIL_NULL(li);
++		li->shadow_transform[p_index].scissor = p_rect;
++	}
++
++	_FORCE_INLINE_ Rect2 light_instance_get_shadow_scissor(RID p_light_instance, int p_index) {
++		LightInstance *li = light_instance_owner.get_or_null(p_light_instance);
++		ERR_FAIL_NULL_V(li, Rect2(0, 0, 1, 1));
++		return li->shadow_transform[p_index].scissor;
++	}
++
+ 	_FORCE_INLINE_ float light_instance_get_directional_shadow_split(RID p_light_instance, int p_index) {
+ 		LightInstance *li = light_instance_owner.get_or_null(p_light_instance);
+ 		return li->shadow_transform[p_index].split;
+diff --git a/servers/rendering/renderer_rd/storage_rd/mesh_storage.h b/servers/rendering/renderer_rd/storage_rd/mesh_storage.h
+index b409f94f96..af948bf677 100644
+--- a/servers/rendering/renderer_rd/storage_rd/mesh_storage.h
++++ b/servers/rendering/renderer_rd/storage_rd/mesh_storage.h
+@@ -452,6 +452,12 @@ public:
+ 		return surface->vertex_count;
+ 	}
+ 
++	// forest-perf: index count of a surface, for cluster culling
++	_FORCE_INLINE_ uint32_t forest_mesh_surface_get_index_count(void *p_surface) {
++		Mesh::Surface *surface = reinterpret_cast<Mesh::Surface *>(p_surface);
++		return surface->index_count;
++	}
++
+ 	_FORCE_INLINE_ bool mesh_surface_has_lod(void *p_surface) const {
+ 		Mesh::Surface *s = reinterpret_cast<Mesh::Surface *>(p_surface);
+ 		return s->lod_count > 0;
+diff --git a/servers/rendering/renderer_scene_cull.cpp b/servers/rendering/renderer_scene_cull.cpp
+index 26a78790d1..0120f6fccc 100644
+--- a/servers/rendering/renderer_scene_cull.cpp
++++ b/servers/rendering/renderer_scene_cull.cpp
+@@ -29,12 +29,15 @@
+ /**************************************************************************/
+ 
+ #include "renderer_scene_cull.h"
++#include "forest_occ.h"
+ 
+ #include "core/config/engine.h"
+ #include "core/config/project_settings.h"
+ #include "core/math/geometry_3d.h"
+ #include "core/object/callable_mp.h"
+ #include "core/object/worker_thread_pool.h"
++#include "core/os/os.h"
++#include "servers/rendering/renderer_rd/storage_rd/light_storage.h"
+ #include "servers/rendering/rendering_light_culler.h"
+ #include "servers/rendering/rendering_server.h"
+ #include "servers/rendering/rendering_server_default.h"
+@@ -1477,7 +1480,8 @@ void RendererSceneCull::_update_instance_visibility_dependencies(Instance *p_ins
+ 		vd.range_end = p_instance->visibility_range_end;
+ 		vd.range_begin_margin = p_instance->visibility_range_begin_margin;
+ 		vd.range_end_margin = p_instance->visibility_range_end_margin;
+-		vd.position = p_instance->transformed_aabb.get_center();
++		// forest-perf: node origin, the point the LOD dither measures
++		vd.position = forest_vis_origin ? p_instance->transform.origin : p_instance->transformed_aabb.get_center();
+ 		vd.array_index = p_instance->array_index;
+ 		vd.fade_mode = p_instance->visibility_range_fade_mode;
+ 
+@@ -1856,7 +1860,7 @@ void RendererSceneCull::_update_instance(Instance *p_instance) const {
+ 	}
+ 
+ 	if (p_instance->visibility_index != -1) {
+-		p_instance->scenario->instance_visibility[p_instance->visibility_index].position = p_instance->transformed_aabb.get_center();
++		p_instance->scenario->instance_visibility[p_instance->visibility_index].position = forest_vis_origin ? p_instance->transform.origin : p_instance->transformed_aabb.get_center();
+ 	}
+ 
+ 	//move instance and repair
+@@ -2336,6 +2340,7 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
+ 
+ 		// a pre pass will need to be needed to determine the actual z-near to be used
+ 
++		real_t slice_z_max = z_max;
+ 		z_max = z_vec.dot(center) + radius + pancake_size;
+ 
+ 		{
+@@ -2360,6 +2365,66 @@ void RendererSceneCull::_light_instance_setup_directional_shadow(int p_shadow_in
+ 			cull.shadows[p_shadow_index].cascades[i].bias_scale = (z_max - z_min_cam);
+ 			cull.shadows[p_shadow_index].cascades[i].range_begin = z_max - z_vec.dot(p_cam_transform.origin);
+ 			cull.shadows[p_shadow_index].cascades[i].uv_scale = uv_scale;
++
++			// forest-perf: same texel formula the shaders derive from
++			// the ortho projection, so engine and dither agree
++			real_t lod_distance = 0;
++			if (forest_shadow_lod && !p_cam_orthogonal && forest_viewport_height > 0) {
++				real_t texel = 2.0 * half_x / texture_size;
++				real_t tan_half = Math::tan(Math::deg_to_rad(p_cam_projection.get_fov()) * 0.5);
++				lod_distance = texel * forest_viewport_height / (2.0 * tan_half) * forest_shadow_lod_bias;
++			}
++			cull.shadows[p_shadow_index].cascades[i].lod_distance = lod_distance;
++
++			// forest-perf: only texels under the slice (plus the soft
++			// shadow expand and filter margin) are ever sampled
++			Rect2 sc = Rect2(0, 0, 1, 1);
++			if (forest_shadow_scissor > 0) {
++				real_t w = x_max_cam - x_min_cam;
++				real_t h = y_max_cam - y_min_cam;
++				// reused cascades need slack for camera motion
++				real_t margin = (forest_shadow_amort && i >= forest_amort_first) ? 48.0 : 8.0;
++				real_t mx = w * margin / texture_size;
++				real_t my = h * margin / texture_size;
++				real_t u0 = CLAMP((x_min - mx - x_min_cam) / w, (real_t)0, (real_t)1);
++				real_t u1 = CLAMP((x_max + mx - x_min_cam) / w, (real_t)0, (real_t)1);
++				real_t v0 = CLAMP((y_min - my - y_min_cam) / h, (real_t)0, (real_t)1);
++				real_t v1 = CLAMP((y_max + my - y_min_cam) / h, (real_t)0, (real_t)1);
++				if (forest_shadow_scissor == 2) {
++					real_t t0 = 1.0 - v1;
++					v1 = 1.0 - v0;
++					v0 = t0;
++				}
++				sc = Rect2(u0, v0, u1 - u0, v1 - v0);
++				Cull::Shadow::Cascade &cc = cull.shadows[p_shadow_index].cascades[i];
++				cc.lx = x_vec;
++				cc.ly = y_vec;
++				cc.sx0 = MAX(x_min - mx, x_min_cam);
++				cc.sx1 = MIN(x_max + mx, x_max_cam);
++				cc.sy0 = MAX(y_min - my, y_min_cam);
++				cc.sy1 = MIN(y_max + my, y_max_cam);
++				cc.sample_cull = true;
++			}
++			{
++				Cull::Shadow::Cascade &cc = cull.shadows[p_shadow_index].cascades[i];
++				if (!cc.sample_cull) {
++					cc.lx = x_vec;
++					cc.ly = y_vec;
++					cc.sx0 = x_min_cam;
++					cc.sx1 = x_max_cam;
++					cc.sy0 = y_min_cam;
++					cc.sy1 = y_max_cam;
++				}
++				cc.vx0 = x_min;
++				cc.vx1 = x_max;
++				cc.vy0 = y_min;
++				cc.vy1 = y_max;
++				cc.vz0 = z_min;
++				cc.vz1 = slice_z_max;
++				cc.oz0 = z_min_cam;
++				cc.oz1 = z_max;
++			}
++			cull.shadows[p_shadow_index].cascades[i].scissor = sc;
+ 		}
+ 	}
+ }
+@@ -2672,6 +2737,7 @@ void RendererSceneCull::render_camera(const Ref<RenderSceneBuffers> &p_render_bu
+ 
+ 	Camera *camera = camera_owner.get_or_null(p_camera);
+ 	ERR_FAIL_NULL(camera);
++	forest_viewport_height = p_viewport_size.y;
+ 
+ 	Vector2 jitter;
+ 	float taa_frame_count = 0.0f;
+@@ -2872,6 +2938,84 @@ int RendererSceneCull::_visibility_range_check(InstanceVisibilityData &r_vis_dat
+ 	}
+ }
+ 
++void RendererSceneCull::_forest_build_slice(void *p_userdata, uint32_t p_index) {
++	ForestOcc::build_slice(p_index);
++}
++
++bool RendererSceneCull::_forest_reuse_cascade(RID p_light, int p_cascade, const Cull::Shadow::Cascade &p_c) {
++	// Returns true when this frame skips rendering the cascade and
++	// samples last frame's map with the matrices it was made with.
++	ForestCascadeCache &k = forest_cascade_cache[p_light].c[p_cascade];
++	uint64_t frame = RSG::rasterizer->get_frame_number();
++	// first=1: even frames 1+2, odd 3. first=0: even 0+3, odd 1+2,
++	// which balances the four cascades' cost across frames
++	bool even = (frame & 1) == 0;
++	bool due;
++	if (forest_amort_first == 0) {
++		due = (p_cascade == 0 || p_cascade == 3) ? even : !even;
++	} else {
++		due = p_cascade < forest_amort_first || (p_cascade == 3 ? !even : even);
++	}
++	if (p_cascade == 3 && forest_amort_far_period > 2) {
++		// far cascade: one frame in N, on frames the others skip
++		due = (frame % forest_amort_far_period) == 1;
++	}
++	const real_t eps = 1e-4;
++	bool covers = k.valid && p_c.lx.is_equal_approx(k.lx) && p_c.ly.is_equal_approx(k.ly) &&
++			p_c.vx0 >= k.sx0 && p_c.vx1 <= k.sx1 && p_c.vy0 >= k.sy0 && p_c.vy1 <= k.sy1 &&
++			p_c.vz0 >= k.oz0 - eps && p_c.vz1 <= k.oz1 + eps;
++	if (!due && covers) {
++		RSG::light_storage->light_instance_set_shadow_transform(p_light, k.projection, k.transform, k.zfar, k.split, p_cascade, k.texel, k.bias_scale, k.range_begin, k.uv_scale);
++		forest_reused_cascades++;
++		return true;
++	}
++	k.valid = true;
++	k.projection = p_c.projection;
++	k.transform = p_c.transform;
++	k.zfar = p_c.zfar;
++	k.split = p_c.split;
++	k.texel = p_c.shadow_texel_size;
++	k.bias_scale = p_c.bias_scale;
++	k.range_begin = p_c.range_begin;
++	k.uv_scale = p_c.uv_scale;
++	k.scissor = p_c.scissor;
++	k.lx = p_c.lx;
++	k.ly = p_c.ly;
++	k.sx0 = p_c.sx0;
++	k.sx1 = p_c.sx1;
++	k.sy0 = p_c.sy0;
++	k.sy1 = p_c.sy1;
++	k.oz0 = p_c.oz0;
++	k.oz1 = p_c.oz1;
++	return false;
++}
++
++bool RendererSceneCull::_forest_in_sample_rect(const Cull::Shadow::Cascade &p_c, const InstanceBounds &p_b) {
++	// Project the AABB onto the light x and y axes; a caster whose
++	// footprint misses the samplable rect writes no sampled texel.
++	Vector3 mn(p_b.bounds[0], p_b.bounds[1], p_b.bounds[2]);
++	Vector3 mx(p_b.bounds[3], p_b.bounds[4], p_b.bounds[5]);
++	Vector3 c = (mn + mx) * 0.5;
++	Vector3 e = (mx - mn) * 0.5;
++	real_t cx = p_c.lx.dot(c);
++	real_t rx = Math::abs(p_c.lx.x) * e.x + Math::abs(p_c.lx.y) * e.y + Math::abs(p_c.lx.z) * e.z;
++	if (cx + rx < p_c.sx0 || cx - rx > p_c.sx1) {
++		return false;
++	}
++	real_t cy = p_c.ly.dot(c);
++	real_t ry = Math::abs(p_c.ly.x) * e.x + Math::abs(p_c.ly.y) * e.y + Math::abs(p_c.ly.z) * e.z;
++	return !(cy + ry < p_c.sy0 || cy - ry > p_c.sy1);
++}
++
++bool RendererSceneCull::_forest_shadow_range(const InstanceVisibilityData &p_vis_data, const Vector3 &p_camera_pos, real_t p_lod_distance) {
++	// Range test at the coarser of camera distance and cascade detail.
++	float dist = MAX(p_camera_pos.distance_to(p_vis_data.position), (float)p_lod_distance);
++	if (p_vis_data.range_end > 0.0f && dist > p_vis_data.range_end) {
++		return false;
++	}
++	return !(p_vis_data.range_begin > 0.0f && dist < p_vis_data.range_begin);
++}
++
+ bool RendererSceneCull::_visibility_parent_check(const CullData &p_cull_data, const InstanceData &p_instance_data) {
+ 	if (p_instance_data.parent_array_index == -1) {
+ 		return true;
+@@ -2924,7 +3068,7 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
+ #define VIS_RANGE_CHECK ((idata.visibility_index == -1) || _visibility_range_check<false>(cull_data.scenario->instance_visibility[idata.visibility_index], cull_data.cam_transform.origin, cull_data.visibility_viewport_mask) == 0)
+ #define VIS_PARENT_CHECK (_visibility_parent_check(cull_data, idata))
+ #define VIS_CHECK (visibility_check < 0 ? (visibility_check = (visibility_flags != InstanceData::FLAG_VISIBILITY_DEPENDENCY_NEEDS_CHECK || (VIS_RANGE_CHECK && VIS_PARENT_CHECK))) : visibility_check)
+-#define OCCLUSION_CULLED (cull_data.occlusion_buffer != nullptr && (cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_IGNORE_OCCLUSION_CULLING) == 0 && cull_data.occlusion_buffer->is_occluded(cull_data.scenario->instance_aabbs[i].bounds, cull_data.cam_transform.origin, inv_cam_transform, *cull_data.camera_matrix, z_near, is_orthogonal, cull_data.scenario->instance_data[i].occlusion_timeout))
++#define OCCLUSION_CULLED ((ForestOcc::enabled && (cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_IGNORE_OCCLUSION_CULLING) == 0 && ForestOcc::occluded(cull_data.scenario->instance_aabbs[i].bounds)) || (cull_data.occlusion_buffer != nullptr && (cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_IGNORE_OCCLUSION_CULLING) == 0 && cull_data.occlusion_buffer->is_occluded(cull_data.scenario->instance_aabbs[i].bounds, cull_data.cam_transform.origin, inv_cam_transform, *cull_data.camera_matrix, z_near, is_orthogonal, cull_data.scenario->instance_data[i].occlusion_timeout)))
+ 
+ 		if (!HIDDEN_BY_VISIBILITY_CHECKS) {
+ 			if ((LAYER_CHECK && IN_FRUSTUM(cull_data.cull->frustum) && VIS_CHECK && !OCCLUSION_CULLED) || (cull_data.scenario->instance_data[i].flags & InstanceData::FLAG_IGNORE_ALL_CULLING)) {
+@@ -3238,11 +3382,45 @@ void RendererSceneCull::_scene_cull(CullData &cull_data, InstanceCullResult &cul
+ 			}
+ 
+ 			for (uint32_t j = 0; j < cull_data.cull->shadow_count; j++) {
++				// forest-perf: skip casters whose shadow lands only on
++				// surfaces the camera cannot see
++				// footprint evaluated lazily, once, only for casters in a
++				// cascade; then tested against that cascade's slice
++				if (forest_diag_behind > 0.0) {
++					// diagnostic: drop casters wholly behind the camera
++					const InstanceBounds &ib = cull_data.scenario->instance_aabbs[i];
++					Vector3 fwd = -cull_data.cam_transform.basis.get_column(2);
++					Vector3 o = cull_data.cam_transform.origin;
++					real_t best = -1e30;
++					for (int cj = 0; cj < 8; cj++) {
++						Vector3 c(cj & 1 ? ib.bounds[0] : ib.bounds[3], cj & 2 ? ib.bounds[1] : ib.bounds[4], cj & 4 ? ib.bounds[2] : ib.bounds[5]);
++						best = MAX(best, (c - o).dot(fwd));
++					}
++					if (best < -forest_diag_behind) {
++						continue;
++					}
++				}
++				int recv_state = (ForestOcc::enabled && ForestOcc::shadow_cull && cull_data.cull->shadows[j].cascade_count > 0) ? -1 : 0;
++				int recv_rect[4];
+ 				for (uint32_t k = 0; k < cull_data.cull->shadows[j].cascade_count; k++) {
+ 					if (!light_culler->cull_directional_light(cull_data.scenario->instance_aabbs[i], j, k)) { // pass the cascade index
+ 						continue;
+ 					}
+-					if (IN_FRUSTUM(cull_data.cull->shadows[j].cascades[k].frustum) && VIS_CHECK) {
++					if (recv_state == -1) {
++						Vector3 travel = -cull_data.cull->shadows[j].cascades[0].transform.basis.get_column(2).normalized();
++						recv_state = ForestOcc::footprint(cull_data.scenario->instance_aabbs[i].bounds, travel, recv_rect) ? 1 : 0;
++					}
++					if (recv_state == 1 && ForestOcc::unseen_in(recv_rect, k)) {
++						continue;
++					}
++					const real_t lod_d = cull_data.cull->shadows[j].cascades[k].lod_distance;
++					bool shadow_vis = (lod_d > 0 && idata.visibility_index != -1)
++							? (_forest_shadow_range(cull_data.scenario->instance_visibility[idata.visibility_index], cull_data.cam_transform.origin, lod_d) && VIS_PARENT_CHECK)
++							: VIS_CHECK;
++					if (cull_data.cull->shadows[j].cascades[k].sample_cull && !_forest_in_sample_rect(cull_data.cull->shadows[j].cascades[k], cull_data.scenario->instance_aabbs[i])) {
++						continue;
++					}
++					if (IN_FRUSTUM(cull_data.cull->shadows[j].cascades[k].frustum) && shadow_vis) {
+ 						uint32_t base_type = idata.flags & InstanceData::FLAG_BASE_TYPE_MASK;
+ 
+ 						if (((1 << base_type) & RSE::INSTANCE_GEOMETRY_MASK) && idata.flags & InstanceData::FLAG_CAST_SHADOWS && (LAYER_CHECK & cull_data.cull->shadows[j].caster_mask)) {
+@@ -3296,6 +3474,7 @@ void RendererSceneCull::_scene_particles_set_view_axis(RID p_particles, const Ve
+ 
+ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_camera_data, const Ref<RenderSceneBuffers> &p_render_buffers, RID p_environment, RID p_force_camera_attributes, RID p_compositor, uint32_t p_visible_layers, RID p_scenario, RID p_viewport, RID p_shadow_atlas, RID p_reflection_probe, int p_reflection_probe_pass, float p_screen_mesh_lod_threshold, float p_window_output_max_value, bool p_using_shadows, RenderingServerTypes::RenderInfo *r_render_info) {
+ 	Instance *render_reflection_probe = instance_owner.get_or_null(p_reflection_probe); //if null, not rendering to it
++	forest_scene_t0 = OS::get_singleton()->get_ticks_usec();
+ 
+ 	// Prepare the light - camera volume culling system.
+ 	light_culler->prepare_camera(p_camera_data->main_transform, p_camera_data->main_projection);
+@@ -3430,6 +3609,35 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
+ 		cull_data.render_reflection_probe = render_reflection_probe;
+ 		cull_data.occlusion_buffer = RendererSceneOcclusionCull::get_singleton()->buffer_get_ptr(p_viewport);
+ 		cull_data.camera_matrix = &p_camera_data->main_projection;
++		ForestOcc::cam_now = p_camera_data->main_transform.origin;
++		if (ForestOcc::enabled && ForestOcc::shadow_cull && ForestOcc::split_count == 0) {
++			// slice bounds come from the first directional light
++			for (uint32_t li = 0; li < cull.shadow_count; li++) {
++				const Cull::Shadow &sh = cull.shadows[li];
++				if (sh.cascade_count > 0 && sh.cascade_count <= (uint32_t)ForestOcc::RCASC) {
++					ForestOcc::splits[0] = 0;
++					for (uint32_t ci = 0; ci < sh.cascade_count; ci++) {
++						ForestOcc::splits[ci + 1] = sh.cascades[ci].split;
++					}
++					ForestOcc::split_count = sh.cascade_count;
++					break;
++				}
++			}
++		}
++		if (ForestOcc::enabled && ForestOcc::shadow_cull && ForestOcc::recv_version != ForestOcc::version && ForestOcc::last_travel != Vector3() && !ForestOcc::tiles.is_empty()) {
++			uint64_t fb0 = OS::get_singleton()->get_ticks_usec();
++			int nslices = ForestOcc::prepare_receivers(ForestOcc::last_travel);
++			WorkerThreadPool::GroupID gid = WorkerThreadPool::get_singleton()->add_native_group_task(&RendererSceneCull::_forest_build_slice, nullptr, nslices, nslices, true, SNAME("ForestRecv"));
++			WorkerThreadPool::get_singleton()->wait_for_group_task_completion(gid);
++			ForestTime::acc[ForestTime::RECV_BUILD] += OS::get_singleton()->get_ticks_usec() - fb0;
++		}
++		if (ForestOcc::enabled && Engine::get_singleton()->get_frames_drawn() % 240 == 0) {
++			print_line(vformat("FOREST occ tested=%d culled=%d shadow tested=%d culled=%d", ForestOcc::tested, ForestOcc::culled, ForestOcc::sh_tested, ForestOcc::sh_culled));
++		}
++		ForestOcc::tested = 0;
++		ForestOcc::culled = 0;
++		ForestOcc::sh_tested = 0;
++		ForestOcc::sh_culled = 0;
+ 		cull_data.visibility_viewport_mask = scenario->viewport_visibility_masks.has(p_viewport) ? scenario->viewport_visibility_masks[p_viewport] : 0;
+ #ifdef DEBUG_CULL_TIME
+ 		uint64_t time_from = OS::get_singleton()->get_ticks_usec();
+@@ -3441,12 +3649,15 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
+ 				thread.clear();
+ 			}
+ 
++			uint64_t fc0 = OS::get_singleton()->get_ticks_usec();
++			ForestTime::acc[ForestTime::CULL_PREP] += fc0 - forest_scene_t0;
+ 			WorkerThreadPool::GroupID group_task = WorkerThreadPool::get_singleton()->add_template_group_task(this, &RendererSceneCull::_scene_cull_threaded, &cull_data, scene_cull_result_threads.size(), -1, true, SNAME("RenderCullInstances"));
+ 			WorkerThreadPool::get_singleton()->wait_for_group_task_completion(group_task);
+ 
+ 			for (InstanceCullResult &thread : scene_cull_result_threads) {
+ 				scene_cull_result.append_from(thread);
+ 			}
++			ForestTime::acc[ForestTime::CULL] += OS::get_singleton()->get_ticks_usec() - fc0;
+ 
+ 		} else {
+ 			//single threaded
+@@ -3480,14 +3691,27 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
+ 		for (uint32_t i = 0; i < cull.shadow_count; i++) {
+ 			for (uint32_t j = 0; j < cull.shadows[i].cascade_count; j++) {
+ 				const Cull::Shadow::Cascade &c = cull.shadows[i].cascades[j];
++				if (forest_shadow_amort && _forest_reuse_cascade(cull.shadows[i].light_instance, j, c)) {
++					continue;
++				}
+ 				//			print_line("shadow " + itos(i) + " cascade " + itos(j) + " elements: " + itos(c.cull_result.size()));
+ 				RSG::light_storage->light_instance_set_shadow_transform(cull.shadows[i].light_instance, c.projection, c.transform, c.zfar, c.split, j, c.shadow_texel_size, c.bias_scale, c.range_begin, c.uv_scale);
++				if (RendererRD::LightStorage::get_singleton()) {
++					RendererRD::LightStorage::get_singleton()->light_instance_set_shadow_scissor(cull.shadows[i].light_instance, j, c.scissor);
++				}
++				if (forest_debug_cascades && Engine::get_singleton()->get_frames_drawn() % 120 == 0) {
++					print_line(vformat("FOREST cascade %d scissor area=%.3f", j, c.scissor.get_area()));
++				}
+ 				if (max_shadows_used == MAX_UPDATE_SHADOWS) {
+ 					continue;
+ 				}
+ 				render_shadow_data[max_shadows_used].light = cull.shadows[i].light_instance;
+ 				render_shadow_data[max_shadows_used].pass = j;
+ 				render_shadow_data[max_shadows_used].instances.merge_unordered(scene_cull_result.directional_shadows[i].cascade_geometry_instances[j]);
++				// forest-perf: casters per cascade, every 120 frames
++				if (forest_debug_cascades && Engine::get_singleton()->get_frames_drawn() % 120 == 0) {
++					print_line(vformat("FOREST cascade %d casters=%d split=%.1f texel=%.4f", j, render_shadow_data[max_shadows_used].instances.size(), c.split, c.shadow_texel_size));
++				}
+ 				max_shadows_used++;
+ 			}
+ 		}
+@@ -3703,6 +3927,11 @@ void RendererSceneCull::_render_scene(const RendererSceneRender::CameraData *p_c
+ 	}
+ 
+ 	RENDER_TIMESTAMP("Render 3D Scene");
++	uint64_t frs0 = OS::get_singleton()->get_ticks_usec();
++	struct ForestRSTimer {
++		uint64_t t;
++		~ForestRSTimer() { ForestTime::acc[ForestTime::RENDER_SCENE] += OS::get_singleton()->get_ticks_usec() - t; }
++	} forest_rs_timer{ frs0 };
+ 	scene_render->render_scene(p_render_buffers, p_camera_data, prev_camera_data, scene_cull_result.geometry_instances, scene_cull_result.light_instances, scene_cull_result.reflections, scene_cull_result.voxel_gi_instances, scene_cull_result.decals, scene_cull_result.lightmaps, scene_cull_result.fog_volumes, p_environment, camera_attributes, p_compositor, p_shadow_atlas, occluders_tex, p_reflection_probe.is_valid() ? RID() : scenario->reflection_atlas, p_reflection_probe, p_reflection_probe_pass, p_screen_mesh_lod_threshold, render_shadow_data, max_shadows_used, render_sdfgi_data, cull.sdfgi.region_count, p_window_output_max_value, &sdfgi_update_data, r_render_info);
+ 
+ 	if (p_viewport.is_valid()) {
+@@ -4524,6 +4753,21 @@ RendererSceneCull::RendererSceneCull() {
+ 	bool tighter_caster_culling = GLOBAL_DEF("rendering/lights_and_shadows/tighter_shadow_caster_culling", true);
+ 	light_culler->set_caster_culling_active(tighter_caster_culling);
+ 	light_culler->set_light_culling_active(tighter_caster_culling);
++	forest_debug_cascades = OS::get_singleton()->get_environment("FOREST_DEBUG_CASCADES") == "1";
++	forest_shadow_lod = OS::get_singleton()->get_environment("FOREST_SHADOW_LOD") == "1";
++	String bias_env = OS::get_singleton()->get_environment("FOREST_SHADOW_LOD_BIAS");
++	forest_shadow_lod_bias = bias_env.is_empty() ? 1.0 : bias_env.to_float();
++	forest_shadow_amort = OS::get_singleton()->get_environment("FOREST_SHADOW_AMORT") != "0";
++	forest_vis_origin = OS::get_singleton()->get_environment("FOREST_VIS_ORIGIN") != "0";
++	forest_diag_behind = OS::get_singleton()->get_environment("FOREST_DIAG_BEHIND").to_float();
++	{
++		String fp = OS::get_singleton()->get_environment("FOREST_AMORT_FAR");
++		forest_amort_far_period = fp.is_empty() ? 4 : (uint64_t)MAX(fp.to_int(), 2);
++	}
++	String af = OS::get_singleton()->get_environment("FOREST_AMORT_FIRST");
++	forest_amort_first = af.is_empty() ? 1 : af.to_int();
++	String sc_env = OS::get_singleton()->get_environment("FOREST_SHADOW_SCISSOR");
++	forest_shadow_scissor = sc_env.is_empty() ? 1 : sc_env.to_int();
+ }
+ 
+ RendererSceneCull::~RendererSceneCull() {
+diff --git a/servers/rendering/renderer_scene_cull.h b/servers/rendering/renderer_scene_cull.h
+index 6d9279889d..c8cba35a88 100644
+--- a/servers/rendering/renderer_scene_cull.h
++++ b/servers/rendering/renderer_scene_cull.h
+@@ -1020,6 +1020,37 @@ public:
+ 
+ 	LocalVector<Vector2> camera_jitter_array;
+ 	RenderingLightCuller *light_culler = nullptr;
++	// forest-perf: FOREST_DEBUG_CASCADES=1 prints casters per cascade
++	bool forest_debug_cascades = false;
++	// forest-perf: shadow casters pick LOD by cascade texel size
++	bool forest_shadow_lod = false;
++	real_t forest_shadow_lod_bias = 1.0;
++	// forest-perf: FOREST_SHADOW_AMORT=1 renders far cascades on
++	// alternating frames, reusing the last map while it covers
++	bool forest_shadow_amort = false;
++	bool forest_vis_origin = true;
++	uint64_t forest_scene_t0 = 0;
++	real_t forest_diag_behind = 0.0;
++	uint64_t forest_amort_far_period = 2;
++	static void _forest_build_slice(void *p_userdata, uint32_t p_index);
++	int forest_amort_first = 1;
++	struct ForestCascadeCache {
++		bool valid = false;
++		Projection projection;
++		Transform3D transform;
++		real_t zfar = 0, split = 0, texel = 0, bias_scale = 0, range_begin = 0;
++		Vector2 uv_scale;
++		Rect2 scissor;
++		real_t sx0 = 0, sx1 = 0, sy0 = 0, sy1 = 0, oz0 = 0, oz1 = 0;
++		Vector3 lx, ly, lz;
++	};
++	struct ForestLightCache {
++		ForestCascadeCache c[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES];
++	};
++	HashMap<RID, ForestLightCache> forest_cascade_cache;
++	// forest-perf: FOREST_SHADOW_SCISSOR=1 limits cascade fill
++	int forest_shadow_scissor = 0;
++	real_t forest_viewport_height = 0;
+ 
+ 	virtual RID instance_allocate();
+ 	virtual void instance_initialize(RID p_rid);
+@@ -1101,6 +1132,18 @@ public:
+ 				real_t bias_scale;
+ 				real_t range_begin;
+ 				Vector2 uv_scale;
++				// forest-perf: camera distance with the same detail as one texel
++				real_t lod_distance = 0;
++				// forest-perf: samplable region of the cascade, normalized
++				Rect2 scissor = Rect2(0, 0, 1, 1);
++				// same region in light space (x_vec, y_vec), for culling
++				Vector3 lx;
++				Vector3 ly;
++				real_t sx0 = 0, sx1 = 0, sy0 = 0, sy1 = 0;
++				bool sample_cull = false;
++				// slice extents (no margin) and ortho depth range
++				real_t vx0 = 0, vx1 = 0, vy0 = 0, vy1 = 0;
++				real_t vz0 = 0, vz1 = 0, oz0 = 0, oz1 = 0;
+ 
+ 			} cascades[RendererSceneRender::MAX_DIRECTIONAL_LIGHT_CASCADES]; //max 4 cascades
+ 			uint32_t cascade_count;
+@@ -1137,6 +1180,10 @@ public:
+ 	void _visibility_cull(const VisibilityCullData &cull_data, uint64_t p_from, uint64_t p_to);
+ 	template <bool p_fade_check>
+ 	_FORCE_INLINE_ int _visibility_range_check(InstanceVisibilityData &r_vis_data, const Vector3 &p_camera_pos, uint64_t p_viewport_mask);
++	bool _forest_shadow_range(const InstanceVisibilityData &p_vis_data, const Vector3 &p_camera_pos, real_t p_lod_distance);
++	static bool _forest_in_sample_rect(const Cull::Shadow::Cascade &p_c, const InstanceBounds &p_b);
++	bool _forest_reuse_cascade(RID p_light, int p_cascade, const Cull::Shadow::Cascade &p_c);
++	uint64_t forest_reused_cascades = 0;
+ 
+ 	struct CullData {
+ 		Cull *cull = nullptr;
+diff --git a/servers/rendering/rendering_device.cpp b/servers/rendering/rendering_device.cpp
+index 7574038788..f9338f7238 100644
+--- a/servers/rendering/rendering_device.cpp
++++ b/servers/rendering/rendering_device.cpp
+@@ -4687,6 +4687,10 @@ RID RenderingDevice::uniform_set_create(const VectorView<RD::Uniform> &p_uniform
+ 					buffer = vertex_buffer_owner.get_or_null(buffer_id);
+ 
+ 					ERR_FAIL_COND_V_MSG(!(buffer->usage.has_flag(RDD::BUFFER_USAGE_STORAGE_BIT)), RID(), "Vertex buffer supplied (binding: " + itos(uniform.binding) + ") was not created with storage flag.");
++				} else if (index_buffer_owner.owns(buffer_id)) {
++					// forest-perf: compute-written index buffers
++					buffer = index_buffer_owner.get_or_null(buffer_id);
++					ERR_FAIL_COND_V_MSG(!(buffer->usage.has_flag(RDD::BUFFER_USAGE_STORAGE_BIT)), RID(), "Index buffer supplied (binding: " + itos(uniform.binding) + ") was not created with storage flag.");
+ 				}
+ 				ERR_FAIL_NULL_V_MSG(buffer, RID(), "Storage buffer supplied (binding: " + itos(uniform.binding) + ") is invalid.");
+ 
+diff --git a/servers/rendering/rendering_server_default.cpp b/servers/rendering/rendering_server_default.cpp
+index 49b80b10b6..046f9e6f83 100644
+--- a/servers/rendering/rendering_server_default.cpp
++++ b/servers/rendering/rendering_server_default.cpp
+@@ -32,6 +32,7 @@
+ 
+ #include "core/object/callable_mp.h"
+ #include "core/os/os.h"
++#include "servers/rendering/forest_occ.h"
+ #include "core/profiling/profiling.h"
+ #include "servers/display/display_server.h"
+ #include "servers/rendering/renderer_canvas_cull.h"
+@@ -93,7 +94,9 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
+ #endif // XR_DISABLED
+ 
+ 	GodotProfileZoneGrouped(_profile_zone, "scene->update");
++	uint64_t ft0 = OS::get_singleton()->get_ticks_usec();
+ 	RSG::scene->update(); //update scenes stuff before updating instances
++	ForestTime::acc[ForestTime::SCENE_UPDATE] += OS::get_singleton()->get_ticks_usec() - ft0;
+ 	GodotProfileZoneGrouped(_profile_zone, "canvas->update");
+ 	RSG::canvas->update();
+ 
+@@ -113,6 +116,16 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
+ 
+ 	GodotProfileZoneGrouped(_profile_zone, "rasterizer->end_frame");
+ 	RSG::rasterizer->end_frame(p_swap_buffers);
++	ForestTime::acc[ForestTime::DRAW] += OS::get_singleton()->get_ticks_usec() - time_usec;
++	if (++ForestTime::frames == 60) {
++		String s = "FOREST cpu_ms/frame";
++		for (int i = 0; i < ForestTime::SLOT_MAX; i++) {
++			s += vformat(" %s=%.2f", ForestTime::names[i], ForestTime::acc[i] / 60000.0);
++			ForestTime::acc[i] = 0;
++		}
++		print_line(s);
++		ForestTime::frames = 0;
++	}
+ 
+ #ifndef XR_DISABLED
+ 	if (xr_server != nullptr) {
+-- 
+2.56.0
+

@@ -1,0 +1,52 @@
+From f5d2fc0f3b904e7d4f96779dce3a8471aae24da7 Mon Sep 17 00:00:00 2001
+From: PhialsBasement <155454343+PhialsBasement@users.noreply.github.com>
+Date: Tue, 27 Oct 2026 19:58:35 +1100
+Subject: [PATCH 2/3] Forest occlusion switches as project settings
+
+rendering/forest/gpu_occlusion and rendering/forest/shadow_receivers
+(default on); FOREST_GPU_OCC and FOREST_SHADOW_RECV still override.
+The receiver build cost 4 to 7 ms of CPU per frame with no forest
+in the scene, so projects without one turn it off.
+---
+ .../forward_clustered/render_forward_clustered.cpp       | 9 +++++++--
+ servers/rendering/rendering_server.cpp                   | 4 ++++
+ 2 files changed, 11 insertions(+), 2 deletions(-)
+
+diff --git a/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp b/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
+index 2baf65d258..4fbfb59a39 100644
+--- a/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
++++ b/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
+@@ -5392,8 +5392,13 @@ RenderForwardClustered::RenderForwardClustered() {
+ 	forest_batch_f2b = OS::get_singleton()->get_environment("FOREST_BATCH_F2B") != "0";
+ 	forest_diag_geo_only = OS::get_singleton()->get_environment("FOREST_DIAG_GEO_ONLY") == "1";
+ 	forest_cluster_mask = OS::get_singleton()->get_environment("FOREST_CLUSTER_MASK") != "0";
+-	ForestOcc::enabled = OS::get_singleton()->get_environment("FOREST_GPU_OCC") != "0";
+-	ForestOcc::shadow_cull = OS::get_singleton()->get_environment("FOREST_SHADOW_RECV") != "0";
++	// project settings, the environment overriding either way
++	auto forest_switch = [](const char *p_env, const char *p_setting) {
++		const String e = OS::get_singleton()->get_environment(p_env);
++		return e.is_empty() ? bool(GLOBAL_GET(p_setting)) : e != "0";
++	};
++	ForestOcc::enabled = forest_switch("FOREST_GPU_OCC", "rendering/forest/gpu_occlusion");
++	ForestOcc::shadow_cull = forest_switch("FOREST_SHADOW_RECV", "rendering/forest/shadow_receivers");
+ 	{
+ 		// triangle counts of the surfaces to cluster-cull, e.g. 370140
+ 		Vector<String> parts = OS::get_singleton()->get_environment("FOREST_CLUSTER_TRIS").split(",", false);
+diff --git a/servers/rendering/rendering_server.cpp b/servers/rendering/rendering_server.cpp
+index d2b235f8e3..8a5b2675df 100644
+--- a/servers/rendering/rendering_server.cpp
++++ b/servers/rendering/rendering_server.cpp
+@@ -3775,6 +3775,10 @@ void RenderingServer::init() {
+ 
+ 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "rendering/occlusion_culling/occlusion_rays_per_thread", PROPERTY_HINT_RANGE, "1,2048,1,or_greater"), 512);
+ 
++	// forest-perf: GPU depth occlusion and shadow receiver culling
++	GLOBAL_DEF_RST("rendering/forest/gpu_occlusion", true);
++	GLOBAL_DEF_RST("rendering/forest/shadow_receivers", true);
++
+ 	GLOBAL_DEF(PropertyInfo(Variant::INT, "rendering/environment/glow/upscale_mode", PROPERTY_HINT_ENUM, "Linear (Fast),Bicubic (Slow)"), 1);
+ 	GLOBAL_DEF("rendering/environment/glow/upscale_mode.mobile", 0);
+ 
+-- 
+2.56.0
+

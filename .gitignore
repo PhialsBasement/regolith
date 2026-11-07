@@ -1,2 +1,4 @@
 build/
 build-double/
+build-win-double/
+engine/godot/

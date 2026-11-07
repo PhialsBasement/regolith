@@ -112,6 +112,8 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		gdext/regolith_vessel.cpp
 		gdext/regolith_weather.cpp
 		gdext/regolith_clouds.cpp
+		gdext/regolith_editor.cpp
+		gdext/regolith_engine.cpp
 	)
 	target_link_libraries(regolith PRIVATE godot::cpp regolith_core)
 	target_compile_options(regolith PRIVATE ${REGOLITH_FP_FLAGS})
@@ -131,5 +133,17 @@ if(REGOLITH_BUILD_GDEXTENSION)
 			regolith_cloud_noise.glsl regolith_cloud_light.glsl regolith_cloud_march.glsl regolith_cloud_composite.glsl
 			regolith_cloud_mip.glsl regolith_cloud_resolve.glsl)
 		configure_file(addon/${f} "${REGOLITH_ADDON_DIR}/${f}" COPYONLY)
+	endforeach()
+	# Stock Godot variants of the terrain shaders, without the
+	# patched engine's features: slower, but they compile.
+	foreach(f regolith_clipmap regolith_terrain)
+		set(src "${CMAKE_CURRENT_SOURCE_DIR}/addon/${f}.gdshader")
+		set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${src}")
+		file(READ "${src}" code)
+		string(REGEX REPLACE ",[ ]*motion_vectors_rigid" "" code "${code}")
+		string(REGEX REPLACE "profile_clock\\([0-9]+\\)" "0u" code "${code}")
+		string(REGEX REPLACE "profile_add\\([0-9]+, [a-z_]+\\);" ";" code "${code}")
+		string(REPLACE "IN_DEPTH_PREPASS" "false" code "${code}")
+		file(WRITE "${REGOLITH_ADDON_DIR}/${f}_stock.gdshader" "${code}")
 	endforeach()
 endif()

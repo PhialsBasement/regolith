@@ -5,6 +5,13 @@ body is a cube-sphere displaced by its real elevation data, from orbit down
 to the ground. See `TERRAIN_PLAN.md` in the morsified project for the
 design.
 
+## The engine
+
+Regolith is made for Godot 4.7.2 with a few renderer patches and
+double precision. `engine/build_godot.sh` (or `build_godot.ps1` on
+Windows) builds that Godot, editor and export templates. On a stock
+Godot it still runs, slowly, and warns you. See `engine/README.md`.
+
 ## Layout
 
 - `core/`: maths, projection, tile keys, frames. No Godot dependency;

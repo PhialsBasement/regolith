@@ -1,0 +1,1070 @@
+From 95a22117deff30215137613f1bdd63c10056d2fc Mon Sep 17 00:00:00 2001
+From: PhialsBasement <155454343+PhialsBasement@users.noreply.github.com>
+Date: Sat, 31 Oct 2026 03:01:14 +1100
+Subject: [PATCH 3/3] GPU profiling and terrain support: draw times, section
+ cycles, rigid motion vectors
+
+- Per-draw GPU timestamps naming the owner node, pass, surface and
+  instance (GODOT_DRAW_TIMES), with a 1x1-scissor geometry replay
+  (GODOT_DRAW_GEO); debug/settings/profiler/split_instances turns
+  instancing off.
+- Section profiler (GODOT_SECTION_PROFILE=frames): profile_clock()
+  and profile_add() in shaders and engine stage markers read the
+  subgroup clock (VK_KHR_shader_clock) into per-draw counters,
+  printed as SECT| lines; GODOT_SECTION_ONLY=n compiles one section
+  in. Compiled out when unset.
+- IN_DEPTH_PREPASS shader built-in.
+- motion_vectors_rigid render mode: last frame's position from this
+  frame's model-space vertex, vertex() runs once under TAA.
+- re-spirv accepts OpReadClockKHR.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ core/config/project_settings.cpp              |   1 +
+ drivers/gles3/storage/material_storage.cpp    |   1 +
+ .../vulkan/rendering_device_driver_vulkan.cpp |  10 ++
+ .../rendering/renderer_geometry_instance.h    |   5 +
+ .../render_forward_clustered.cpp              | 126 ++++++++++++++++--
+ .../render_forward_clustered.h                |  21 +++
+ .../scene_shader_forward_clustered.cpp        |  17 ++-
+ .../scene_shader_forward_mobile.cpp           |   1 +
+ .../scene_forward_clustered.glsl              | 118 ++++++++++++++++
+ .../scene_forward_clustered_inc.glsl          |  88 ++++++++++++
+ servers/rendering/renderer_scene_cull.cpp     |   9 ++
+ servers/rendering/rendering_device.cpp        |  29 ++++
+ servers/rendering/rendering_device.h          |   6 +
+ servers/rendering/rendering_device_graph.cpp  |  17 +++
+ servers/rendering/rendering_device_graph.h    |  10 +-
+ servers/rendering/shader_compiler.cpp         |   9 ++
+ servers/rendering/shader_language.cpp         |   4 +
+ servers/rendering/shader_types.cpp            |   5 +
+ thirdparty/re-spirv/re-spirv.cpp              |   2 +
+ 19 files changed, 464 insertions(+), 15 deletions(-)
+
+diff --git a/core/config/project_settings.cpp b/core/config/project_settings.cpp
+index 0e078c32c9..481659350f 100644
+--- a/core/config/project_settings.cpp
++++ b/core/config/project_settings.cpp
+@@ -1791,6 +1791,7 @@ ProjectSettings::ProjectSettings() {
+ 
+ 	GLOBAL_DEF(PropertyInfo(Variant::INT, "debug/settings/profiler/max_functions", PROPERTY_HINT_RANGE, "128,65535,1"), 16384);
+ 	GLOBAL_DEF_RST(PropertyInfo(Variant::INT, "debug/settings/profiler/max_timestamp_query_elements", PROPERTY_HINT_RANGE, "256,65535,1"), 256);
++	GLOBAL_DEF(PropertyInfo(Variant::BOOL, "debug/settings/profiler/split_instances"), false);
+ 
+ 	GLOBAL_DEF(PropertyInfo(Variant::BOOL, "compression/formats/zstd/long_distance_matching"), Compression::zstd_long_distance_matching);
+ 	GLOBAL_DEF(PropertyInfo(Variant::INT, "compression/formats/zstd/compression_level", PROPERTY_HINT_RANGE, "1,22,1"), Compression::zstd_level);
+diff --git a/drivers/gles3/storage/material_storage.cpp b/drivers/gles3/storage/material_storage.cpp
+index de059cc379..71127dae50 100644
+--- a/drivers/gles3/storage/material_storage.cpp
++++ b/drivers/gles3/storage/material_storage.cpp
+@@ -1295,6 +1295,7 @@ MaterialStorage::MaterialStorage() {
+ 		actions.renames["OUTPUT_IS_SRGB"] = "SHADER_IS_SRGB";
+ 		actions.renames["CLIP_SPACE_FAR"] = "SHADER_SPACE_FAR";
+ 		actions.renames["IN_SHADOW_PASS"] = "IN_SHADOW_PASS";
++		actions.renames["IN_DEPTH_PREPASS"] = "IN_SHADOW_PASS";   // depth-only here is shadows
+ 		actions.renames["VIEWPORT_SIZE"] = "scene_data_block.data.viewport_size";
+ 
+ 		actions.renames["FRAGCOORD"] = "gl_FragCoord";
+diff --git a/drivers/vulkan/rendering_device_driver_vulkan.cpp b/drivers/vulkan/rendering_device_driver_vulkan.cpp
+index 4b1bd9fd0e..4976fe2e7a 100644
+--- a/drivers/vulkan/rendering_device_driver_vulkan.cpp
++++ b/drivers/vulkan/rendering_device_driver_vulkan.cpp
+@@ -616,6 +616,7 @@ Error RenderingDeviceDriverVulkan::_initialize_device_extensions() {
+ 	}
+ 
+ 	_register_requested_device_extension(VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME, false);
++	_register_requested_device_extension(VK_KHR_SHADER_CLOCK_EXTENSION_NAME, false);
+ 
+ 	uint32_t device_extension_count = 0;
+ 	VkResult err = vkEnumerateDeviceExtensionProperties(physical_device, nullptr, &device_extension_count, nullptr);
+@@ -1483,6 +1484,15 @@ Error RenderingDeviceDriverVulkan::_initialize_device(const LocalVector<VkDevice
+ 		}
+ 	}
+ 
++	// GPU cycle counters for the scene shader section profiler
++	VkPhysicalDeviceShaderClockFeaturesKHR shader_clock_features = {};
++	if (enabled_device_extension_names.has(VK_KHR_SHADER_CLOCK_EXTENSION_NAME)) {
++		shader_clock_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR;
++		shader_clock_features.pNext = create_info_next;
++		shader_clock_features.shaderSubgroupClock = VK_TRUE;
++		create_info_next = &shader_clock_features;
++	}
++
+ 	VkDeviceCreateInfo create_info = {};
+ 	create_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+ 	create_info.pNext = create_info_next;
+diff --git a/servers/rendering/renderer_geometry_instance.h b/servers/rendering/renderer_geometry_instance.h
+index 7c7991e19f..92d83ff864 100644
+--- a/servers/rendering/renderer_geometry_instance.h
++++ b/servers/rendering/renderer_geometry_instance.h
+@@ -74,6 +74,11 @@ public:
+ 	virtual void pair_voxel_gi_instances(const RID *p_voxel_gi_instances, uint32_t p_voxel_gi_instance_count) = 0;
+ 
+ 	virtual void set_softshadow_projector_pairing(bool p_softshadow, bool p_projector) = 0;
++
++	// the Object that owns this instance and its render instance
++	// RID (per-draw profiling labels)
++	uint64_t owner_id = 0;
++	uint64_t instance_rid = 0;
+ };
+ 
+ // Base implementation of RenderGeometryInstance shared by internal renderers.
+diff --git a/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp b/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
+index 4fbfb59a39..401a8865e8 100644
+--- a/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
++++ b/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.cpp
+@@ -341,6 +341,11 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
+ 
+ 	bool should_request_redraw = false;
+ 
++	// per-draw GPU timing: GODOT_DRAW_TIMES set, timestamps on
++	static const bool draw_times_env = !OS::get_singleton()->get_environment("GODOT_DRAW_TIMES").is_empty();
++	static const bool draw_geo_env = !OS::get_singleton()->get_environment("GODOT_DRAW_GEO").is_empty();
++	const bool draw_times = draw_times_env && RSG::utilities->capturing_timestamps;
++
+ 	for (uint32_t i = p_from_element; i < p_to_element; i++) {
+ 		const GeometryInstanceSurfaceDataCache *surf = p_params->elements[i];
+ 		const RenderElementInfo &element_info = p_params->element_info[i];
+@@ -620,23 +625,44 @@ void RenderForwardClustered::_render_list_template(RenderingDevice::DrawListID p
+ 
+ 			bool indirect = bool(surf->owner->base_flags & INSTANCE_DATA_FLAG_MULTIMESH_INDIRECT);
+ 
+-			if (forest_slot >= 0) {
+-				// one indirect command per instance, consecutive slots
+-				RD::get_singleton()->draw_list_draw_indirect(draw_list, true, forest_cl_indirect, forest_slot * 20, element_info.repeat, 20);
+-			} else if (emulate_point_size) {
+-				if (indirect) {
+-					WARN_PRINT("Indirect draws are not supported when emulating point size.");
++			// GODOT_DRAW_TIMES + --gpu-profile: a GPU timestamp before
++			// each draw named ">D|pass|owner ObjectID|surface|merged"
++			if (draw_times) {
++				RD::get_singleton()->draw_list_capture_timestamp(draw_list, vformat(">D|%d|%d|%d|%d|%d", int(p_pass_mode), int64_t(surf->owner->owner_id), int(surf->surface_index), int(element_info.repeat), int64_t(surf->owner->instance_rid)));
++			}
++
++			auto issue_draw = [&]() {
++				if (forest_slot >= 0) {
++					// one indirect command per instance, consecutive slots
++					RD::get_singleton()->draw_list_draw_indirect(draw_list, true, forest_cl_indirect, forest_slot * 20, element_info.repeat, 20);
++				} else if (emulate_point_size) {
++					if (indirect) {
++						WARN_PRINT("Indirect draws are not supported when emulating point size.");
++					}
++					RD::get_singleton()->draw_list_draw(draw_list, false, mesh_storage->mesh_surface_get_vertex_count(mesh_surface), instance_count * 6);
++				} else if (indirect) {
++					RD::get_singleton()->draw_list_draw_indirect(draw_list, index_array_rd.is_valid(), mesh_storage->_multimesh_get_command_buffer_rd_rid(surf->owner->data->base), surf->surface_index * sizeof(uint32_t) * mesh_storage->INDIRECT_MULTIMESH_COMMAND_STRIDE, 1, 0);
++				} else {
++					RD::get_singleton()->draw_list_draw(draw_list, index_array_rd.is_valid(), instance_count);
+ 				}
+-				RD::get_singleton()->draw_list_draw(draw_list, false, mesh_storage->mesh_surface_get_vertex_count(mesh_surface), instance_count * 6);
+-			} else if (indirect) {
+-				RD::get_singleton()->draw_list_draw_indirect(draw_list, index_array_rd.is_valid(), mesh_storage->_multimesh_get_command_buffer_rd_rid(surf->owner->data->base), surf->surface_index * sizeof(uint32_t) * mesh_storage->INDIRECT_MULTIMESH_COMMAND_STRIDE, 1, 0);
+-			} else {
+-				RD::get_singleton()->draw_list_draw(draw_list, index_array_rd.is_valid(), instance_count);
++			};
++			issue_draw();
++			// GODOT_DRAW_GEO: the same draw again under a 1x1 scissor
++			// (">G|..."): its vertex and setup cost alone
++			if (draw_times && draw_geo_env) {
++				RD::get_singleton()->draw_list_capture_timestamp(draw_list, vformat(">G|%d|%d|%d|%d|%d", int(p_pass_mode), int64_t(surf->owner->owner_id), int(surf->surface_index), int(element_info.repeat), int64_t(surf->owner->instance_rid)));
++				RD::get_singleton()->draw_list_begin_geometry_only(draw_list);
++				issue_draw();
++				RD::get_singleton()->draw_list_end_geometry_only(draw_list);
+ 			}
+ 		}
+ 
+ 		i += element_info.repeat - 1; //skip equal elements
+ 	}
++	if (draw_times && p_from_element < p_to_element) {
++		// closes the last draw's interval
++		RD::get_singleton()->draw_list_capture_timestamp(draw_list, vformat(">E|%d", int(p_pass_mode)));
++	}
+ 
+ 	// Make the actual redraw request
+ 	if (should_request_redraw) {
+@@ -1042,6 +1068,8 @@ void RenderForwardClustered::SceneState::grow_instance_buffer(RenderListType p_r
+ void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, int *p_render_info, uint32_t p_offset, int32_t p_max_elements, bool p_update_buffer) {
+ 	RenderList *rl = &render_list[p_render_list];
+ 	uint32_t element_total = p_max_elements >= 0 ? uint32_t(p_max_elements) : rl->elements.size();
++	// profiling: no instancing merges, one draw per instance
++	const bool split_instances = GLOBAL_GET_CACHED(bool, "debug/settings/profiler/split_instances");
+ 
+ 	rl->element_info.resize(p_offset + element_total);
+ 
+@@ -1107,10 +1135,17 @@ void RenderForwardClustered::_fill_instance_data(RenderListType p_render_list, i
+ 
+ 		instance_data.set_compressed_aabb(surface_aabb);
+ 		instance_data.set_uv_scale(uv_scale);
++		// section profiler: this element's slot + 1 in the padding
++		instance_data.compressed_aabb_position[3] = 0.0f;
++		if (section_profile_frames > 0 && section_slots.size() < SECTION_MAX_SLOTS) {
++			section_slots.push_back({ inst->owner_id, inst->instance_rid, uint32_t(surface->surface_index) });
++			instance_data.compressed_aabb_position[3] = float(section_slots.size());
++		}
+ 
+ 		scene_state.curr_gpu_ptr[p_render_list][i + p_offset] = instance_data;
+ 
+-		const bool cant_repeat = instance_data.flags & INSTANCE_DATA_FLAG_MULTIMESH || inst->mesh_instance.is_valid();
++		// profiling (split_instances): every instance its own draw
++		const bool cant_repeat = instance_data.flags & INSTANCE_DATA_FLAG_MULTIMESH || inst->mesh_instance.is_valid() || split_instances;
+ 
+ 		if (prev_surface != nullptr && !cant_repeat && prev_surface->sort.sort_key1 == surface->sort.sort_key1 && prev_surface->sort.sort_key2 == surface->sort.sort_key2 && inst->mirror == prev_surface->owner->mirror && repeats < RenderElementInfo::MAX_REPEATS) {
+ 			//this element is the same as the previous one, count repeats to draw it using instancing
+@@ -1941,8 +1976,54 @@ void RenderForwardClustered::_process_sss(Ref<RenderSceneBuffersRD> p_render_buf
+ 	}
+ }
+ 
++// Once per engine frame: read the last frame's section cycles
++// (stalls the GPU), sum them per owner, clear; print SECT| lines
++// every section_profile_frames frames.
++void RenderForwardClustered::_section_profile_frame() {
++	const uint64_t frame = RSG::rasterizer->get_frame_number();
++	if (frame == section_profile_frame) {
++		return;
++	}
++	section_profile_frame = frame;
++	RD *rd = RD::get_singleton();
++	const uint32_t used = section_slots.size() * SECTION_KEYS_PER_SLOT * 2 * 4;
++	if (used > 0) {
++		const Vector<uint8_t> bytes = rd->buffer_get_data(section_profile_buffer, 0, used);
++		const uint32_t *d = reinterpret_cast<const uint32_t *>(bytes.ptr());
++		for (uint32_t s = 0; s < section_slots.size(); s++) {
++			for (uint32_t k = 0; k < SECTION_KEYS_PER_SLOT; k++) {
++				const uint32_t at = (s * SECTION_KEYS_PER_SLOT + k) * 2;
++				if (d[at + 1] == 0) {
++					continue;
++				}
++				// k = (class * 2 + stage) * 16 + section
++				const SectionSlot &slot = section_slots[s];
++				const String key = vformat("%d|%d|%d|%d|%d|%d", int64_t(slot.owner_id), int64_t(slot.instance_rid), int(slot.surface), int(k / 32), int((k / 16) % 2), int(k % 16));
++				SectionSum &sum = section_sums[key];
++				sum.cycles += d[at];
++				sum.waves += d[at + 1];
++			}
++		}
++		rd->buffer_clear(section_profile_buffer, 0, used);
++	}
++	section_slots.clear();
++	if (++section_profile_count >= section_profile_frames) {
++		// owner|rid|surface|class|stage|section, then per frame
++		// cycles and waves; class 0 color 1 depth+normal 2 depth
++		print_line(vformat("SECT|BEGIN|%d", int64_t(frame)));
++		for (const KeyValue<String, SectionSum> &E : section_sums) {
++			print_line(vformat("SECT|%d|%s|%.0f|%.1f", section_profile_count, E.key, double(E.value.cycles) / section_profile_count, double(E.value.waves) / section_profile_count));
++		}
++		section_sums.clear();
++		section_profile_count = 0;
++	}
++}
++
+ void RenderForwardClustered::_render_scene(RenderDataRD *p_render_data, const Color &p_default_bg_color) {
+ 	scene_state.used_uniform_buffer_count = 0;
++	if (section_profile_frames > 0) {
++		_section_profile_frame();
++	}
+ 
+ 	RendererRD::LightStorage *light_storage = RendererRD::LightStorage::get_singleton();
+ 
+@@ -3658,8 +3739,15 @@ void RenderForwardClustered::_update_render_base_uniform_set() {
+ 			u.append_id(area_light_atlas);
+ 			uniforms.push_back(u);
+ 		}
++		{
++			RD::Uniform u;
++			u.binding = 21;
++			u.uniform_type = RD::UNIFORM_TYPE_STORAGE_BUFFER;
++			u.append_id(section_profile_buffer);
++			uniforms.push_back(u);
++		}
+ 
+-		render_base_uniform_set = RD::get_singleton()->uniform_set_create(uniforms, scene_shader.default_shader_rd, SCENE_UNIFORM_SET);
++		render_base_uniform_set =RD::get_singleton()->uniform_set_create(uniforms, scene_shader.default_shader_rd, SCENE_UNIFORM_SET);
+ 	}
+ }
+ 
+@@ -5392,6 +5480,15 @@ RenderForwardClustered::RenderForwardClustered() {
+ 	forest_batch_f2b = OS::get_singleton()->get_environment("FOREST_BATCH_F2B") != "0";
+ 	forest_diag_geo_only = OS::get_singleton()->get_environment("FOREST_DIAG_GEO_ONLY") == "1";
+ 	forest_cluster_mask = OS::get_singleton()->get_environment("FOREST_CLUSTER_MASK") != "0";
++	section_profile_frames = OS::get_singleton()->get_environment("GODOT_SECTION_PROFILE").to_int();
++	{
++		// [slot][class][stage][section] x [cycles, waves], uint
++		const uint32_t size = section_profile_frames > 0 ? SECTION_MAX_SLOTS * SECTION_KEYS_PER_SLOT * 2 * 4 : 16;
++		Vector<uint8_t> zero;
++		zero.resize(size);
++		zero.fill(0);
++		section_profile_buffer = RD::get_singleton()->storage_buffer_create(size, zero);
++	}
+ 	// project settings, the environment overriding either way
+ 	auto forest_switch = [](const char *p_env, const char *p_setting) {
+ 		const String e = OS::get_singleton()->get_environment(p_env);
+@@ -5551,6 +5648,9 @@ RenderForwardClustered::RenderForwardClustered() {
+ }
+ 
+ RenderForwardClustered::~RenderForwardClustered() {
++	if (section_profile_buffer.is_valid()) {
++		RD::get_singleton()->free_rid(section_profile_buffer);
++	}
+ 	if (forest_occ_buffer.is_valid()) {
+ 		RD::get_singleton()->free_rid(forest_occ_buffer);
+ 	}
+diff --git a/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h b/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h
+index 08c6ed906a..376b55cfcc 100644
+--- a/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h
++++ b/servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h
+@@ -172,6 +172,27 @@ private:
+ 
+ 	RID render_base_uniform_set;
+ 
++	// Section profiler (GODOT_SECTION_PROFILE=frames): shaders'
++	// profile_add() cycles per draw slot, printed as SECT| lines
++	struct SectionSlot {
++		uint64_t owner_id;
++		uint64_t instance_rid;
++		uint32_t surface;
++	};
++	struct SectionSum {
++		uint64_t cycles = 0;
++		uint64_t waves = 0;
++	};
++	static constexpr uint32_t SECTION_MAX_SLOTS = 16384;
++	static constexpr uint32_t SECTION_KEYS_PER_SLOT = 4 * 2 * 16;
++	RID section_profile_buffer;
++	int section_profile_frames = 0; // 0: off
++	int section_profile_count = 0;
++	uint64_t section_profile_frame = UINT64_MAX;
++	LocalVector<SectionSlot> section_slots;
++	HashMap<String, SectionSum> section_sums;
++	void _section_profile_frame();
++
+ 	uint64_t lightmap_texture_array_version = 0xFFFFFFFF;
+ 
+ 	void _update_render_base_uniform_set();
+diff --git a/servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.cpp b/servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.cpp
+index 44a97f3594..79436cdcf5 100644
+--- a/servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.cpp
++++ b/servers/rendering/renderer_rd/forward_clustered/scene_shader_forward_clustered.cpp
+@@ -32,6 +32,7 @@
+ 
+ #include "core/config/project_settings.h"
+ #include "core/math/math_defs.h"
++#include "core/os/os.h"
+ #include "servers/rendering/renderer_rd/forward_clustered/render_forward_clustered.h"
+ #include "servers/rendering/renderer_rd/renderer_compositor_rd.h"
+ #include "servers/rendering/renderer_rd/storage_rd/material_storage.h"
+@@ -689,7 +690,17 @@ void SceneShaderForwardClustered::init(const String p_defines) {
+ 
+ 		Vector<uint64_t> dynamic_buffers;
+ 		dynamic_buffers.push_back(ShaderRD::DynamicBuffer::encode(RenderForwardClustered::RENDER_PASS_UNIFORM_SET, 2));
+-		shader.initialize(shader_versions, p_defines, Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
++		// section profiler on: every material reports section 15
++		String defines = p_defines;
++		if (OS::get_singleton()->get_environment("GODOT_SECTION_PROFILE").to_int() > 0) {
++			defines += "\n#define USE_SECTION_PROFILE\n";
++			// one section's clocks only (plus 15, the whole shader)
++			const String only = OS::get_singleton()->get_environment("GODOT_SECTION_ONLY");
++			if (!only.is_empty()) {
++				defines += vformat("#define PROFILE_ONLY %d\n", only.to_int());
++			}
++		}
++		shader.initialize(shader_versions, defines, Vector<RD::PipelineImmutableSampler>(), dynamic_buffers);
+ 
+ 		if (RendererCompositorRD::get_singleton()->is_xr_enabled()) {
+ 			shader.enable_group(SHADER_GROUP_MULTIVIEW);
+@@ -741,6 +752,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
+ 		actions.renames["OUTPUT_IS_SRGB"] = "SHADER_IS_SRGB";
+ 		actions.renames["CLIP_SPACE_FAR"] = "SHADER_SPACE_FAR";
+ 		actions.renames["IN_SHADOW_PASS"] = "bool(scene_data_block.data.flags & SCENE_DATA_FLAGS_IN_SHADOW_PASS)";
++		actions.renames["IN_DEPTH_PREPASS"] = "SHADER_IN_DEPTH_PREPASS";
+ 		actions.renames["VIEWPORT_SIZE"] = "read_viewport_size";
+ 
+ 		actions.renames["FRAGCOORD"] = "gl_FragCoord";
+@@ -810,6 +822,8 @@ void SceneShaderForwardClustered::init(const String p_defines) {
+ 
+ 		actions.usage_defines["NORMAL"] = "#define NORMAL_USED\n";
+ 		actions.usage_defines["TANGENT"] = "#define TANGENT_USED\n";
++		actions.usage_defines["DISCARD"] = "#define DISCARD_USED\n";
++		actions.usage_defines["DEPTH"] = "#define DEPTH_WRITE_USED\n";
+ 		actions.usage_defines["BINORMAL"] = "@TANGENT";
+ 		actions.usage_defines["RIM"] = "#define LIGHT_RIM_USED\n";
+ 		actions.usage_defines["RIM_TINT"] = "@RIM";
+@@ -861,6 +875,7 @@ void SceneShaderForwardClustered::init(const String p_defines) {
+ 
+ 		actions.render_mode_defines["skip_vertex_transform"] = "#define SKIP_TRANSFORM_USED\n";
+ 		actions.render_mode_defines["world_vertex_coords"] = "#define VERTEX_WORLD_COORDS_USED\n";
++		actions.render_mode_defines["motion_vectors_rigid"] = "#define MOTION_VECTORS_RIGID\n";
+ 		actions.render_mode_defines["ensure_correct_normals"] = "#define ENSURE_CORRECT_NORMALS\n";
+ 		actions.render_mode_defines["cull_front"] = "#define DO_SIDE_CHECK\n";
+ 		actions.render_mode_defines["cull_disabled"] = "#define DO_SIDE_CHECK\n";
+diff --git a/servers/rendering/renderer_rd/forward_mobile/scene_shader_forward_mobile.cpp b/servers/rendering/renderer_rd/forward_mobile/scene_shader_forward_mobile.cpp
+index 0d598bf149..1cdf5b18d7 100644
+--- a/servers/rendering/renderer_rd/forward_mobile/scene_shader_forward_mobile.cpp
++++ b/servers/rendering/renderer_rd/forward_mobile/scene_shader_forward_mobile.cpp
+@@ -681,6 +681,7 @@ void SceneShaderForwardMobile::init(const String p_defines) {
+ 		actions.renames["OUTPUT_IS_SRGB"] = "SHADER_IS_SRGB";
+ 		actions.renames["CLIP_SPACE_FAR"] = "SHADER_SPACE_FAR";
+ 		actions.renames["IN_SHADOW_PASS"] = "IN_SHADOW_PASS";
++		actions.renames["IN_DEPTH_PREPASS"] = "IN_SHADOW_PASS";   // mobile has no prepass
+ 		actions.renames["VIEWPORT_SIZE"] = "read_viewport_size";
+ 
+ 		actions.renames["FRAGCOORD"] = "gl_FragCoord";
+diff --git a/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl b/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl
+index aa6ecaeed6..47969a0371 100644
+--- a/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl
++++ b/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered.glsl
+@@ -7,8 +7,16 @@
+ /* Include half precision types. */
+ #include "../half_inc.glsl"
+ 
++#define PROFILE_STAGE 0u
+ #include "scene_forward_clustered_inc.glsl"
+ 
++// IN_DEPTH_PREPASS: depth, normal-roughness and shadow passes
++#if defined(MODE_RENDER_DEPTH) && !defined(MODE_RENDER_MATERIAL) && !defined(MODE_RENDER_SDF)
++#define SHADER_IN_DEPTH_PREPASS true
++#else
++#define SHADER_IN_DEPTH_PREPASS false
++#endif
++
+ #define SHADER_IS_SRGB false
+ #define SHADER_SPACE_FAR 0.0
+ 
+@@ -220,6 +228,26 @@ uint multimesh_stride() {
+ 	return stride;
+ }
+ 
++#ifdef MOTION_VECTORS_RIGID
++// motion_vectors_rigid: the model-space vertex vertex() made, and
++// its clip position under last frame's model, view, projection
++vec3 rigid_model_vertex = vec3(0.0);
++
++vec4 rigid_prev_position(vec3 p_vertex, SceneData p_sd, mat3x4 p_model, vec3 p_model_precision) {
++	mat4 model = transpose(mat4(p_model[0], p_model[1], p_model[2], vec4(0.0, 0.0, 0.0, 1.0)));
++	mat4 view = transpose(mat4(p_sd.view_matrix[0], p_sd.view_matrix[1], p_sd.view_matrix[2], vec4(0.0, 0.0, 0.0, 1.0)));
++	mat4 modelview = view * model;
++#ifdef USE_DOUBLE_PRECISION
++	// as vertex_shader: origins added in emulated double
++	mat4 inv_view = transpose(mat4(p_sd.inv_view_matrix[0], p_sd.inv_view_matrix[1], p_sd.inv_view_matrix[2], vec4(0.0, 0.0, 0.0, 1.0)));
++	vec3 unused;
++	modelview[3].xyz = double_add_vec3(model[3].xyz, p_model_precision, inv_view[3].xyz, p_sd.inv_view_precision.xyz, unused);
++	modelview[3].xyz = mat3(view) * modelview[3].xyz;
++#endif
++	return p_sd.projection_matrix * vec4((modelview * vec4(p_vertex, 1.0)).xyz, 1.0);
++}
++#endif
++
+ void vertex_shader(vec3 vertex_input,
+ #ifdef NORMAL_USED
+ 		in vec3 normal_input,
+@@ -233,6 +261,9 @@ void vertex_shader(vec3 vertex_input,
+ 		in vec3 model_precision,
+ #endif
+ 		out vec4 screen_pos) {
++#ifdef USE_SECTION_PROFILE
++	profile_slot_g = uint(instances.data[instance_index].compressed_aabb_position_pad.w);
++#endif
+ 	vec4 instance_custom = vec4(0.0);
+ #if defined(COLOR_USED)
+ 	color_interp = color_attrib;
+@@ -446,9 +477,18 @@ void vertex_shader(vec3 vertex_input,
+ 	float point_size = 1.0;
+ #endif
+ 
++#ifdef USE_SECTION_PROFILE
++	uint profile_tv = profile_clock(8);
++#endif
+ 	{
+ #CODE : VERTEX
+ 	}
++#ifdef USE_SECTION_PROFILE
++	profile_add(8, profile_tv);
++#endif
++#if defined(MOTION_VECTORS_RIGID) && !defined(SKIP_TRANSFORM_USED) && !defined(VERTEX_WORLD_COORDS_USED)
++	rigid_model_vertex = vertex;
++#endif
+ 
+ 	float roughness = roughness_highp;
+ #ifdef NORMAL_USED
+@@ -801,6 +841,12 @@ void main() {
+ 			prev_vertex);
+ 
+ 	global_time = scene_data_block.prev_data.time;
++#ifndef MOTION_VECTORS_RIGID
++#ifdef USE_SECTION_PROFILE
++	// section 14: this whole previous-frame call, its insides muted
++	uint profile_tp = profile_clock(14);
++	profile_mute = true;
++#endif
+ 	vertex_shader(prev_vertex,
+ #ifdef NORMAL_USED
+ 			prev_normal,
+@@ -814,6 +860,11 @@ void main() {
+ 			instances.data[instance_index].prev_model_precision.xyz,
+ #endif
+ 			prev_screen_position);
++#ifdef USE_SECTION_PROFILE
++	profile_mute = false;
++	profile_add(14, profile_tp);
++#endif
++#endif // !MOTION_VECTORS_RIGID
+ #else
+ 	// Unused output.
+ 	vec4 screen_position;
+@@ -844,6 +895,10 @@ void main() {
+ 
+ 	// Current vertex.
+ 	global_time = scene_data_block.data.time;
++#ifdef USE_SECTION_PROFILE
++	// section 15: the whole vertex
++	uint profile_t0 = profile_clock(15);
++#endif
+ 	vertex_shader(vertex,
+ #ifdef NORMAL_USED
+ 			normal,
+@@ -858,6 +913,17 @@ void main() {
+ #endif
+ 
+ 			screen_position);
++#ifdef USE_SECTION_PROFILE
++	profile_add(15, profile_t0);
++#endif
++#if defined(MOTION_VECTORS) && defined(MOTION_VECTORS_RIGID)
++#ifdef USE_DOUBLE_PRECISION
++	vec3 prev_precision = instances.data[instance_index].prev_model_precision.xyz;
++#else
++	vec3 prev_precision = vec3(0.0);
++#endif
++	prev_screen_position = rigid_prev_position(rigid_model_vertex, scene_data_block.prev_data, instances.data[instance_index].prev_transform, prev_precision);
++#endif
+ }
+ 
+ #[fragment]
+@@ -866,6 +932,13 @@ void main() {
+ 
+ #VERSION_DEFINES
+ 
++// IN_DEPTH_PREPASS: depth, normal-roughness and shadow passes
++#if defined(MODE_RENDER_DEPTH) && !defined(MODE_RENDER_MATERIAL) && !defined(MODE_RENDER_SDF)
++#define SHADER_IN_DEPTH_PREPASS true
++#else
++#define SHADER_IN_DEPTH_PREPASS false
++#endif
++
+ #define SHADER_IS_SRGB false
+ #define SHADER_SPACE_FAR 0.0
+ 
+@@ -878,8 +951,15 @@ void main() {
+ /* Include half precision types. */
+ #include "../half_inc.glsl"
+ 
++#define PROFILE_STAGE 1u
+ #include "scene_forward_clustered_inc.glsl"
+ 
++// The profiler's counter writes would move depth tests after
++// the shader; keep them early where nothing else needs them late.
++#if defined(USE_SECTION_PROFILE) && !defined(DISCARD_USED) && !defined(DEPTH_WRITE_USED) && !defined(ALPHA_SCISSOR_USED) && !defined(ALPHA_HASH_USED) && !defined(UBERSHADER) && !defined(MODE_DUAL_PARABOLOID)
++layout(early_fragment_tests) in;
++#endif
++
+ /* Varyings */
+ 
+ layout(location = 0) in vec3 vertex_interp;
+@@ -1204,6 +1284,9 @@ vec3 encode24(vec3 v) {
+ 
+ void fragment_shader(in SceneData scene_data) {
+ 	uint instance_index = instance_index_interp;
++#ifdef USE_SECTION_PROFILE
++	profile_slot_g = uint(instances.data[instance_index].compressed_aabb_position_pad.w);
++#endif
+ 
+ #ifdef PREMUL_ALPHA_USED
+ 	float premul_alpha = 1.0;
+@@ -1347,9 +1430,15 @@ void fragment_shader(in SceneData scene_data) {
+ #endif
+ #endif
+ 
++#ifdef USE_SECTION_PROFILE
++	profile_mark_t = profile_clock(8);
++#endif
+ 	{
+ #CODE : FRAGMENT
+ 	}
++#ifdef USE_SECTION_PROFILE
++	profile_mark(8, 9);
++#endif
+ 
+ 	float roughness = roughness_highp;
+ 	float metallic = metallic_highp;
+@@ -1672,6 +1761,9 @@ void fragment_shader(in SceneData scene_data) {
+ 	}
+ #endif
+ 	//apply energy conservation
++#ifdef USE_SECTION_PROFILE
++	profile_mark(9, 10);
++#endif
+ 
+ 	vec3 direct_specular_light = vec3(0.0, 0.0, 0.0);
+ 	vec3 indirect_specular_light = vec3(0.0, 0.0, 0.0);
+@@ -2280,6 +2372,9 @@ void fragment_shader(in SceneData scene_data) {
+ 
+ #endif // !AMBIENT_LIGHT_DISABLED
+ #endif //GI !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
++#ifdef USE_SECTION_PROFILE
++	profile_mark(10, 11);
++#endif
+ 
+ // LIGHTING
+ #if !defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
+@@ -2693,6 +2788,9 @@ void fragment_shader(in SceneData scene_data) {
+ 		}
+ #endif // USE_VERTEX_LIGHTING
+ 	}
++#ifdef USE_SECTION_PROFILE
++	profile_mark(11, 12);
++#endif
+ 
+ #ifndef USE_VERTEX_LIGHTING
+ 	if (bool(implementation_data.cluster_type_mask & 1u)) { //omni lights
+@@ -2731,6 +2829,9 @@ void fragment_shader(in SceneData scene_data) {
+ 				if (omni_lights.data[light_index].bake_mode == LIGHT_BAKE_STATIC && bool(instances.data[instance_index].flags & INSTANCE_FLAGS_USE_LIGHTMAP)) {
+ 					continue; // Statically baked light and object uses lightmap, skip
+ 				}
++#ifdef USE_SECTION_PROFILE
++				profile_omni_n++;
++#endif
+ 
+ 				light_process_omni(light_index, vertex, view, normal, vertex_ddx, vertex_ddy, f0, roughness, metallic, scene_data.taa_frame_count, albedo, alpha, screen_uv, energy_compensation,
+ #ifdef LIGHT_BACKLIGHT_USED
+@@ -2756,6 +2857,10 @@ void fragment_shader(in SceneData scene_data) {
+ 		}
+ 	}
+ 
++#ifdef USE_SECTION_PROFILE
++	profile_mark(12, 13);
++	profile_count(7, profile_omni_n);
++#endif
+ 	if (bool(implementation_data.cluster_type_mask & 2u)) { //spot lights
+ 
+ 		uint cluster_spot_offset = cluster_offset + implementation_data.cluster_type_size;
+@@ -2877,6 +2982,9 @@ void fragment_shader(in SceneData scene_data) {
+ 			}
+ 		}
+ 	}
++#ifdef USE_SECTION_PROFILE
++	profile_mark(13, 14);
++#endif
+ #endif // !USE_VERTEX_LIGHTING
+ #endif //!defined(MODE_RENDER_DEPTH) && !defined(MODE_UNSHADED)
+ 
+@@ -3102,6 +3210,9 @@ void fragment_shader(in SceneData scene_data) {
+ #endif //MODE_SEPARATE_SPECULAR
+ 
+ #endif //MODE_RENDER_DEPTH
++#ifdef USE_SECTION_PROFILE
++	profile_add(14, profile_mark_t);
++#endif
+ #ifdef MOTION_VECTORS
+ 	vec2 position_clip = (screen_position.xy / screen_position.w) - scene_data.taa_jitter;
+ 	vec2 prev_position_clip = (prev_screen_position.xy / prev_screen_position.w) - scene_data_block.prev_data.taa_jitter;
+@@ -3129,5 +3240,12 @@ void main() {
+ 	}
+ #endif
+ 
++#ifdef USE_SECTION_PROFILE
++	// section 15: the whole fragment, lights included
++	uint profile_t0 = profile_clock(15);
++#endif
+ 	fragment_shader(scene_data_block.data);
++#ifdef USE_SECTION_PROFILE
++	profile_add(15, profile_t0);
++#endif
+ }
+diff --git a/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl b/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl
+index 1d7e182e6a..e2dc91cbdb 100644
+--- a/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl
++++ b/servers/rendering/renderer_rd/shaders/forward_clustered/scene_forward_clustered_inc.glsl
+@@ -309,6 +309,15 @@ layout(set = 0, binding = 18) uniform sampler2D ltc_lut1;
+ layout(set = 0, binding = 19) uniform sampler2D ltc_lut2;
+ 
+ layout(set = 0, binding = 20) uniform texture2D area_light_atlas;
++
++// Section profiler (GODOT_SECTION_PROFILE): per draw slot, pass
++// class, stage and section, [cycles, waves]. Always declared so
++// every scene shader keeps one set 0 layout.
++layout(set = 0, binding = 21, std430) restrict buffer SectionProfile {
++	uint data[];
++}
++section_profile;
++
+ /* Set 1: Render Pass (changes per render pass) */
+ 
+ layout(set = 1, binding = 0, std140) uniform SceneDataBlock {
+@@ -372,6 +381,85 @@ layout(set = 1, binding = 2, std430) buffer restrict readonly InstanceDataBuffer
+ }
+ instances;
+ 
++#ifdef USE_SECTION_PROFILE
++#extension GL_ARB_shader_clock : enable
++#extension GL_KHR_shader_subgroup_basic : enable
++
++// draw slot + 1 from the instance's aabb padding, 0: unprofiled
++uint profile_slot_g = 0u;
++bool profile_mute = false;
++
++#if defined(MODE_RENDER_DEPTH) && defined(MODE_RENDER_NORMAL_ROUGHNESS)
++#define PROFILE_CLASS 1u
++#elif defined(MODE_RENDER_MATERIAL) || defined(MODE_RENDER_SDF)
++#define PROFILE_CLASS 3u
++#elif defined(MODE_RENDER_DEPTH)
++#define PROFILE_CLASS 2u
++#else
++#define PROFILE_CLASS 0u
++#endif
++
++// GODOT_SECTION_ONLY picks one section (PROFILE_ONLY); every
++// other section's clock reads compile away, so they leave the
++// shader's scheduling untouched. Section 15 is always on.
++#ifndef PROFILE_ONLY
++#define PROFILE_ONLY -1
++#endif
++#define PROFILE_ON(s) ((s) == 15 || PROFILE_ONLY < 0 || (s) == PROFILE_ONLY)
++
++uint profile_clock_raw() {
++	return clock2x32ARB().x;
++}
++
++uint profile_clock(int section) {
++	return PROFILE_ON(section) ? clock2x32ARB().x : 0u;
++}
++
++// Cycles since start, added once per wave (subgroup) at
++// [slot][class][stage][section] as cycles and wave count.
++void profile_add(int section, uint start) {
++	if (!PROFILE_ON(section)) {
++		return;
++	}
++	uint dt = clock2x32ARB().x - start;
++	// slot 0: unprofiled; slots stop at 16384 (the buffer's size)
++	if (!profile_mute && profile_slot_g != 0u && profile_slot_g <= 16384u && subgroupElect()) {
++		uint key = (((profile_slot_g - 1u) * 4u + PROFILE_CLASS) * 2u + PROFILE_STAGE) * 16u + uint(section & 15);
++		atomicAdd(section_profile.data[key * 2u], dt);
++		atomicAdd(section_profile.data[key * 2u + 1u], 1u);
++	}
++}
++
++// The engine's own stages: each mark closes the stage since
++// the last one. 8 material code, 9 fog, decals and setup, 10
++// ambient GI reflections, 11 sun, 12 omni, 13 spot and area,
++// 14 output; 7 counts omni lights shaded per pixel.
++uint profile_mark_t = 0u;
++uint profile_omni_n = 0u;
++
++// closes section `ending`, opens section `next`
++void profile_mark(int ending, int next) {
++	profile_add(ending, profile_mark_t);
++	profile_mark_t = profile_clock(next);
++}
++
++void profile_count(int section, uint value) {
++	if (PROFILE_ON(section) && section != 15 && profile_slot_g != 0u && profile_slot_g <= 16384u) {
++		uint key = (((profile_slot_g - 1u) * 4u + PROFILE_CLASS) * 2u + PROFILE_STAGE) * 16u + uint(section & 15);
++		atomicAdd(section_profile.data[key * 2u], value);
++		atomicAdd(section_profile.data[key * 2u + 1u], 1u);
++	}
++}
++#else
++// profiler off (no GODOT_SECTION_PROFILE): markers cost nothing
++uint profile_clock(int section) {
++	return 0u;
++}
++
++void profile_add(int section, uint start) {
++}
++#endif
++
+ #ifdef USE_RADIANCE_OCTMAP_ARRAY
+ 
+ layout(set = 1, binding = 3) uniform texture2DArray radiance_octmap;
+diff --git a/servers/rendering/renderer_scene_cull.cpp b/servers/rendering/renderer_scene_cull.cpp
+index 0120f6fccc..7fd63bb36e 100644
+--- a/servers/rendering/renderer_scene_cull.cpp
++++ b/servers/rendering/renderer_scene_cull.cpp
+@@ -728,6 +728,9 @@ void RendererSceneCull::instance_set_base(RID p_instance, RID p_base) {
+ 
+ 				ERR_FAIL_NULL(geom->geometry_instance);
+ 
++				geom->geometry_instance->owner_id = uint64_t(instance->object_id);
++				geom->geometry_instance->instance_rid = instance->self.get_id();
++
+ 				geom->geometry_instance->set_skeleton(instance->skeleton);
+ 				geom->geometry_instance->set_material_override(instance->material_override);
+ 				geom->geometry_instance->set_material_overlay(instance->material_overlay);
+@@ -1013,6 +1016,12 @@ void RendererSceneCull::instance_attach_object_instance_id(RID p_instance, Objec
+ 	ERR_FAIL_NULL(instance);
+ 
+ 	instance->object_id = p_id;
++	if (((1 << instance->base_type) & RSE::INSTANCE_GEOMETRY_MASK) && instance->base_data) {
++		InstanceGeometryData *geom = static_cast<InstanceGeometryData *>(instance->base_data);
++		if (geom->geometry_instance) {
++			geom->geometry_instance->owner_id = uint64_t(p_id);
++		}
++	}
+ }
+ 
+ void RendererSceneCull::instance_set_blend_shape_weight(RID p_instance, int p_shape, float p_weight) {
+diff --git a/servers/rendering/rendering_device.cpp b/servers/rendering/rendering_device.cpp
+index f9338f7238..d9bd992471 100644
+--- a/servers/rendering/rendering_device.cpp
++++ b/servers/rendering/rendering_device.cpp
+@@ -5543,6 +5543,7 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin_for_screen(DisplayS
+ 
+ 	draw_graph.add_draw_list_set_viewport(viewport);
+ 	draw_graph.add_draw_list_set_scissor(viewport);
++	draw_list.scissor = viewport;
+ 
+ 	return int64_t(ID_TYPE_DRAW_LIST) << ID_BASE_SHIFT;
+ }
+@@ -5672,6 +5673,7 @@ RenderingDevice::DrawListID RenderingDevice::draw_list_begin(RID p_framebuffer,
+ 	Rect2i viewport_rect(viewport_offset, viewport_size);
+ 	draw_graph.add_draw_list_set_viewport(viewport_rect);
+ 	draw_graph.add_draw_list_set_scissor(viewport_rect);
++	draw_list.scissor = viewport_rect;
+ 
+ 	return int64_t(ID_TYPE_DRAW_LIST) << ID_BASE_SHIFT;
+ }
+@@ -5997,6 +5999,18 @@ void RenderingDevice::draw_list_set_push_constant(DrawListID p_list, const void
+ #endif
+ }
+ 
++void RenderingDevice::draw_list_capture_timestamp(DrawListID p_list, const String &p_name) {
++	ERR_RENDER_THREAD_GUARD();
++	ERR_FAIL_COND(!draw_list.active);
++	ERR_FAIL_COND_MSG(frames[frame].timestamp_count >= max_timestamp_query_elements, vformat("Tried capturing more timestamps than the configured maximum (%d).", max_timestamp_query_elements));
++
++	draw_graph.add_draw_list_write_timestamp(frames[frame].timestamp_pool, frames[frame].timestamp_count);
++
++	frames[frame].timestamp_names[frames[frame].timestamp_count] = p_name;
++	frames[frame].timestamp_cpu_values[frames[frame].timestamp_count] = OS::get_singleton()->get_ticks_usec();
++	frames[frame].timestamp_count++;
++}
++
+ void RenderingDevice::draw_list_draw(DrawListID p_list, bool p_use_indices, uint32_t p_instances, uint32_t p_procedural_vertices) {
+ 	ERR_RENDER_THREAD_GUARD();
+ 
+@@ -6295,6 +6309,7 @@ void RenderingDevice::draw_list_enable_scissor(DrawListID p_list, const Rect2 &p
+ 	}
+ 
+ 	draw_graph.add_draw_list_set_scissor(rect);
++	draw_list.scissor = rect;
+ }
+ 
+ void RenderingDevice::draw_list_disable_scissor(DrawListID p_list) {
+@@ -6303,6 +6318,20 @@ void RenderingDevice::draw_list_disable_scissor(DrawListID p_list) {
+ 	ERR_FAIL_COND(!draw_list.active);
+ 
+ 	draw_graph.add_draw_list_set_scissor(draw_list.viewport);
++	draw_list.scissor = draw_list.viewport;
++}
++
++void RenderingDevice::draw_list_begin_geometry_only(DrawListID p_list) {
++	ERR_RENDER_THREAD_GUARD();
++	ERR_FAIL_COND(!draw_list.active);
++	// one pixel: every vertex still runs, almost no fragments do
++	draw_graph.add_draw_list_set_scissor(Rect2i(draw_list.viewport.position, Size2i(1, 1)));
++}
++
++void RenderingDevice::draw_list_end_geometry_only(DrawListID p_list) {
++	ERR_RENDER_THREAD_GUARD();
++	ERR_FAIL_COND(!draw_list.active);
++	draw_graph.add_draw_list_set_scissor(draw_list.scissor);
+ }
+ 
+ uint32_t RenderingDevice::draw_list_get_current_pass() {
+diff --git a/servers/rendering/rendering_device.h b/servers/rendering/rendering_device.h
+index 38c4b14cdb..d8d517547e 100644
+--- a/servers/rendering/rendering_device.h
++++ b/servers/rendering/rendering_device.h
+@@ -1437,6 +1437,7 @@ private:
+ 
+ 	struct DrawList {
+ 		Rect2i viewport;
++		Rect2i scissor; // last set, restored after a geometry-only draw
+ 		bool active = false;
+ 
+ 		struct SetState {
+@@ -1555,6 +1556,11 @@ public:
+ 	void draw_list_set_push_constant(DrawListID p_list, const void *p_data, uint32_t p_data_size);
+ 
+ 	void draw_list_draw(DrawListID p_list, bool p_use_indices, uint32_t p_instances = 1, uint32_t p_procedural_vertices = 0);
++	// a named GPU timestamp between draws inside the list
++	void draw_list_capture_timestamp(DrawListID p_list, const String &p_name);
++	// a 1x1 scissor and back: replays a draw's vertex work alone
++	void draw_list_begin_geometry_only(DrawListID p_list);
++	void draw_list_end_geometry_only(DrawListID p_list);
+ 	void draw_list_draw_indirect(DrawListID p_list, bool p_use_indices, RID p_buffer, uint32_t p_offset = 0, uint32_t p_draw_count = 1, uint32_t p_stride = 0);
+ 
+ 	void draw_list_set_viewport(DrawListID p_list, const Rect2 &p_rect);
+diff --git a/servers/rendering/rendering_device_graph.cpp b/servers/rendering/rendering_device_graph.cpp
+index fc17ed32a4..04f01b5115 100644
+--- a/servers/rendering/rendering_device_graph.cpp
++++ b/servers/rendering/rendering_device_graph.cpp
+@@ -1023,6 +1023,11 @@ void RenderingDeviceGraph::_run_draw_list_command(RDD::CommandBufferID p_command
+ 				driver->command_uniform_set_prepare_for_use(p_command_buffer, uniform_set_prepare_for_use_instruction->uniform_set, uniform_set_prepare_for_use_instruction->shader, uniform_set_prepare_for_use_instruction->set_index);
+ 				instruction_data_cursor += sizeof(DrawListUniformSetPrepareForUseInstruction);
+ 			} break;
++			case DrawListInstruction::TYPE_WRITE_TIMESTAMP: {
++				const DrawListWriteTimestampInstruction *write_timestamp_instruction = reinterpret_cast<const DrawListWriteTimestampInstruction *>(instruction);
++				driver->command_timestamp_write(p_command_buffer, write_timestamp_instruction->query_pool, write_timestamp_instruction->index);
++				instruction_data_cursor += sizeof(DrawListWriteTimestampInstruction);
++			} break;
+ 			default:
+ 				DEV_ASSERT(false && "Unknown draw list instruction type.");
+ 				return;
+@@ -1613,6 +1618,11 @@ void RenderingDeviceGraph::_print_draw_list(const uint8_t *p_instruction_data, u
+ 				print_line("\tUNIFORM SET PREPARE FOR USE ID", itos(uniform_set_prepare_for_use_instruction->uniform_set.id), "SHADER ID", itos(uniform_set_prepare_for_use_instruction->shader.id), "INDEX", uniform_set_prepare_for_use_instruction->set_index);
+ 				instruction_data_cursor += sizeof(DrawListUniformSetPrepareForUseInstruction);
+ 			} break;
++			case DrawListInstruction::TYPE_WRITE_TIMESTAMP: {
++				const DrawListWriteTimestampInstruction *write_timestamp_instruction = reinterpret_cast<const DrawListWriteTimestampInstruction *>(instruction);
++				print_line("\tWRITE TIMESTAMP INDEX", write_timestamp_instruction->index);
++				instruction_data_cursor += sizeof(DrawListWriteTimestampInstruction);
++			} break;
+ 			default:
+ 				DEV_ASSERT(false && "Unknown draw list instruction type.");
+ 				return;
+@@ -2289,6 +2299,13 @@ void RenderingDeviceGraph::add_draw_list_set_viewport(Rect2i p_rect) {
+ 	instruction->rect = p_rect;
+ }
+ 
++void RenderingDeviceGraph::add_draw_list_write_timestamp(RDD::QueryPoolID p_query_pool, uint32_t p_index) {
++	DrawListWriteTimestampInstruction *instruction = reinterpret_cast<DrawListWriteTimestampInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListWriteTimestampInstruction)));
++	instruction->type = DrawListInstruction::TYPE_WRITE_TIMESTAMP;
++	instruction->query_pool = p_query_pool;
++	instruction->index = p_index;
++}
++
+ void RenderingDeviceGraph::add_draw_list_uniform_set_prepare_for_use(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index) {
+ 	DrawListUniformSetPrepareForUseInstruction *instruction = reinterpret_cast<DrawListUniformSetPrepareForUseInstruction *>(_allocate_draw_list_instruction(sizeof(DrawListUniformSetPrepareForUseInstruction)));
+ 	instruction->type = DrawListInstruction::TYPE_UNIFORM_SET_PREPARE_FOR_USE;
+diff --git a/servers/rendering/rendering_device_graph.h b/servers/rendering/rendering_device_graph.h
+index dda5508088..0e8a85db2a 100644
+--- a/servers/rendering/rendering_device_graph.h
++++ b/servers/rendering/rendering_device_graph.h
+@@ -94,7 +94,8 @@ public:
+ 			TYPE_SET_PUSH_CONSTANT,
+ 			TYPE_SET_SCISSOR,
+ 			TYPE_SET_VIEWPORT,
+-			TYPE_UNIFORM_SET_PREPARE_FOR_USE
++			TYPE_UNIFORM_SET_PREPARE_FOR_USE,
++			TYPE_WRITE_TIMESTAMP
+ 		};
+ 
+ 		Type type = TYPE_NONE;
+@@ -679,6 +680,12 @@ private:
+ 		uint32_t set_index = 0;
+ 	};
+ 
++	// a GPU timestamp INSIDE a draw list (per-draw timing)
++	struct DrawListWriteTimestampInstruction : DrawListInstruction {
++		RDD::QueryPoolID query_pool;
++		uint32_t index = 0;
++	};
++
+ 	struct RaytracingListBuildAccelerationStructureInstruction : RaytracingListInstruction {
+ 		RDD::AccelerationStructureID acceleration_structure;
+ 		RDD::AccelerationStructureType acceleration_structure_type;
+@@ -937,6 +944,7 @@ public:
+ 	void add_draw_list_set_scissor(Rect2i p_rect);
+ 	void add_draw_list_set_viewport(Rect2i p_rect);
+ 	void add_draw_list_uniform_set_prepare_for_use(RDD::ShaderID p_shader, RDD::UniformSetID p_uniform_set, uint32_t set_index);
++	void add_draw_list_write_timestamp(RDD::QueryPoolID p_query_pool, uint32_t p_index);
+ 	void add_draw_list_usage(ResourceTracker *p_tracker, ResourceUsage p_usage);
+ 	void add_draw_list_usages(VectorView<ResourceTracker *> p_trackers, VectorView<ResourceUsage> p_usages);
+ 	void add_draw_list_end();
+diff --git a/servers/rendering/shader_compiler.cpp b/servers/rendering/shader_compiler.cpp
+index 56e6040a46..70757fd49d 100644
+--- a/servers/rendering/shader_compiler.cpp
++++ b/servers/rendering/shader_compiler.cpp
+@@ -1217,6 +1217,11 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
+ 							*p_actions.usage_flag_pointers[vnode->name] = true;
+ 							used_flag_pointers.insert(vnode->name);
+ 						}
++						// built-in calls may need code of their own (profile_*)
++						if (is_internal_func && p_default_actions.usage_defines.has(vnode->name) && !used_name_defines.has(vnode->name)) {
++							r_gen_code.defines.push_back(p_default_actions.usage_defines[vnode->name]);
++							used_name_defines.insert(vnode->name);
++						}
+ 
+ 						if (is_internal_func) {
+ 							code += vnode->name;
+@@ -1501,6 +1506,10 @@ String ShaderCompiler::_dump_node_code(const SL::Node *p_node, int p_level, Gene
+ 					*p_actions.usage_flag_pointers["DISCARD"] = true;
+ 					used_flag_pointers.insert("DISCARD");
+ 				}
++				if (p_default_actions.usage_defines.has("DISCARD") && !used_name_defines.has("DISCARD")) {
++					r_gen_code.defines.push_back(p_default_actions.usage_defines["DISCARD"]);
++					used_name_defines.insert("DISCARD");
++				}
+ 
+ 				code = "discard;";
+ 			} else if (cfnode->flow_op == SL::FLOW_OP_CONTINUE) {
+diff --git a/servers/rendering/shader_language.cpp b/servers/rendering/shader_language.cpp
+index d8c876bfbc..f91a0498f5 100644
+--- a/servers/rendering/shader_language.cpp
++++ b/servers/rendering/shader_language.cpp
+@@ -3517,6 +3517,10 @@ const ShaderLanguage::BuiltinFuncDef ShaderLanguage::builtin_func_defs[] = {
+ 
+ 	// umulExtended
+ 
++	// GPU section profiler: cycles from profile_clock() to
++	// profile_add(section, start), counted per draw and pass
++	{ "profile_clock", TYPE_UINT, { TYPE_INT, TYPE_VOID }, { "section" }, TAG_GLOBAL, true },
++	{ "profile_add", TYPE_VOID, { TYPE_INT, TYPE_UINT, TYPE_VOID }, { "section", "start" }, TAG_GLOBAL, true },
+ 	{ "umulExtended", TYPE_VOID, { TYPE_UINT, TYPE_UINT, TYPE_UINT, TYPE_UINT, TYPE_VOID }, { "x", "y", "msb", "lsb" }, TAG_GLOBAL, true },
+ 	{ "umulExtended", TYPE_VOID, { TYPE_UVEC2, TYPE_UVEC2, TYPE_UVEC2, TYPE_UVEC2, TYPE_VOID }, { "x", "y", "msb", "lsb" }, TAG_GLOBAL, true },
+ 	{ "umulExtended", TYPE_VOID, { TYPE_UVEC3, TYPE_UVEC3, TYPE_UVEC3, TYPE_UVEC3, TYPE_VOID }, { "x", "y", "msb", "lsb" }, TAG_GLOBAL, true },
+diff --git a/servers/rendering/shader_types.cpp b/servers/rendering/shader_types.cpp
+index b733b6b767..3293fd9933 100644
+--- a/servers/rendering/shader_types.cpp
++++ b/servers/rendering/shader_types.cpp
+@@ -81,6 +81,8 @@ ShaderTypes::ShaderTypes() {
+ 	shader_modes[RSE::SHADER_SPATIAL].functions["global"].built_ins["TIME"] = constt(ShaderLanguage::TYPE_FLOAT);
+ 	shader_modes[RSE::SHADER_SPATIAL].functions["global"].built_ins["EXPOSURE"] = constt(ShaderLanguage::TYPE_FLOAT);
+ 	shader_modes[RSE::SHADER_SPATIAL].functions["global"].built_ins["IN_SHADOW_PASS"] = constt(ShaderLanguage::TYPE_BOOL);
++	// depth-only passes (prepass, normal-roughness, shadows)
++	shader_modes[RSE::SHADER_SPATIAL].functions["global"].built_ins["IN_DEPTH_PREPASS"] = constt(ShaderLanguage::TYPE_BOOL);
+ 	shader_modes[RSE::SHADER_SPATIAL].functions["constants"].built_ins["PI"] = constvt(ShaderLanguage::TYPE_FLOAT, { pi_scalar });
+ 	shader_modes[RSE::SHADER_SPATIAL].functions["constants"].built_ins["TAU"] = constvt(ShaderLanguage::TYPE_FLOAT, { tau_scalar });
+ 	shader_modes[RSE::SHADER_SPATIAL].functions["constants"].built_ins["E"] = constvt(ShaderLanguage::TYPE_FLOAT, { e_scalar });
+@@ -247,6 +249,9 @@ ShaderTypes::ShaderTypes() {
+ 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("specular"), "schlick_ggx", "toon", "disabled" });
+ 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("skip_vertex_transform") });
+ 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("world_vertex_coords") });
++		// motion vectors from this frame's model-space vertex and
++		// last frame's transform: vertex() runs once, not twice
++		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("motion_vectors_rigid") });
+ 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("ensure_correct_normals") });
+ 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("shadows_disabled") });
+ 		shader_modes[RSE::SHADER_SPATIAL].modes.push_back({ PNAME("ambient_light_disabled") });
+diff --git a/thirdparty/re-spirv/re-spirv.cpp b/thirdparty/re-spirv/re-spirv.cpp
+index 1734593139..a10e26fc79 100644
+--- a/thirdparty/re-spirv/re-spirv.cpp
++++ b/thirdparty/re-spirv/re-spirv.cpp
+@@ -218,6 +218,7 @@ namespace respv {
+         case SpvOpReturnValue:
+         case SpvOpUnreachable:
+         case SpvOpGroupNonUniformElect:
++        case SpvOpReadClockKHR:
+         case SpvOpGroupNonUniformAll:
+         case SpvOpGroupNonUniformAny:
+         case SpvOpGroupNonUniformAllEqual:
+@@ -372,6 +373,7 @@ namespace respv {
+         case SpvOpDPdyCoarse:
+         case SpvOpFwidthCoarse:
+         case SpvOpGroupNonUniformElect:
++        case SpvOpReadClockKHR:
+         case SpvOpCopyLogical:
+             rOperandWordStart = 3;
+             rOperandWordCount = 1;
+-- 
+2.56.0
+

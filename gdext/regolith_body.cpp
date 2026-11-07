@@ -32,6 +32,7 @@
 #include "regolith/cube.hpp"
 #include "regolith/ephemeris.hpp"
 #include "regolith_collider.hpp"
+#include "regolith_engine.hpp"
 #include "regolith_system.hpp"
 
 using namespace godot;
@@ -514,8 +515,8 @@ void RegolithBody::_ready() {
 
 void RegolithBody::create_render_resources() {
 	RenderingServer *rs = RenderingServer::get_singleton();
-	const String shader_path = clip_quads_ > 0 ? "res://addons/regolith/regolith_clipmap.gdshader"
-											   : "res://addons/regolith/regolith_terrain.gdshader";
+	regolith_engine_warn_once();
+	const String shader_path = regolith_terrain_shader(clip_quads_ > 0 ? "regolith_clipmap" : "regolith_terrain");
 	shader_ = ResourceLoader::get_singleton()->load(shader_path);
 	if (shader_.is_null()) {
 		ERR_PRINT("RegolithBody: missing " + shader_path);
