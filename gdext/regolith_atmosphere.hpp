@@ -10,6 +10,7 @@
 #include <godot_cpp/classes/compositor_effect.hpp>
 #include <godot_cpp/classes/node.hpp>
 #include <godot_cpp/classes/render_data.hpp>
+#include <godot_cpp/classes/stream_peer_buffer.hpp>
 #include <godot_cpp/classes/texture2drd.hpp>
 #include <godot_cpp/variant/basis.hpp>
 #include <godot_cpp/variant/color.hpp>
@@ -88,6 +89,9 @@ private:
 	Vector3 amb_mean_, amb_up_;
 	double view_lum_ = 1.0;
 	std::atomic<bool> reading_{ false };
+	// Async readbacks land in an engine object: Godot delivers the
+	// last ones after unloading extensions, so never into ours.
+	Ref<StreamPeerBuffer> sink_;
 	RenderingDevice *rd_ = nullptr;
 	bool failed_ = false;
 	regolith::AirModel built_air_;

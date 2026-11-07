@@ -5,7 +5,10 @@
 #include "regolith_engine.hpp"
 
 #include <atomic>
+#include <filesystem>
 
+#include <godot_cpp/classes/dir_access.hpp>
+#include <godot_cpp/classes/file_access.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
 #include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/shader_include.hpp>
@@ -69,6 +72,46 @@ String for_stock(const String &p_code) {
 
 } // namespace
 
+std::string regolith_disk_path(const String &p_path) {
+	ProjectSettings *ps = ProjectSettings::get_singleton();
+	const String g = ps->globalize_path(p_path);
+	std::error_code ec;
+	if (std::filesystem::exists(g.utf8().get_data(), ec) || !p_path.begins_with("res://")) {
+		return g.utf8().get_data();
+	}
+	// exported: inside the .pck, so copied out to user:// once
+	Ref<FileAccess> in = FileAccess::open(p_path, FileAccess::READ);
+	if (in.is_null()) {
+		return g.utf8().get_data();
+	}
+	const String dst = String("user://regolith_data/") + p_path.substr(6);
+	const std::string out_path = ps->globalize_path(dst).utf8().get_data();
+	const uint64_t len = in->get_length();
+	if (std::filesystem::exists(out_path, ec) && std::filesystem::file_size(out_path, ec) == len) {
+		return out_path;
+	}
+	DirAccess::make_dir_recursive_absolute(ps->globalize_path(dst).get_base_dir());
+	const String part = dst + String(".part");
+	Ref<FileAccess> out = FileAccess::open(part, FileAccess::WRITE);
+	if (out.is_null()) {
+		UtilityFunctions::push_error("Regolith: cannot write ", dst);
+		return g.utf8().get_data();
+	}
+	UtilityFunctions::print("Regolith: unpacking ", p_path, " (", int64_t(len / 1000000), " MB) to ", dst);
+	for (uint64_t done = 0; done < len;) {
+		const PackedByteArray chunk = in->get_buffer(int64_t(std::min<uint64_t>(len - done, 8u << 20)));
+		if (chunk.is_empty()) {
+			break;
+		}
+		out->store_buffer(chunk);
+		done += uint64_t(chunk.size());
+	}
+	out->close();
+	// whole or nothing: a half copy never passes for the pack
+	std::filesystem::rename(ps->globalize_path(part).utf8().get_data(), out_path, ec);
+	return out_path;
+}
+
 Ref<Shader> regolith_clipmap_shader(const String &p_surface_path) {
 	const String core = include_code("res://addons/regolith/regolith_clipmap_core.gdshaderinc");
 	const String path = p_surface_path.is_empty() ? String("res://addons/regolith/regolith_surface_default.gdshaderinc")
@@ -89,18 +132,22 @@ Ref<Shader> regolith_clipmap_shader(const String &p_surface_path) {
 
 String regolith_engine_warning() {
 	String s;
+	if (!regolith_engine_double()) {
+		s += String("SINGLE PRECISION: REGOLITH IS BROKEN IN THIS GODOT.\n\n") +
+				String("This Godot uses single-precision floats. At planet scale positions far from the ") +
+				String("origin fall apart: terrain cracks and swims, physics and orbits go wrong. Regolith ") +
+				String("does not support this. Use a double-precision Godot (precision=double), as ") +
+				String("regolith/engine/build_godot.sh (Linux) or build_godot.ps1 (Windows) builds it, ") +
+				String("and the matching double export templates.");
+	}
 	if (!regolith_engine_patched()) {
+		if (!s.is_empty()) {
+			s += String("\n\n");
+		}
 		s += String("Regolith is running on STOCK Godot.\n\n") +
 				String("Its terrain falls back to slow shaders: expect FAR lower frame rates than Regolith is made ") +
 				String("for. Build the patched engine with regolith/engine/build_godot.sh (Linux, macOS) or ") +
 				String("build_godot.ps1 (Windows) and open the project with that editor.");
-	}
-	if (!regolith_engine_double()) {
-		if (!s.is_empty()) {
-			s += String("\n\n");
-		}
-		s += String("This Godot uses single precision: at planet scale, positions far from the origin jitter. ") +
-				String("Regolith is made for double precision (precision=double), as build_godot builds it.");
 	}
 	return s;
 }
@@ -112,7 +159,7 @@ void regolith_engine_warn_once() {
 	}
 	const String w = regolith_engine_warning();
 	if (!w.is_empty()) {
-		UtilityFunctions::push_error(String("REGOLITH PERFORMANCE WARNING\n") + w);
+		UtilityFunctions::push_error(String("REGOLITH ENGINE WARNING\n") + w);
 	}
 }
 

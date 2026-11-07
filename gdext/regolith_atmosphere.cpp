@@ -83,14 +83,19 @@ RGB from_v3(const Vector3 &p_v, double p_k) {
 
 RegolithAirEffect::RegolithAirEffect() {
 	set_effect_callback_type(EFFECT_CALLBACK_TYPE_POST_SKY);
+	sink_.instantiate();
 }
 
 RegolithAirEffect::~RegolithAirEffect() {
+	if (reading_ && sink_.is_valid()) {
+		// in flight: the engine delivers it after we are gone, so
+		// the buffer must outlive us (one small leak at quit)
+		sink_->reference();
+	}
 	free_all();
 }
 
 void RegolithAirEffect::_bind_methods() {
-	ClassDB::bind_method(D_METHOD("_on_ambient", "data"), &RegolithAirEffect::on_ambient);
 }
 
 void RegolithAirEffect::set_frame(const Frame &p_frame) {
@@ -421,8 +426,14 @@ void RegolithAirEffect::_render_callback(int32_t p_type, RenderData *p_data) {
 					", datum ", datum, ", bottom ", bot, ", top ", top);
 		}
 	}
+	// last readback, landed in the sink since: take it
+	if (reading_ && sink_->get_size() > 0) {
+		on_ambient(sink_->get_data_array());
+		sink_->clear();
+		reading_ = false;
+	}
 	if (!reading_.exchange(true)) {
-		if (rd_->texture_get_data_async(amb_tex_, 0, Callable(this, "_on_ambient")) != OK) {
+		if (rd_->texture_get_data_async(amb_tex_, 0, Callable(sink_.ptr(), "set_data_array")) != OK) {
 			reading_ = false;
 		}
 	}
@@ -642,6 +653,19 @@ void RegolithAtmosphere::detach() {
 }
 
 void RegolithAtmosphere::_exit_tree() {
+	// the terrain lets go of the tables before the effect frees
+	// them: wrappers left on freed textures crash at quit
+	if (RegolithBody *body = Object::cast_to<RegolithBody>(get_node_or_null(body_path_))) {
+		body->set_material_param("air_on", false);
+		body->set_material_param("air_t", Variant());
+		body->set_material_param("air_e", Variant());
+	}
+	for (Ref<Texture2DRD> *t : { &air_t_tex_, &air_e_tex_ }) {
+		if (t->is_valid()) {
+			(*t)->set_texture_rd_rid(RID());
+			t->unref();
+		}
+	}
 	detach();
 }
 

@@ -33,8 +33,9 @@ void RegolithEditorPlugin::_enter_tree() {
 		return;
 	}
 	notice_ = memnew(Label);
-	notice_->set_text(regolith_engine_patched() ? String("Regolith: single precision")
+	notice_->set_text(!regolith_engine_double() ? String("REGOLITH: SINGLE PRECISION, BROKEN")
 												: String("Regolith: STOCK GODOT, SLOW TERRAIN"));
+	notice_->add_theme_font_size_override("font_size", 18);
 	notice_->add_theme_color_override("font_color", Color(1.0, 0.25, 0.2));
 	notice_->set_tooltip_text(regolith_engine_warning());
 	notice_->set_mouse_filter(Control::MOUSE_FILTER_PASS);
@@ -54,21 +55,25 @@ void RegolithEditorPlugin::_exit_tree() {
 
 void RegolithEditorPlugin::show_warning() {
 	EditorInterface *ei = EditorInterface::get_singleton();
-	if (bool(ei->get_editor_settings()->get_project_metadata(META_SECTION, META_KEY, false))) {
+	// single precision is broken: that one cannot be dismissed
+	const bool broken = !regolith_engine_double();
+	if (!broken && bool(ei->get_editor_settings()->get_project_metadata(META_SECTION, META_KEY, false))) {
 		return;
 	}
 	AcceptDialog *d = memnew(AcceptDialog);
-	d->set_title("Regolith: slow engine");
+	d->set_title(broken ? "REGOLITH: SINGLE PRECISION IS BROKEN" : "Regolith: slow engine");
 	d->set_text(regolith_engine_warning());
 	d->set_autowrap(true);
-	d->get_label()->add_theme_font_size_override("font_size", 22);
-	d->get_label()->add_theme_color_override("font_color", Color(1.0, 0.45, 0.35));
+	d->get_label()->add_theme_font_size_override("font_size", broken ? 30 : 22);
+	d->get_label()->add_theme_color_override("font_color", Color(1.0, 0.3, 0.25));
 	d->get_ok_button()->set_text("I understand");
-	d->add_button("Don't show again for this project", true, DISMISS);
-	d->connect("custom_action", Callable(this, "on_action").bind(d));
+	if (!broken) {
+		d->add_button("Don't show again for this project", true, DISMISS);
+		d->connect("custom_action", Callable(this, "on_action").bind(d));
+	}
 	d->connect("confirmed", Callable(d, "queue_free"));
 	d->connect("canceled", Callable(d, "queue_free"));
-	ei->popup_dialog_centered(d, Vector2i(760, 360));
+	ei->popup_dialog_centered(d, broken ? Vector2i(1100, 620) : Vector2i(760, 360));
 }
 
 void RegolithEditorPlugin::on_action(const StringName &p_action, Object *p_dialog) {

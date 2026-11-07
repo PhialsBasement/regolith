@@ -13,6 +13,9 @@
 #include <godot_cpp/classes/camera3d.hpp>
 #include <godot_cpp/classes/visual_instance3d.hpp>
 #include <godot_cpp/classes/canvas_layer.hpp>
+#include <godot_cpp/classes/label.hpp>
+
+#include "regolith_engine.hpp"
 #include <godot_cpp/classes/character_body3d.hpp>
 #include <godot_cpp/classes/collision_object3d.hpp>
 #include <godot_cpp/classes/physics_server3d.hpp>
@@ -216,6 +219,22 @@ Dictionary RegolithSystem::self_test() const {
 void RegolithSystem::_ready() {
 	if (Engine::get_singleton()->is_editor_hint()) {
 		return;
+	}
+	if (!regolith_engine_double()) {
+		// broken, so impossible to miss: a banner over the game
+		CanvasLayer *layer = memnew(CanvasLayer);
+		layer->set_layer(128);
+		Label *l = memnew(Label);
+		l->set_text("REGOLITH: SINGLE-PRECISION GODOT, BROKEN.\nUse a double-precision build (precision=double).");
+		l->set_horizontal_alignment(HORIZONTAL_ALIGNMENT_CENTER);
+		l->set_anchors_preset(Control::PRESET_TOP_WIDE);
+		l->set_offset(SIDE_TOP, 160.0);
+		l->add_theme_font_size_override("font_size", 40);
+		l->add_theme_color_override("font_color", Color(1.0, 0.2, 0.15));
+		l->add_theme_color_override("font_outline_color", Color(0, 0, 0));
+		l->add_theme_constant_override("outline_size", 10);
+		layer->add_child(l);
+		add_child(layer);
 	}
 	dominant_ = Object::cast_to<RegolithBody>(get_node_or_null(body_path_));
 	if (!dominant_) {

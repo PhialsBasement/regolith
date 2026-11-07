@@ -151,6 +151,22 @@ cmake --build build -j 16
 The library and `regolith.gdextension` land in `../addons/regolith/`
 (override with `-DREGOLITH_ADDON_DIR=...`).
 
+## Exporting
+
+Build every library first: `tools/build_all.sh` makes Linux and
+Windows, debug (editor) and release (exports), double and single
+(Windows cross-compiles with MinGW-w64; set `ZSTD_SRC` to a zstd
+`lib/` tree, Godot's `thirdparty/zstd` will do). Export with the
+double-precision templates `engine/build_godot` builds.
+
+Regolith reads its packs (`.rgp`, `.rge`) and maps with plain file
+calls. Add them to the export (`include_filter`, e.g.
+`addons/regolith/example/data/*`): at first launch Regolith copies
+each one out of the `.pck` into `user://regolith_data/`, once. For
+multi-gigabyte packs, ship them as loose files beside the
+executable, at the same relative path (`res://data/x.rgp` as
+`data/x.rgp`): Regolith uses those directly, with no copy.
+
 ## License
 
 Copyright (c) 2026 PhialsBasement. Regolith is licensed under the

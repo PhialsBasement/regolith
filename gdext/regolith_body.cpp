@@ -63,7 +63,7 @@ constexpr float NO_MORPH = 1e30f;
 constexpr int PATCH_SPLIT_LEVELS = 2;
 
 std::string path_of(const String &p_res) {
-	return ProjectSettings::get_singleton()->globalize_path(p_res).utf8().get_data();
+	return regolith_disk_path(p_res);
 }
 
 TileKey key_at(const regolith::FaceCoord &p_fc, int p_level) {
@@ -189,7 +189,7 @@ double sample_tile(const regolith::HeightTile &p_t, const regolith::TileLayout &
 // 2048 x 1024; darkness ramps in below 92 % of the mosaic's mean
 // luminance (0.4128) and saturates by 68 %.
 std::shared_ptr<const regolith::DarkField> RegolithBody::load_dark_field(const String &p_path) {
-	Ref<Image> img = Image::load_from_file(ProjectSettings::get_singleton()->globalize_path(p_path));
+	Ref<Image> img = Image::load_from_file(String::utf8(regolith_disk_path(p_path).c_str()));
 	if (img.is_null() || img->is_empty()) {
 		ERR_PRINT("RegolithBody: cannot load dark map " + p_path);
 		return nullptr;
@@ -290,6 +290,8 @@ void RegolithBody::set_material_param(const StringName &p_name, const Variant &p
 	if (Resource *res = Object::cast_to<Resource>(p_value)) {
 		material_refs_[p_name] = p_value;
 		value = res->get_rid();
+	} else {
+		material_refs_.erase(p_name); // let go of an old texture
 	}
 	material_params_[p_name] = value;
 	if (material_.is_valid()) {
