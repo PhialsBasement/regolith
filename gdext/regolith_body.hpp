@@ -110,8 +110,9 @@ public:
 	int get_dense_levels() const { return dense_levels_; }
 	void set_quads(int p_v) { quads_ = p_v; }
 	int get_quads() const { return quads_; }
-	// Clipmap ring width in quads (a multiple of 4); 0 draws the
-	// old per-tile CDLOD instead.
+	// Clipmap ring width in quads (a multiple of 4). 0: LEGACY
+	// CDLOD path, MORS's fixed Mars material; no surface_path,
+	// no per-point air light. Kept for reference only.
 	void set_clip_quads(int p_v) { clip_quads_ = p_v <= 0 ? 0 : std::max(8, p_v / 4 * 4); }
 	int get_clip_quads() const { return clip_quads_; }
 	void set_range_factor(double p_v) { range_factor_ = p_v; }

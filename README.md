@@ -111,6 +111,12 @@ void surface(TerrainPoint p, inout TerrainSurface s) {
 `normal_map` with `normal_map_depth` (tangent space along
 `axis_x` / `axis_y`), `ao`, `ao_light_affect` and `emission`.
 
+**Legacy path:** `clip_quads = 0` selects the old per-tile CDLOD
+terrain (`regolith_terrain.gdshader`). It carries MORS's fixed Mars
+ground material, ignores `surface_path` and the per-point air light,
+and is kept for reference only, unmaintained; Regolith warns when a
+body uses it. Leave `clip_quads` at its default (256).
+
 For textures that tile exactly at planet scale, the core offers
 precise per-ring domains: `domain(id)` and `domain_scale(id)`.
 Set a surface's uniforms from code with

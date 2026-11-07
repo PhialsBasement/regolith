@@ -601,6 +601,9 @@ void RegolithBody::create_render_resources() {
 		// the engine's terrain with this body's surface
 		shader_ = regolith_clipmap_shader(surface_path_);
 	} else {
+		WARN_PRINT("RegolithBody '" + String(get_name()) + "': clip_quads 0 selects the LEGACY CDLOD terrain, " +
+				"MORS's fixed Mars material: surface_path and the per-point air light are ignored. " +
+				"Set clip_quads (default 256) for the supported terrain.");
 		shader_ = ResourceLoader::get_singleton()->load(regolith_terrain_shader("regolith_terrain"));
 	}
 	if (shader_.is_null()) {

@@ -4,10 +4,13 @@ shader_type spatial;
 // not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 render_mode cull_disabled, diffuse_burley, specular_schlick_ggx;
 
+// LEGACY: only for RegolithBody.clip_quads = 0. Kept for
+// reference, unmaintained: the supported terrain is
+// regolith_clipmap_core.gdshaderinc with a surface.
+
 // Geometry: CDLOD patches of a cube-sphere (see RegolithBody).
 // Shading: mors's mars_ground.gdshader procedural geology,
-// with world XZ metres replaced by face metres plus exact
-// per-node offsets (RegolithBody::push_texture_domains).
+// with face metres plus exact per-node offsets.
 
 // Per node, set by RegolithBody (see node_constants()).
 instance uniform vec4 u_center; // centre, r_center
