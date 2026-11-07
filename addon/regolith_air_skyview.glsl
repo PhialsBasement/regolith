@@ -1,6 +1,10 @@
 #[compute]
 #version 450
 
+// This Source Code Form is subject to the terms of the
+// Mozilla Public License, v. 2.0. If a copy of the MPL was
+// not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 // The sky around the camera (inside the air): luminance per
 // view zenith and angle from the sun's azimuth.
 

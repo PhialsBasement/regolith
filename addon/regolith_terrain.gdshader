@@ -1,4 +1,7 @@
 shader_type spatial;
+// This Source Code Form is subject to the terms of the
+// Mozilla Public License, v. 2.0. If a copy of the MPL was
+// not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 render_mode cull_disabled, diffuse_burley, specular_schlick_ggx;
 
 // Geometry: CDLOD patches of a cube-sphere (see RegolithBody).

@@ -1,6 +1,10 @@
 #[compute]
 #version 450
 
+// This Source Code Form is subject to the terms of the
+// Mozilla Public License, v. 2.0. If a copy of the MPL was
+// not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 // Transmittance to the top of the air, per (radius, cosine).
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;

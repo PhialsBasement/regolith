@@ -1,3 +1,7 @@
+// This Source Code Form is subject to the terms of the
+// Mozilla Public License, v. 2.0. If a copy of the MPL was
+// not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 // Shared by the air passes (Hillaire 2020, "A Scalable and
 // Production Ready Sky and Atmosphere Rendering Technique").
 // Body frame, metres; radiance for a sun of illuminance 1.

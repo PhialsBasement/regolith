@@ -1,6 +1,10 @@
 #[compute]
 #version 450
 
+// This Source Code Form is subject to the terms of the
+// Mozilla Public License, v. 2.0. If a copy of the MPL was
+// not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 // The full march image from this frame's quarter of traced
 // pixels and last frame's image, reprojected by cloud depth and
 // held to the range of the fresh samples around it.

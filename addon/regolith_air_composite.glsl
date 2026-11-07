@@ -1,6 +1,10 @@
 #[compute]
 #version 450
 
+// This Source Code Form is subject to the terms of the
+// Mozilla Public License, v. 2.0. If a copy of the MPL was
+// not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 // The sky and the air over the rendered scene: background pixels
 // become the sky (the sky view inside the air, a ray march from
 // space), sun, stars and bodies seen through it; geometry gets

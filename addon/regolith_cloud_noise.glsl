@@ -1,6 +1,10 @@
 #[compute]
 #version 450
 
+// This Source Code Form is subject to the terms of the
+// Mozilla Public License, v. 2.0. If a copy of the MPL was
+// not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 // Tileable cloud noise, made once on the GPU. shape: R
 // Perlin-Worley, GBA Worley FBM at 2x, 4x, 8x. detail: RGB
 // Worley FBM at 1x, 2x, 4x (Schneider 2015).

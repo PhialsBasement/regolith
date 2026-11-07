@@ -131,6 +131,7 @@ if(REGOLITH_BUILD_GDEXTENSION)
 	)
 	configure_file(addon/regolith.gdextension
 		"${REGOLITH_ADDON_DIR}/regolith.gdextension" COPYONLY)
+	configure_file(LICENSE "${REGOLITH_ADDON_DIR}/LICENSE" COPYONLY)
 	configure_file(addon/regolith_terrain.gdshader
 		"${REGOLITH_ADDON_DIR}/regolith_terrain.gdshader" COPYONLY)
 	foreach(f regolith_clipmap_core.gdshaderinc regolith_surface_default.gdshaderinc regolith_cloud_common.glsli

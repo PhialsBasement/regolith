@@ -1,6 +1,10 @@
 #[compute]
 #version 450
 
+// This Source Code Form is subject to the terms of the
+// Mozilla Public License, v. 2.0. If a copy of the MPL was
+// not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 // Light for one cascade: optical depth toward the sun (R) and
 // straight up to the sky (G), from the same cloud density the
 // march sees. The march never marches toward the light itself.

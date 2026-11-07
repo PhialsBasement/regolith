@@ -1,3 +1,7 @@
+# This Source Code Form is subject to the terms of the
+# Mozilla Public License, v. 2.0. If a copy of the MPL was
+# not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 # Godot 4.7.2 with Regolith's renderer patches, double
 # precision: the editor and Windows export templates.
 # Usage: engine\build_godot.ps1 [DEST]  (see engine/README.md)

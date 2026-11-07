@@ -1,6 +1,10 @@
 #[compute]
 #version 450
 
+// This Source Code Form is subject to the terms of the
+// Mozilla Public License, v. 2.0. If a copy of the MPL was
+// not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 // Aerial perspective: light scattered in, and the mean
 // transmittance, from the camera to 32 depths per screen cell
 // (slice k ends at range * ((k + 1) / 32)^2).

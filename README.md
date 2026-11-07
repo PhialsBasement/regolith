@@ -144,3 +144,19 @@ cmake --build build -j 16
 
 The library and `regolith.gdextension` land in `../addons/regolith/`
 (override with `-DREGOLITH_ADDON_DIR=...`).
+
+## License
+
+Copyright (c) 2026 PhialsBasement. Regolith is licensed under the
+[Mozilla Public License 2.0](LICENSE).
+
+In short: use it in any project, free or commercial, open or closed,
+at no cost. Your own code, scenes and assets stay yours, under any
+licence you choose. If you ship changes to Regolith's own files,
+those changed files stay under the MPL and their source must be
+available, with the licence and copyright notices kept. The
+`LICENSE` file is the binding text; this summary is not.
+
+Third-party parts keep their own licences: godot-cpp (MIT),
+FastNoiseLite (MIT), and the data credited above (NASA, USGS and
+ESA planetary data, the Yale Bright Star Catalogue).

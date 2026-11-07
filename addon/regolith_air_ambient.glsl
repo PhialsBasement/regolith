@@ -1,6 +1,10 @@
 #[compute]
 #version 450
 
+// This Source Code Form is subject to the terms of the
+// Mozilla Public License, v. 2.0. If a copy of the MPL was
+// not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
+
 // Ambient light at the camera, for a sun of illuminance 1:
 // x the sky and sunlit ground averaged over all normals (one
 // colour for every surface), y irradiance on level ground.
