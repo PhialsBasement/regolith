@@ -724,7 +724,11 @@ void RegolithAtmosphere::_process(double p_delta) {
 	const DVec3 down = regolith::normalize(eye);
 	const double datum = body->datum_radius(down);
 	const double surface = body->surface_radius(down, false);
-	const double bottom = std::min(std::isnan(surface) ? datum : surface - 10.0, r - 1.0);
+	// the air's floor under every bit of ground, so no terrain
+	// dips below it and no sky ray ends on a fake sphere
+	const double lowest = body->lowest_radius();
+	const double floor_r = lowest > 0.0 ? lowest - 10.0 : (std::isnan(surface) ? datum : surface - 10.0);
+	const double bottom = std::min(floor_r, r - 1.0);
 	const AirModel air = model(bottom, datum);
 	const bool has_air = air_ != "None";
 

@@ -25,11 +25,14 @@ public:
 	double get_rails_distance() const { return rails_distance_; }
 	bool is_parked() const { return parked_; }
 
-	// System-owned parking state (ICRF or body-fixed).
+	// System-owned parking state (ICRF or body-fixed). In orbit,
+	// park_body_ null means around the sun.
 	bool parked_ = false;
 	bool landed_ = false;
 	const Node *park_body_ = nullptr;
 	double park_time_ = 0.0;
+	double park_check_time_ = 0.0; // sphere-of-influence checks
+
 	double park_r_[3] = {};
 	double park_v_[3] = {};
 	double park_basis_[9] = {};

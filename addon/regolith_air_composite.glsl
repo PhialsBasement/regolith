@@ -74,6 +74,21 @@ void main() {
 		}
 		vec4 vp = a.inv_proj * vec4(ndc, depth, 1.0);
 		float dist = length(vp.xyz / vp.w);
+		if (r > a.radii.y) {
+			// from outside the air a planet spans few table cells:
+			// march this pixel's own ray through the air instead
+			float t_in = sphere_near(o, d, a.radii.y);
+			vec3 add = vec3(0.0);
+			vec3 tr = vec3(1.0);
+			if (t_in >= 0.0 && t_in < dist) {
+				Scatter s = integrate(o + d * t_in, d, dist - t_in, 16, a.sun.xyz, a.radii.x, t_lut, ms_lut);
+				add = s.L * scale;
+				tr = s.T;
+			}
+			vec3 glow_o = a.glow_color.rgb * (airglow(o, d, dist) * a.stars.y);
+			imageStore(color_image, px, vec4(c.rgb * tr + add + glow_o, c.a));
+			return;
+		}
 		float range = a.eye.w;
 		float f = sqrt(dist / range) * float(AP_SIZE.z) - 1.0;
 		float w = (max(f, 0.0) + 0.5) / float(AP_SIZE.z);

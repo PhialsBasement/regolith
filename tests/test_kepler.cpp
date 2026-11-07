@@ -49,6 +49,44 @@ TEST_CASE(kepler_round_trip_all_conics) {
 	std::printf("  %d conics propagated forward and back\n", checked);
 }
 
+TEST_CASE(kepler_long_arcs) {
+	// a Mars escape at 3 km/s over escape speed, out past the
+	// sphere of influence (the case plain Newton lost), a Sun-scale
+	// hyperbola, and an ellipse over many turns; forward and back
+	struct Case {
+		DVec3 r0, v0;
+		double gm, dt;
+	};
+	const double r = 3789500.0;
+	const double v_esc = std::sqrt(9.0e6 + 2.0 * GM / r);
+	const Case cases[] = {
+		{ { r, 0, 0 }, { 0, v_esc, 0 }, GM, 1.0e6 },
+		{ { r, 0, 0 }, { 0, v_esc, 0 }, GM, -1.0e6 },
+		{ { 2.0e11, 1.0e10, 0 }, { -5000.0, 40000.0, 3000.0 }, 1.32712440018e20, 3.0e8 },
+		{ { r, 0, 0 }, { 0, std::sqrt(GM / r) * 1.1, 0 }, GM, 2.0e6 },
+	};
+	int checked = 0;
+	for (const Case &c : cases) {
+		DVec3 r1, v1;
+		kepler_propagate(c.r0, c.v0, c.gm, c.dt, r1, v1);
+		DVec3 rs = c.r0, vs = c.v0;
+		for (int k = 0; k < 1000; ++k) {
+			DVec3 rn, vn;
+			kepler_propagate(rs, vs, c.gm, c.dt / 1000.0, rn, vn);
+			rs = rn;
+			vs = vn;
+		}
+		const double scale = std::fmax(length(r1), length(c.r0));
+		CHECK(length(r1 - rs) < 1e-7 * scale);
+		const double e0 = 0.5 * dot(c.v0, c.v0) - c.gm / length(c.r0);
+		const double e1 = 0.5 * dot(v1, v1) - c.gm / length(r1);
+		CHECK(std::fabs(e1 - e0) < 1e-9 * std::fabs(e0));
+		CHECK(length(cross(r1, v1) - cross(c.r0, c.v0)) < 1e-9 * length(cross(c.r0, c.v0)));
+		++checked;
+	}
+	std::printf("  %d long arcs: one step agrees with 1000\n", checked);
+}
+
 TEST_CASE(orbit_shape_of_circle) {
 	const double r = 3789500.0;
 	const OrbitShape o = orbit_shape({ r, 0, 0 }, { 0, std::sqrt(GM / r), 0 }, GM, { 0, 0, 1 });

@@ -475,30 +475,31 @@ double Synth::small_crater_sum(const DVec3 &p_dir, const std::vector<SmallCrater
 	return sum;
 }
 
-void Synth::craters(HeightTile &r_tile, const TileLayout &p_lay, int p_band) const {
+bool Synth::crater_values(TileKey p_key, const TileLayout &p_lay, int p_band, std::vector<float> &r_out) const {
+	r_out.assign(size_t(p_lay.count()), 0.0f);
 	if (config_.profile != 1) {
-		return;
+		return false;
 	}
 	// Every crater that can reach the tile, found once.
 	const int n = p_lay.intervals;
-	const DVec3 mid = sample_dir(r_tile.key, p_lay, n / 2, n / 2);
+	const DVec3 mid = sample_dir(p_key, p_lay, n / 2, n / 2);
 	double radius = 0.0;
 	for (int c = 0; c < 4; ++c) {
 		const int i = (c & 1) ? n + p_lay.border : -p_lay.border;
 		const int j = (c & 2) ? n + p_lay.border : -p_lay.border;
-		radius = std::max(radius, arc(mid, sample_dir(r_tile.key, p_lay, i, j)) * config_.r_ref);
+		radius = std::max(radius, arc(mid, sample_dir(p_key, p_lay, i, j)) * config_.r_ref);
 	}
 	std::vector<SmallCrater> list;
 	small_craters_near(mid, radius, p_band, list);
 	if (list.empty()) {
-		return;
+		return false;
 	}
 	for (int j = -p_lay.border; j <= n + p_lay.border; ++j) {
 		for (int i = -p_lay.border; i <= n + p_lay.border; ++i) {
-			r_tile.rho[size_t(p_lay.index(i, j))] += float(small_crater_sum(sample_dir(r_tile.key, p_lay, i, j), list));
+			r_out[size_t(p_lay.index(i, j))] = float(small_crater_sum(sample_dir(p_key, p_lay, i, j), list));
 		}
 	}
-	r_tile.update_bounds(p_lay);
+	return true;
 }
 
 // _build_color_map: R gravel province, G bedrock patch, B ice,

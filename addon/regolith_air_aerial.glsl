@@ -38,12 +38,9 @@ void main() {
 		float t_end = range * pow(float(k + 1) / float(AP_SIZE.z), 2.0);
 		if (t_in >= 0.0 && t_end > t_in) {
 			float t0 = max(t_prev, t_in);
+			// the depth buffer, not a sphere, says where ground is
 			vec3 p0 = o + d * t0;
-			float ground = sphere_near(p0, d, a.radii.x);
 			float seg = t_end - t0;
-			if (ground >= 0.0) {
-				seg = min(seg, ground);
-			}
 			if (seg > 0.0) {
 				Scatter s = integrate(p0, d, seg, 3, a.sun.xyz, a.radii.x, t_lut, ms_lut);
 				L += T * s.L;

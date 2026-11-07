@@ -4,6 +4,7 @@
 
 #include "regolith/kepler.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <limits>
 #include <numbers>
@@ -47,18 +48,51 @@ void kepler_propagate(const DVec3 &p_r0, const DVec3 &p_v0, double p_gm, double 
 		const double period = 2.0 * std::numbers::pi / (sq * std::pow(alpha, 1.5));
 		dt = std::fmod(dt, period);
 	}
+	// Kepler's equation in chi: f(chi) = sqrt(mu) dt. f' is the
+	// radius, always positive, so f is monotonic: Newton inside a
+	// bracket, bisecting when it leaves it, always converges.
+	auto kepler = [&](double p_chi, double &r_df) {
+		const double z = alpha * p_chi * p_chi;
+		const double c = stumpff_c(z), s = stumpff_s(z);
+		r_df = r0 * vr0 / sq * p_chi * (1.0 - alpha * p_chi * p_chi * s) + (1.0 - alpha * r0) * p_chi * p_chi * c + r0;
+		return r0 * vr0 / sq * p_chi * p_chi * c + (1.0 - alpha * r0) * p_chi * p_chi * p_chi * s + r0 * p_chi - sq * dt;
+	};
 	double chi = sq * std::fabs(alpha) * dt;
-	if (alpha <= 1e-12) {
+	if (alpha < -1e-12) {
+		// hyperbola: Vallado's guess (Fundamentals, algorithm 8)
+		const double a = 1.0 / alpha;
+		const double sgn = dt >= 0.0 ? 1.0 : -1.0;
+		const double num = -2.0 * p_gm * alpha * dt;
+		const double den = dot(p_r0, p_v0) + sgn * std::sqrt(-p_gm * a) * (1.0 - r0 * alpha);
+		const double g = num / den;
+		chi = g > 0.0 ? sgn * std::sqrt(-a) * std::log(g) : sq * dt / r0;
+	} else if (alpha <= 1e-12) {
 		chi = sq * dt / r0;
 	}
-	for (int k = 0; k < 60; ++k) {
-		const double z = alpha * chi * chi;
-		const double c = stumpff_c(z), s = stumpff_s(z);
-		const double f = r0 * vr0 / sq * chi * chi * c + (1.0 - alpha * r0) * chi * chi * chi * s + r0 * chi - sq * dt;
-		const double df = r0 * vr0 / sq * chi * (1.0 - alpha * chi * chi * s) + (1.0 - alpha * r0) * chi * chi * c + r0;
-		const double step = f / df;
-		chi -= step;
-		if (std::fabs(step) < 1e-12 * std::fmax(1.0, std::fabs(chi))) {
+	// the bracket: f(0) = -sqrt(mu) dt; grow the far end to cross
+	double lo = std::fmin(0.0, chi), hi = std::fmax(0.0, chi);
+	double df = 0.0;
+	for (int k = 0; k < 200 && kepler(lo, df) > 0.0; ++k) {
+		lo = lo * 2.0 - 1.0;
+	}
+	for (int k = 0; k < 200 && kepler(hi, df) < 0.0; ++k) {
+		hi = hi * 2.0 + 1.0;
+	}
+	chi = std::clamp(chi, lo, hi);
+	for (int k = 0; k < 200; ++k) {
+		const double f = kepler(chi, df);
+		if (f < 0.0) {
+			lo = chi;
+		} else {
+			hi = chi;
+		}
+		double next = chi - f / df;
+		if (!(next > lo && next < hi)) {
+			next = 0.5 * (lo + hi);
+		}
+		const double step = next - chi;
+		chi = next;
+		if (std::fabs(step) < 1e-13 * std::fmax(1.0, std::fabs(chi)) || hi - lo < 1e-13 * std::fmax(1.0, std::fabs(chi))) {
 			break;
 		}
 	}

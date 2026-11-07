@@ -52,7 +52,20 @@ public:
 	void roughness(HeightTile &r_tile, const TileLayout &p_lay) const;
 	// Also fills r_tile.repose for thermal().
 	void relief(HeightTile &r_tile, const TileLayout &p_lay) const;
-	void craters(HeightTile &r_tile, const TileLayout &p_lay, int p_band) const;
+	// One crater band's height at every sample of a tile (border
+	// included); false, all zeros, when none reach it.
+	bool crater_values(TileKey p_key, const TileLayout &p_lay, int p_band, std::vector<float> &r_out) const;
+	// Levels a band is stamped at: from the first that resolves
+	// its biggest craters to the one resolving its smallest.
+	int crater_first_level(int p_band) const {
+		const double want = p_band == 0 ? 250.0 : 62.5; // m, a quarter of the biggest
+		int level = 0;
+		while (level < crater_last_level(p_band) && spacing(level) > want) {
+			++level;
+		}
+		return level;
+	}
+	int crater_last_level(int p_band) const { return p_band == 0 ? config_.rough_level : config_.relief_level; }
 	void borehole(HeightTile &r_tile, const TileLayout &p_lay) const;
 	// Thermal relaxation on a square grid of side p_n.
 	void thermal(std::vector<float> &r_h, const std::vector<float> &p_rep, int p_n, double p_spacing) const;

@@ -164,8 +164,11 @@ HeightTilePtr TileLoader::make(TileKey p_key) {
 		subdivide(*parent, lay, quadrant, *tile);
 		if (synth && level == synth_->config().rough_level) {
 			synth_->roughness(*tile, lay);
-			synth_->craters(*tile, lay, 0);
 		}
+	}
+	if (synth) {
+		stamp_craters(p_key, *tile, 0);
+		stamp_craters(p_key, *tile, 1);
 	}
 	if (synth_) {
 		synth_->geology(p_key, lay, tile->geology);
@@ -319,7 +322,35 @@ void TileLoader::relief_level(TileKey p_key, HeightTile &r_tile) {
 		}
 	}
 	r_tile.update_bounds(lay);
-	synth_->craters(r_tile, lay, 1);
+}
+
+// A crater band appears at the first level resolving its biggest
+// craters, so they show from afar; finer levels swap the shape
+// inherited from the parent for the exact one, rims kept sharp.
+void TileLoader::stamp_craters(TileKey p_key, HeightTile &r_tile, int p_band) {
+	const int level = p_key.level();
+	const int first = synth_->crater_first_level(p_band);
+	if (level < first || level > synth_->crater_last_level(p_band)) {
+		return;
+	}
+	const TileLayout lay = source_.layout();
+	std::vector<float> add;
+	if (!synth_->crater_values(p_key, lay, p_band, add)) {
+		return;
+	}
+	if (level > source_.max_level() && level > first) {
+		HeightTile parent_field, inherited;
+		parent_field.key = p_key.parent();
+		synth_->crater_values(parent_field.key, lay, p_band, parent_field.rho);
+		subdivide(parent_field, lay, int(p_key.x() & 1u) | int((p_key.y() & 1u) << 1), inherited);
+		for (size_t k = 0; k < add.size(); ++k) {
+			add[k] -= inherited.rho[k];
+		}
+	}
+	for (size_t k = 0; k < add.size(); ++k) {
+		r_tile.rho[k] += add[k];
+	}
+	r_tile.update_bounds(lay);
 }
 
 void TileLoader::worker() {

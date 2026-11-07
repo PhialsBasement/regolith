@@ -128,6 +128,21 @@ public:
 	Vector3 get_body_position(const String &p_name) const;
 	Dictionary get_orbit_info(Node *p_node) const;
 	PackedFloat64Array get_inertial_state(Node *p_node) const;
+	// Places a node at an ICRF state (central-body centred: x, y,
+	// z, vx, vy, vz in m and m/s), as get_inertial_state gives it.
+	void set_inertial_state(Node *p_node, const PackedFloat64Array &p_state);
+	// A body's (or "Sun"'s) ICRF state now, as above
+	PackedFloat64Array get_body_state(const String &p_name) const;
+	// the same at any time (TT seconds since J2000): for planning
+	// transfers to where a body will be
+	PackedFloat64Array get_body_state_at(const String &p_name, double p_time) const;
+	// Sphere of influence radius (m): a (m / M)^0.4 about its
+	// parent; INF for "Sun"
+	double get_soi_radius(const String &p_name) const;
+	// Time warp: above 1 every vessel, the focus included, rides
+	// on rails (Kepler orbits, patched at spheres of influence)
+	void set_warp(double p_rate);
+	double get_warp() const { return warp_; }
 	void put_in_orbit(Node *p_node, const String &p_body, double p_altitude, double p_inclination_deg);
 	// At rest relative to p_body's surface, p_height above it.
 	void put_near(Node *p_node, const String &p_body, double p_lat_deg, double p_lon_deg, double p_height);
@@ -179,8 +194,24 @@ private:
 	void update_vessels(Node3D *p_focus, double p_delta);
 	void park(RegolithVessel *p_vessel, Node3D *p_node);
 	void unpark(RegolithVessel *p_vessel, Node3D *p_node);
+	// back to physics for the focus: the frame takes its velocity
+	void unpark_focus(RegolithVessel *p_vessel, Node3D *p_node);
 	State parked_state(const RegolithVessel *p_vessel) const;
+	State parked_state_at(const RegolithVessel *p_vessel, double p_t) const;
 	void place_parked(RegolithVessel *p_vessel, Node3D *p_node);
+	// patched conics: re-park at each sphere-of-influence change
+	// since the last check, in steps no ship can skip one in
+	void advance_parked(RegolithVessel *p_vessel);
+	void repark(RegolithVessel *p_vessel, const State &p_s, double p_t, const RegolithBody *p_primary);
+
+	// The sun and the bodies at any time (null body: the sun).
+	State sun_state_at(double p_t) const;
+	State body_state_at(const RegolithBody *p_body, double p_t) const;
+	double soi_at(const RegolithBody *p_body, double p_t) const;
+	// the body whose sphere of influence holds p_x (the smallest
+	// that does), or null for the sun
+	const RegolithBody *primary_at(const regolith::DVec3 &p_x, double p_t) const;
+	double gm_of(const RegolithBody *p_body) const;
 
 	void setup_passes();
 	void update_passes(Camera3D *p_cam);
@@ -205,6 +236,9 @@ private:
 #endif
 	bool floating_velocity_enabled_ = true;
 	double time_ = 0.0; // TT seconds since J2000
+	double warp_ = 1.0;
+	// the sun now (ICRF, central-body centred), with the poses
+	regolith::DVec3 sun_pos_, sun_vel_;
 
 	std::vector<RegolithBody *> bodies_;
 	std::unordered_map<const RegolithBody *, Pose> poses_;

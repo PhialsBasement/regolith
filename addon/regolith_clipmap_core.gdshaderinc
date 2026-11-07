@@ -24,6 +24,8 @@ instance uniform vec4 u_dom4;
 instance uniform vec4 u_cliff_u;
 instance uniform vec4 u_cliff_v;
 instance uniform vec4 u_nmod; // face metres mod 20 km
+// 0 to 1 as a newly shown ring blends from the coarser one's shape
+instance uniform float u_fade = 1.0;
 
 uniform sampler2DArray heights : filter_nearest, repeat_disable;
 // (layer or -1, tx, ty) per face, level and tile mod page_window
@@ -310,6 +312,8 @@ void vertex() {
 		ivec2 k0 = ivec2(u_ring.xy) / s;
 		float h = ring_h(r, k0 + ivec2(floor(km)), fract(km));
 		vec4 rp = ring_geo[min(r + 1, 23)];
+		// a ring just shown starts as the coarser one: no pop
+		morph = max(morph, 1.0 - u_fade);
 		if (morph > 0.0 && rp.z > 0.0) {
 			// the point in the coarser ring's grid steps
 			int d = (1 << (level - int(rp.w))) * int(rp.z);
@@ -440,6 +444,19 @@ void fragment() {
 		float per = 1.0 / float(s);
 		hx = (ring_h(r, ki, kf + vec2(1.0, 0.0)) - ring_h(r, ki, kf - vec2(1.0, 0.0))) * per;
 		hy = (ring_h(r, ki, kf + vec2(0.0, 1.0)) - ring_h(r, ki, kf - vec2(0.0, 1.0))) * per;
+		// where the shape morphs to the coarser ring, so does the shading
+		vec4 rp = ring_geo[min(r + 1, 23)];
+		if (v_morph > 0.0 && rp.z > 0.0) {
+			int d = (1 << (int(u_ring.z) - int(rp.w))) * int(rp.z);
+			ivec2 g = ivec2(u_ring.xy) + ivec2(floor(v_g));
+			ivec2 ci = ivec2(floor_div(g.x, d), floor_div(g.y, d));
+			vec2 cf = (vec2(g - ci * d) + fract(v_g)) / float(d);
+			float pc = 1.0 / float(d);
+			float cx = (ring_h(r + 1, ci, cf + vec2(1.0, 0.0)) - ring_h(r + 1, ci, cf - vec2(1.0, 0.0))) * pc;
+			float cy = (ring_h(r + 1, ci, cf + vec2(0.0, 1.0)) - ring_h(r + 1, ci, cf - vec2(0.0, 1.0))) * pc;
+			hx = mix(hx, cx, v_morph);
+			hy = mix(hy, cy, v_morph);
+		}
 	}
 	profile_add(1, t_hn);
 	vec3 up = normalize(v_up);

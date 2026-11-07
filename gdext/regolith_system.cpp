@@ -48,6 +48,11 @@ namespace {
 constexpr double DEG = std::numbers::pi / 180.0;
 constexpr double AU = 1.495978707e11;
 constexpr double SUN_RADIUS = 6.957e8;
+constexpr double GM_SUN = 1.32712440018e20; // m^3/s^2 (IAU)
+// ecliptic pole of J2000 in ICRF: obliquity 23.4392911 deg
+const DVec3 ECLIPTIC_POLE(0.0, -0.39777715593191, 0.91748206206918);
+// time warp: the largest rate (rails make any rate exact)
+constexpr double WARP_MAX = 1e7;
 // Each camera pass spans this far/near ratio; float32
 // projections lose the far plane well before 1e8.
 constexpr double PASS_RATIO = 1e6;
@@ -157,6 +162,13 @@ void RegolithSystem::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_body_position", "name"), &RegolithSystem::get_body_position);
 	ClassDB::bind_method(D_METHOD("get_orbit_info", "node"), &RegolithSystem::get_orbit_info);
 	ClassDB::bind_method(D_METHOD("get_inertial_state", "node"), &RegolithSystem::get_inertial_state);
+	ClassDB::bind_method(D_METHOD("set_inertial_state", "node", "state"), &RegolithSystem::set_inertial_state);
+	ClassDB::bind_method(D_METHOD("get_body_state", "name"), &RegolithSystem::get_body_state);
+	ClassDB::bind_method(D_METHOD("get_body_state_at", "name", "time"), &RegolithSystem::get_body_state_at);
+	ClassDB::bind_method(D_METHOD("get_soi_radius", "name"), &RegolithSystem::get_soi_radius);
+	ClassDB::bind_method(D_METHOD("set_warp", "rate"), &RegolithSystem::set_warp);
+	ClassDB::bind_method(D_METHOD("get_warp"), &RegolithSystem::get_warp);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "warp", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_warp", "get_warp");
 	ClassDB::bind_method(D_METHOD("put_in_orbit", "node", "body", "altitude", "inclination_deg"), &RegolithSystem::put_in_orbit);
 	ClassDB::bind_method(D_METHOD("put_near", "node", "body", "lat_deg", "lon_deg", "height"), &RegolithSystem::put_near);
 	ClassDB::bind_method(D_METHOD("get_surface_point", "body", "lat_deg", "lon_deg", "height"),
@@ -194,6 +206,9 @@ void RegolithSystem::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "floating_origin"), "set_floating_origin", "get_floating_origin");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "floating_velocity"), "set_floating_velocity", "get_floating_velocity");
 	ADD_SIGNAL(MethodInfo("frame_shifted", PropertyInfo(Variant::TRANSFORM3D, "transform")));
+	// a vessel on rails struck a body: now landed there
+	ADD_SIGNAL(MethodInfo("vessel_impact", PropertyInfo(Variant::OBJECT, "node"), PropertyInfo(Variant::STRING, "body"),
+			PropertyInfo(Variant::FLOAT, "speed")));
 }
 
 String RegolithSystem::get_version() const {
@@ -287,19 +302,78 @@ void RegolithSystem::anchor_at_start() {
 	anchored_ = true;
 }
 
+RegolithSystem::State RegolithSystem::sun_state_at(double p_t) const {
+	const double dt = 60.0;
+	auto at = [&](double p_s) { return central_heliocentric(p_s) * (-AU); };
+	return { at(p_t), (at(p_t + dt) - at(p_t - dt)) / (2.0 * dt) };
+}
+
+RegolithSystem::State RegolithSystem::body_state_at(const RegolithBody *p_body, double p_t) const {
+	if (!p_body) {
+		return sun_state_at(p_t);
+	}
+	State s;
+	DVec3 axes[3];
+	p_body->pose(p_t, s.x, s.v, axes);
+	// another planet: its own orbit round the sun, relative to
+	// the central body's
+	if (p_body != central_ && !p_body->has_orbit_table()) {
+		const double dt = 60.0;
+		auto rel = [&](double p_s) {
+			return (regolith::heliocentric(p_body->orbit_elements(), p_s) - central_heliocentric(p_s)) * AU;
+		};
+		s.x = rel(p_t);
+		s.v = (rel(p_t + dt) - rel(p_t - dt)) / (2.0 * dt);
+	}
+	return s;
+}
+
+double RegolithSystem::gm_of(const RegolithBody *p_body) const {
+	return p_body ? p_body->get_gm() : GM_SUN;
+}
+
+double RegolithSystem::soi_at(const RegolithBody *p_body, double p_t) const {
+	if (!p_body) {
+		return INFINITY;
+	}
+	const double gm = p_body->get_gm();
+	if (gm <= 0.0) {
+		return 0.0;
+	}
+	if (p_body == central_ || !p_body->has_orbit_table()) {
+		// a planet, about the sun: its mean distance
+		return p_body->orbit_elements().a[0] * AU * std::pow(gm / GM_SUN, 0.4);
+	}
+	// a moon, about the central body: its distance now
+	const double d = regolith::length(body_state_at(p_body, p_t).x - body_state_at(central_, p_t).x);
+	return d * std::pow(gm / std::max(central_->get_gm(), 1.0), 0.4);
+}
+
+const RegolithBody *RegolithSystem::primary_at(const DVec3 &p_x, double p_t) const {
+	const RegolithBody *best = nullptr;
+	double best_soi = INFINITY;
+	for (const RegolithBody *b : bodies_) {
+		const double soi = soi_at(b, p_t);
+		const DVec3 pos = p_t == time_ ? pose_of(b).position : body_state_at(b, p_t).x;
+		if (soi > 0.0 && soi < best_soi && regolith::length(p_x - pos) < soi) {
+			best = b;
+			best_soi = soi;
+		}
+	}
+	return best;
+}
+
 void RegolithSystem::update_poses() {
+	const State sun = sun_state_at(time_);
+	sun_pos_ = sun.x;
+	sun_vel_ = sun.v;
 	for (RegolithBody *b : bodies_) {
 		Pose &p = poses_[b];
 		b->pose(time_, p.position, p.velocity, p.axes);
-		// another planet: its own orbit round the sun, relative
-		// to the central body's
 		if (b != central_ && !b->has_orbit_table()) {
-			const double dt = 60.0;
-			auto rel = [&](double p_t) {
-				return (regolith::heliocentric(b->orbit_elements(), p_t) - central_heliocentric(p_t)) * AU;
-			};
-			p.position = rel(time_);
-			p.velocity = (rel(time_ + dt) - rel(time_ - dt)) / (2.0 * dt);
+			const State s = body_state_at(b, time_);
+			p.position = s.x;
+			p.velocity = s.v;
 		}
 		DVec3 a[5][3];
 		DVec3 dummy_p, dummy_v;
@@ -382,6 +456,15 @@ regolith::RenderFrame RegolithSystem::frame_for(const RegolithBody *p_body) cons
 
 DVec3 RegolithSystem::field(const DVec3 &p_x, const RegolithBody *p_skip) const {
 	DVec3 g;
+	{
+		// the sun: near a planet only its tide is left once the
+		// frame's own fall is taken off (accel_icrf)
+		const DVec3 d = p_x - sun_pos_;
+		const double r = regolith::length(d);
+		if (r > SUN_RADIUS * 0.5) {
+			g = g - d * (GM_SUN / (r * r * r));
+		}
+	}
 	for (const RegolithBody *b : bodies_) {
 		if (b == p_skip) {
 			continue;
@@ -607,8 +690,8 @@ void RegolithSystem::manage_frame(Node3D *p_focus) {
 	if (body != dominant_ || rotating != rotating_ || switched_focus || strayed) {
 		rebuild_frame(body, rotating, s, p_focus);
 	}
-	if (RegolithVessel *v = vessel_of(p_focus); v && v->parked_) {
-		unpark(v, p_focus);
+	if (RegolithVessel *v = vessel_of(p_focus); v && v->parked_ && warp_ <= 1.0) {
+		unpark_focus(v, p_focus);
 	}
 }
 
@@ -648,17 +731,121 @@ void RegolithSystem::floating_velocity(Node3D *p_focus) {
 }
 
 RegolithSystem::State RegolithSystem::parked_state(const RegolithVessel *p_vessel) const {
+	return parked_state_at(p_vessel, time_);
+}
+
+RegolithSystem::State RegolithSystem::parked_state_at(const RegolithVessel *p_vessel, double p_t) const {
 	const RegolithBody *b = Object::cast_to<RegolithBody>(const_cast<Node *>(p_vessel->park_body_));
-	const Pose &bp = pose_of(b);
 	const DVec3 r(p_vessel->park_r_[0], p_vessel->park_r_[1], p_vessel->park_r_[2]);
 	if (p_vessel->landed_) {
+		const Pose &bp = pose_of(b);
 		const DVec3 x = bp.position + to_icrf(bp.axes, r);
 		return { x, bp.velocity + regolith::cross(bp.omega, x - bp.position) };
 	}
+	const State origin = p_t == time_ ? (b ? State{ pose_of(b).position, pose_of(b).velocity } : State{ sun_pos_, sun_vel_ })
+									  : body_state_at(b, p_t);
 	const DVec3 v(p_vessel->park_v_[0], p_vessel->park_v_[1], p_vessel->park_v_[2]);
 	DVec3 rr, vv;
-	regolith::kepler_propagate(r, v, b->get_gm(), time_ - p_vessel->park_time_, rr, vv);
-	return { bp.position + rr, bp.velocity + vv };
+	regolith::kepler_propagate(r, v, gm_of(b), p_t - p_vessel->park_time_, rr, vv);
+	return { origin.x + rr, origin.v + vv };
+}
+
+void RegolithSystem::repark(RegolithVessel *p_vessel, const State &p_s, double p_t, const RegolithBody *p_primary) {
+	const State o = body_state_at(p_primary, p_t);
+	const DVec3 r = p_s.x - o.x, v = p_s.v - o.v;
+	for (int k = 0; k < 3; ++k) {
+		p_vessel->park_r_[k] = k == 0 ? r.x : (k == 1 ? r.y : r.z);
+		p_vessel->park_v_[k] = k == 0 ? v.x : (k == 1 ? v.y : v.z);
+	}
+	p_vessel->park_body_ = p_primary;
+	p_vessel->park_time_ = p_t;
+}
+
+void RegolithSystem::advance_parked(RegolithVessel *p_vessel) {
+	const double t0 = p_vessel->park_check_time_, t1 = time_;
+	p_vessel->park_check_time_ = t1;
+	if (p_vessel->landed_ || t1 <= t0) {
+		return;
+	}
+	// steps short enough that no sphere of influence (the
+	// smallest one a ship can be in) is crossed within one
+	double min_soi = INFINITY;
+	for (const RegolithBody *b : bodies_) {
+		const double soi = soi_at(b, t0);
+		if (soi > b->r_ref()) {
+			min_soi = std::min(min_soi, soi);
+		}
+	}
+	// height over the ground of a point near p_body at time p_t
+	auto ground_clearance = [&](const RegolithBody *p_body, const DVec3 &p_x, double p_t) {
+		DVec3 pos, vel, axes[3];
+		p_body->pose(p_t, pos, vel, axes);
+		pos = body_state_at(p_body, p_t).x;
+		const DVec3 local = from_icrf(axes, p_x - pos);
+		const double surface = const_cast<RegolithBody *>(p_body)->surface_radius(regolith::normalize(local), false);
+		return regolith::length(local) - (std::isnan(surface) ? p_body->r_ref() : surface);
+	};
+	double t = t0;
+	State s_prev = parked_state_at(p_vessel, t0);
+	for (int iter = 0; iter < 20000 && t < t1; ++iter) {
+		const RegolithBody *pb = Object::cast_to<RegolithBody>(const_cast<Node *>(p_vessel->park_body_));
+		const DVec3 rel_v = s_prev.v - body_state_at(pb, t).v;
+		const double speed = regolith::length(rel_v) + 1.0;
+		double step = std::isfinite(min_soi) ? 0.1 * min_soi / speed : t1 - t;
+		// near the ground of the body it orbits: finer, so no
+		// pass through the planet slips between two steps
+		if (pb) {
+			const double h = ground_clearance(pb, s_prev.x, t);
+			step = std::min(step, std::max(0.5 * h, 50.0) / speed);
+		}
+		const double t_next = std::min(t1, t + std::max(step, 1e-3));
+		const State s = parked_state_at(p_vessel, t_next);
+		if (pb && ground_clearance(pb, s.x, t_next) < 0.0) {
+			// the impact: its moment by bisection, then set down
+			double lo = t, hi = t_next;
+			for (int k = 0; k < 40; ++k) {
+				const double mid = 0.5 * (lo + hi);
+				(ground_clearance(pb, parked_state_at(p_vessel, mid).x, mid) < 0.0 ? hi : lo) = mid;
+			}
+			const State si = parked_state_at(p_vessel, lo);
+			DVec3 bpos, bvel, axes[3];
+			pb->pose(lo, bpos, bvel, axes);
+			const State bs = body_state_at(pb, lo);
+			const DVec3 dir = regolith::normalize(from_icrf(axes, si.x - bs.x));
+			double surf = const_cast<RegolithBody *>(pb)->surface_radius(dir, false);
+			surf = std::isnan(surf) ? pb->r_ref() : surf;
+			const DVec3 v_surf = bs.v + regolith::cross(pose_of(pb).omega, si.x - bs.x);
+			const double hit_speed = regolith::length(si.v - v_surf);
+			// landed where it struck, its attitude in body axes
+			Basis stored;
+			for (int c = 0; c < 3; ++c) {
+				stored.set_column(c, Vector3(real_t(p_vessel->park_basis_[c * 3]), real_t(p_vessel->park_basis_[c * 3 + 1]),
+											 real_t(p_vessel->park_basis_[c * 3 + 2])));
+			}
+			stored = basis_from(axes[0], axes[1], axes[2]).transposed() * stored;
+			for (int c = 0; c < 3; ++c) {
+				const Vector3 col = stored.get_column(c);
+				p_vessel->park_basis_[c * 3 + 0] = col.x;
+				p_vessel->park_basis_[c * 3 + 1] = col.y;
+				p_vessel->park_basis_[c * 3 + 2] = col.z;
+			}
+			const DVec3 r = dir * (surf + 1.0);
+			p_vessel->park_r_[0] = r.x;
+			p_vessel->park_r_[1] = r.y;
+			p_vessel->park_r_[2] = r.z;
+			p_vessel->landed_ = true;
+			p_vessel->park_body_ = pb;
+			p_vessel->park_time_ = lo;
+			emit_signal("vessel_impact", p_vessel->get_parent(), String(pb->get_name()), hit_speed);
+			return;
+		}
+		const RegolithBody *p = primary_at(s.x, t_next);
+		if (p != p_vessel->park_body_) {
+			repark(p_vessel, s, t_next, p);
+		}
+		s_prev = s;
+		t = t_next;
+	}
 }
 
 void RegolithSystem::park(RegolithVessel *p_vessel, Node3D *p_node) {
@@ -679,21 +866,9 @@ void RegolithSystem::park(RegolithVessel *p_vessel, Node3D *p_node) {
 		p_vessel->park_r_[2] = r.z;
 		basis_icrf = basis_from(gp.axes[0], gp.axes[1], gp.axes[2]).transposed() * basis_icrf;
 	} else {
-		double strongest = -1.0;
-		for (const RegolithBody *b : bodies_) {
-			const double d = regolith::length(s.x - pose_of(b).position);
-			const double pull = b->get_gm() / (d * d);
-			if (pull > strongest) {
-				strongest = pull;
-				primary = b;
-			}
-		}
-		const Pose &pp = pose_of(primary);
-		const DVec3 r = s.x - pp.position, v = s.v - pp.velocity;
-		for (int k = 0; k < 3; ++k) {
-			p_vessel->park_r_[k] = k == 0 ? r.x : (k == 1 ? r.y : r.z);
-			p_vessel->park_v_[k] = k == 0 ? v.x : (k == 1 ? v.y : v.z);
-		}
+		// a Kepler orbit about the sphere of influence it is in
+		primary = primary_at(s.x, time_);
+		repark(p_vessel, s, time_, primary);
 	}
 	for (int c = 0; c < 3; ++c) {
 		const Vector3 col = basis_icrf.get_column(c);
@@ -703,6 +878,7 @@ void RegolithSystem::park(RegolithVessel *p_vessel, Node3D *p_node) {
 	}
 	p_vessel->park_body_ = primary;
 	p_vessel->park_time_ = time_;
+	p_vessel->park_check_time_ = time_;
 	p_vessel->parked_ = true;
 	if (RigidBody3D *rb = Object::cast_to<RigidBody3D>(p_node)) {
 		p_vessel->was_frozen_ = rb->is_freeze_enabled();
@@ -749,6 +925,45 @@ void RegolithSystem::unpark(RegolithVessel *p_vessel, Node3D *p_node) {
 	}
 }
 
+void RegolithSystem::unpark_focus(RegolithVessel *p_vessel, Node3D *p_node) {
+	const State s = parked_state(p_vessel);
+	unpark(p_vessel, p_node);
+	// from rest in the frame: rebuild_frame hands the true
+	// velocity to the frame, so Jolt never sees orbital speed
+	if (CharacterBody3D *cb = Object::cast_to<CharacterBody3D>(p_node)) {
+		cb->set_velocity(Vector3());
+	} else if (RigidBody3D *rb = Object::cast_to<RigidBody3D>(p_node)) {
+		rb->set_linear_velocity(Vector3());
+	}
+	rebuild_frame(dominant_, rotating_, s, p_node);
+}
+
+void RegolithSystem::set_warp(double p_rate) {
+	const double rate = std::clamp(p_rate, 1.0, WARP_MAX);
+	if (!anchored_ || !is_inside_tree()) {
+		warp_ = rate;
+		return;
+	}
+	if (rate > 1.0 && warp_ <= 1.0) {
+		// every vessel onto rails, the focus too
+		TypedArray<Node> vessels = get_tree()->get_nodes_in_group("regolith_vessel");
+		for (int i = 0; i < vessels.size(); ++i) {
+			RegolithVessel *v = Object::cast_to<RegolithVessel>(vessels[i]);
+			Node3D *node = v ? Object::cast_to<Node3D>(v->get_parent()) : nullptr;
+			if (node && !v->parked_) {
+				park(v, node);
+			}
+		}
+	} else if (rate <= 1.0 && warp_ > 1.0) {
+		Node3D *focus = focus_node();
+		if (RegolithVessel *v = vessel_of(focus); v && v->parked_) {
+			advance_parked(v);
+			unpark_focus(v, focus);
+		}
+	}
+	warp_ = rate;
+}
+
 void RegolithSystem::update_vessels(Node3D *p_focus, double p_delta) {
 	const Vector3 focus_pos = p_focus ? p_focus->get_global_position() : Vector3();
 	TypedArray<Node> vessels = get_tree()->get_nodes_in_group("regolith_vessel");
@@ -756,6 +971,17 @@ void RegolithSystem::update_vessels(Node3D *p_focus, double p_delta) {
 		RegolithVessel *v = Object::cast_to<RegolithVessel>(vessels[i]);
 		Node3D *node = v ? Object::cast_to<Node3D>(v->get_parent()) : nullptr;
 		if (!node) {
+			continue;
+		}
+		if (v->parked_) {
+			advance_parked(v);
+		}
+		if (warp_ > 1.0) {
+			// warping: all on rails, nothing comes off; placed once
+			// the clock and the bodies have moved on
+			if (!v->parked_) {
+				park(v, node);
+			}
 			continue;
 		}
 		if (v->parked_) {
@@ -793,7 +1019,7 @@ void RegolithSystem::_physics_process(double p_delta) {
 		manage_frame(focus);
 		// the rotating (surface) frame stays planet-fixed: the
 		// leash rebuild carries it, so static nodes stay put
-		if (floating_velocity_enabled_ && !rotating_) {
+		if (floating_velocity_enabled_ && !rotating_ && !is_parked(focus)) {
 			floating_velocity(focus);
 		}
 	}
@@ -802,9 +1028,22 @@ void RegolithSystem::_physics_process(double p_delta) {
 	// bodies advance, and Jolt moves everything by its v dt.
 	update_vessels(focus, p_delta);
 	const uint64_t t2 = clock->get_ticks_usec();
-	time_ += p_delta;
-	frame_.anchor = frame_.anchor + frame_velocity_ * p_delta;
+	// simulated time: warp runs it faster, all vessels on rails
+	const double dt = p_delta * warp_;
+	time_ += dt;
+	frame_.anchor = frame_.anchor + frame_velocity_ * dt;
 	update_poses();
+	if (warp_ > 1.0) {
+		TypedArray<Node> vessels = get_tree()->get_nodes_in_group("regolith_vessel");
+		for (int i = 0; i < vessels.size(); ++i) {
+			RegolithVessel *v = Object::cast_to<RegolithVessel>(vessels[i]);
+			Node3D *node = v ? Object::cast_to<Node3D>(v->get_parent()) : nullptr;
+			if (node && v->parked_) {
+				advance_parked(v);
+				place_parked(v, node);
+			}
+		}
+	}
 	const uint64_t t3 = clock->get_ticks_usec();
 	stats_["frame_ms"] = double(t1 - t0) * 1e-3;
 	stats_["vessels_ms"] = double(t2 - t1) * 1e-3;
@@ -1104,27 +1343,102 @@ Dictionary RegolithSystem::get_orbit_info(Node *p_node) const {
 	if (!anchored_ || !node_state(Object::cast_to<Node3D>(p_node), s)) {
 		return d;
 	}
-	const RegolithBody *primary = nullptr;
-	double strongest = -1.0;
-	for (const RegolithBody *b : bodies_) {
-		const double r = regolith::length(s.x - pose_of(b).position);
-		if (b->get_gm() / (r * r) > strongest) {
-			strongest = b->get_gm() / (r * r);
-			primary = b;
-		}
-	}
-	const Pose &p = pose_of(primary);
-	const DVec3 r = s.x - p.position, v = s.v - p.velocity;
-	const regolith::OrbitShape o = regolith::orbit_shape(r, v, primary->get_gm(), p.axes[2]);
-	d["body"] = String(primary->get_name());
-	d["altitude"] = regolith::length(r) - primary->r_ref();
-	d["periapsis"] = o.periapsis - primary->r_ref();
-	d["apoapsis"] = o.apoapsis - primary->r_ref();
+	// about the sphere of influence it is in: a body, or the sun
+	// (inclination then against the ecliptic)
+	const RegolithBody *primary = primary_at(s.x, time_);
+	const DVec3 origin = primary ? pose_of(primary).position : sun_pos_;
+	const DVec3 origin_v = primary ? pose_of(primary).velocity : sun_vel_;
+	const DVec3 pole = primary ? pose_of(primary).axes[2] : ECLIPTIC_POLE;
+	const double radius = primary ? primary->r_ref() : SUN_RADIUS;
+	const DVec3 r = s.x - origin, v = s.v - origin_v;
+	const regolith::OrbitShape o = regolith::orbit_shape(r, v, gm_of(primary), pole);
+	d["body"] = primary ? String(primary->get_name()) : String("Sun");
+	d["altitude"] = regolith::length(r) - radius;
+	d["periapsis"] = o.periapsis - radius;
+	d["apoapsis"] = o.apoapsis - radius;
+	d["semi_major_axis"] = o.a;
+	d["eccentricity"] = o.e;
 	d["inclination"] = o.inclination / DEG;
 	d["period"] = o.period;
 	d["orbital_speed"] = regolith::length(v);
-	d["surface_speed"] = regolith::length(v - regolith::cross(p.omega, r));
+	d["surface_speed"] = primary ? regolith::length(v - regolith::cross(pose_of(primary).omega, r)) : regolith::length(v);
+	d["soi_radius"] = soi_at(primary, time_);
+	if (RegolithVessel *ves = vessel_of(Object::cast_to<Node>(p_node))) {
+		d["on_rails"] = ves->parked_;
+		if (ves->parked_) {
+			const Node *pb = ves->park_body_;
+			d["rails_body"] = pb ? String(pb->get_name()) : String("Sun");
+		}
+	}
 	return d;
+}
+
+void RegolithSystem::set_inertial_state(Node *p_node, const PackedFloat64Array &p_state) {
+	Node3D *node = Object::cast_to<Node3D>(p_node);
+	if (!node || !anchored_ || p_state.size() < 6) {
+		ERR_PRINT("set_inertial_state: unknown node, or not 6 numbers");
+		return;
+	}
+	for (int k = 0; k < 6; ++k) {
+		if (!std::isfinite(p_state[k])) {
+			ERR_PRINT("set_inertial_state: the state is not finite");
+			return;
+		}
+	}
+	if (RegolithVessel *v = vessel_of(node); v && v->parked_) {
+		unpark(v, node);
+	}
+	const State s{ DVec3(p_state[0], p_state[1], p_state[2]), DVec3(p_state[3], p_state[4], p_state[5]) };
+	RegolithBody *body = nearest_surface(s.x);
+	const double alt = regolith::length(s.x - pose_of(body).position) - body->r_ref();
+	if (RigidBody3D *rb = Object::cast_to<RigidBody3D>(node)) {
+		rb->set_linear_velocity(Vector3());
+		rb->set_angular_velocity(Vector3());
+	} else if (CharacterBody3D *cb = Object::cast_to<CharacterBody3D>(node)) {
+		cb->set_velocity(Vector3());
+	}
+	rebuild_frame(body, alt < body->get_rotating_altitude(), s, node);
+	last_focus_ = node == focus_node() ? node : last_focus_;
+}
+
+PackedFloat64Array RegolithSystem::get_body_state(const String &p_name) const {
+	PackedFloat64Array out;
+	if (!anchored_) {
+		return out;
+	}
+	State s;
+	if (p_name == String("Sun")) {
+		s = { sun_pos_, sun_vel_ };
+	} else if (const RegolithBody *b = find_body(p_name)) {
+		s = { pose_of(b).position, pose_of(b).velocity };
+	} else {
+		return out;
+	}
+	for (double v : { s.x.x, s.x.y, s.x.z, s.v.x, s.v.y, s.v.z }) {
+		out.push_back(v);
+	}
+	return out;
+}
+
+PackedFloat64Array RegolithSystem::get_body_state_at(const String &p_name, double p_time) const {
+	PackedFloat64Array out;
+	const RegolithBody *b = p_name == String("Sun") ? nullptr : find_body(p_name);
+	if (!anchored_ || (!b && p_name != String("Sun"))) {
+		return out;
+	}
+	const State s = body_state_at(b, p_time);
+	for (double v : { s.x.x, s.x.y, s.x.z, s.v.x, s.v.y, s.v.z }) {
+		out.push_back(v);
+	}
+	return out;
+}
+
+double RegolithSystem::get_soi_radius(const String &p_name) const {
+	if (p_name == String("Sun")) {
+		return INFINITY;
+	}
+	const RegolithBody *b = find_body(p_name);
+	return b && anchored_ ? soi_at(b, time_) : 0.0;
 }
 
 void RegolithSystem::put_in_orbit(Node *p_node, const String &p_body, double p_altitude, double p_inclination_deg) {

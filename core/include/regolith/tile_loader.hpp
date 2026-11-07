@@ -72,6 +72,7 @@ private:
 	HeightTilePtr make(TileKey p_key);
 	HeightTilePtr pre_thermal(TileKey p_key);
 	void relief_level(TileKey p_key, HeightTile &r_tile);
+	void stamp_craters(TileKey p_key, HeightTile &r_tile, int p_band);
 
 	const Synth *synth_;
 	std::atomic<uint64_t> make_us_[32] = {};

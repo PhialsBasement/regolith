@@ -1470,22 +1470,39 @@ void RegolithBody::draw_clipmap() {
 	rs->material_set_param(material_, "ring_geo", ring_geo);
 
 	int drawn = 0;
+	const uint64_t now = Time::get_singleton()->get_ticks_usec();
+	// a finer ring shown over a coarser one grows in over this
+	constexpr double FADE_USEC = 600000.0;
+	bool any_shown = false;
+	for (const Ring &ring : rings_) {
+		any_shown = any_shown || ring.visible;
+	}
 	for (int r = 0; r < int(rings_.size()); ++r) {
 		Ring &ring = rings_[size_t(r)];
 		const bool vis = r >= finest && r < active;
 		if (vis != ring.visible) {
 			rs->instance_set_visible(ring.instance, vis);
 			ring.visible = vis;
+			// the first frame has nothing coarser to grow from
+			ring.shown_usec = vis && any_shown ? now : 0;
 		}
 		if (!vis) {
 			continue;
 		}
 		++drawn;
+		const float fade = ring.shown_usec == 0
+				? 1.0f
+				: float(std::clamp(double(now - ring.shown_usec) / FADE_USEC, 0.0, 1.0));
+		if (fade != ring.fade) {
+			rs->instance_geometry_set_shader_parameter(ring.instance, "u_fade", fade);
+			ring.fade = fade;
+		}
 		const RingGeo &g = geo[size_t(r)];
 		const RID inst = ring.instance;
 		const bool full = r == finest;
 		if (full != ring.full) {
 			rs->instance_set_base(inst, full ? mesh_ring_full_ : mesh_ring_);
+			rs->instance_geometry_set_shader_parameter(inst, "u_fade", ring.fade);
 			ring.full = full;
 			// a new base: push everything again
 			ring.push_id = 0;

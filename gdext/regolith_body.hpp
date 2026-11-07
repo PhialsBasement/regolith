@@ -85,6 +85,9 @@ public:
 	double surface_radius(const regolith::DVec3 &p_dir, bool p_exact);
 	// Areoid (datum) radius under a direction.
 	double datum_radius(const regolith::DVec3 &p_dir) const;
+	// the lowest ground anywhere on the body (m from its centre),
+	// 0 before the first frame
+	double lowest_radius() const { return occluder_radius_; }
 	// Height over the datum at equirect cell centres (row 0
 	// north, column 0 at -180), from level p_level; any thread.
 	void height_grid(int p_w, int p_h, int p_level, std::vector<float> &r_out);
@@ -155,6 +158,8 @@ private:
 		RID instance;
 		bool visible = false;
 		bool full = false; // the finest drawn: no hole
+		uint64_t shown_usec = 0; // when it last came into view
+		float fade = 1.0f; // pushed u_fade
 		bool shadow = false;
 		int64_t cx = INT64_MIN; // centre, face0 lattice units
 		int64_t cy = INT64_MIN;
