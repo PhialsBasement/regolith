@@ -1,0 +1,72 @@
+// What lies beyond the air: stars (the Yale Bright Star
+// Catalogue), the Milky Way (NASA SVS) and the bodies, seen
+// through the air's transmittance Tv. d: view (body frame).
+
+layout(set = 0, binding = 7, std430) restrict readonly buffer Stars {
+	vec4 s[]; // per star: dir, flux (suns); colour, V mag
+} stars;
+layout(set = 0, binding = 8, std430) restrict readonly buffer Cells {
+	uint first[]; // 6 x 64 x 64 + 1 offsets into ids
+} cells;
+layout(set = 0, binding = 9, std430) restrict readonly buffer CellIds {
+	uint id[];
+} cell_ids;
+layout(set = 0, binding = 10) uniform sampler2D milky_way;
+
+const int CELLS = 64;
+
+// the cube face cell of an ICRF direction (as the C++ bins it)
+uint star_cell(vec3 d) {
+	vec3 m = abs(d);
+	uint face;
+	vec2 uv;
+	if (m.x >= m.y && m.x >= m.z) {
+		face = d.x > 0.0 ? 0u : 1u;
+		uv = d.yz / m.x;
+	} else if (m.y >= m.z) {
+		face = d.y > 0.0 ? 2u : 3u;
+		uv = d.xz / m.y;
+	} else {
+		face = d.z > 0.0 ? 4u : 5u;
+		uv = d.xy / m.z;
+	}
+	ivec2 c = clamp(ivec2((uv * 0.5 + 0.5) * float(CELLS)), ivec2(0), ivec2(CELLS - 1));
+	return face * uint(CELLS * CELLS) + uint(c.x * CELLS + c.y);
+}
+
+vec3 to_icrf(vec3 v) {
+	return vec3(dot(a.icrf_r0.xyz, v), dot(a.icrf_r1.xyz, v), dot(a.icrf_r2.xyz, v));
+}
+
+#include "regolith_sky_bodies.glsli"
+
+vec3 sky_objects(vec3 d, vec3 Tv, float sun_ang) {
+	vec3 col = vec3(0.0);
+	float scale = a.stars.y; // pi x sun illuminance x eye
+	vec3 c = normalize(to_icrf(d));
+	if (scale > 0.0 && max(Tv.r, max(Tv.g, Tv.b)) > 1e-5) {
+		// plate carree, RA 0 in the middle, RA growing leftward
+		vec2 uv = vec2(0.5 - atan(c.y, c.x) / (2.0 * PI), 0.5 - asin(clamp(c.z, -1.0, 1.0)) / PI);
+		// stored in units of stars.w suns per sr
+		col += textureLod(milky_way, uv, 0.0).rgb * (scale * a.stars.w);
+		// each star a point of its illuminance, spread over a
+		// pixel-sized gaussian
+		float sigma = max(0.8 * a.stars.x, 2e-6);
+		float k = scale / (2.0 * PI * sigma * sigma);
+		uint cell = star_cell(c);
+		for (uint i = cells.first[cell]; i < cells.first[cell + 1u]; i++) {
+			uint j = cell_ids.id[i];
+			vec4 p = stars.s[2u * j];
+			vec3 dd = c - p.xyz;
+			float q = dot(dd, dd) / (2.0 * sigma * sigma);
+			if (q < 12.0) {
+				col += stars.s[2u * j + 1u].rgb * (p.w * k * exp(-q));
+			}
+		}
+		col *= Tv;
+	}
+	if (scale > 0.0) {
+		col += sky_bodies(d, Tv);
+	}
+	return col;
+}

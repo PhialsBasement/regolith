@@ -1,5 +1,5 @@
 shader_type spatial;
-render_mode cull_disabled, diffuse_burley, specular_schlick_ggx, motion_vectors_rigid;
+render_mode cull_disabled, diffuse_burley, specular_schlick_ggx, motion_vectors_rigid, ambient_light_disabled;
 
 // Geometry: clipmap rings of a cube-sphere (RegolithBody::
 // draw_clipmap). Shading: regolith_terrain.gdshader's, with each
@@ -89,6 +89,16 @@ uniform float atmosphere = 0.0;
 uniform mat3 u_to_body = mat3(1.0); // node space -> body-fixed
 uniform vec3 sun_body = vec3(0.0, 0.0, 1.0);
 uniform vec3 dust_colour : source_color = vec3(0.62, 0.36, 0.22);
+// RegolithAtmosphere's air, per point: the sun through it (its
+// transmittance table) and the sky's light (irradiance table)
+uniform bool air_on = false;
+uniform sampler2D air_t : filter_linear, repeat_disable;
+uniform sampler2D air_e : filter_linear, repeat_disable;
+uniform vec4 air_shape = vec4(0.0); // table base, top, datum, r_ref
+uniform float sun_top = 0.0; // the sun's energy above the air
+// the airglow's light on level ground, at the eye's adaptation
+uniform vec3 night_glow = vec3(0.0);
+varying vec3 v_sun_t; // the sun's colour through the air here
 uniform vec3 rock_colour : source_color = vec3(0.30, 0.21, 0.16);
 
 varying vec2 v_g; // data units from the ring's min corner
@@ -435,6 +445,30 @@ float sun_visibility(vec3 up, vec3 ts, vec3 tt, vec3 hp, vec3 world) {
 	return smoothstep(-0.006, 0.006, asin(clamp(s_e, -1.0, 1.0)) - hz);
 }
 
+float air_sub(float u, float res) {
+	return (u + 0.5 / res) * (res / (res + 1.0));
+}
+
+// regolith_air_common.glsli's transmittance_uv, 256 x 64
+vec2 air_t_uv(float r, float mu) {
+	float bot = air_shape.x, top = air_shape.y;
+	float h2 = (top - bot) * (top + bot);
+	float big_h = sqrt(max(h2, 0.0));
+	float rho = sqrt(max((r - bot) * (r + bot), 0.0));
+	float disc = (top - r) * (top + r) + r * r * mu * mu;
+	float d = max(0.0, -r * mu + sqrt(max(disc, 0.0)));
+	float d_min = top - r;
+	float d_max = rho + big_h;
+	float x_mu = clamp((d - d_min) / max(d_max - d_min, 1e-3), 0.0, 1.0);
+	return vec2(air_sub(x_mu, 256.0), air_sub(clamp(rho / big_h, 0.0, 1.0), 64.0));
+}
+
+// regolith_air_irradiance.glsl's table, 64 x 16
+vec2 air_e_uv(float r, float mu) {
+	vec2 uv = vec2(mu * 0.5 + 0.5, (r - air_shape.x) / (air_shape.y - air_shape.x));
+	return clamp(vec2(air_sub(uv.x, 64.0), air_sub(uv.y, 16.0)), 0.0, 1.0);
+}
+
 vec4 domain(int id) {
 	return id == 1 ? u_dom1 : (id == 2 ? u_dom2 : (id == 3 ? u_dom3 : (id == 4 ? u_dom4 : u_dom0)));
 }
@@ -664,16 +698,40 @@ void fragment() {
 		vec3 sun = normalize(sun_body);
 		// wrapped Lambert: true hillshade blacks every away slope
 		float lam = clamp((dot(pert, sun) + 0.25) / 1.25, 0.0, 1.0);
-		vec3 col = map * (iso_night + (1.0 - iso_night) * lam);
-		vec3 n_curve = v_up_view;
-		float fres = pow(1.0 - clamp(dot(n_curve, VIEW), 0.0, 1.0), 2.2);
-		float day = clamp(dot(d, sun) * 0.5 + 0.5, 0.0, 1.0);
-		col *= mix(1.0, 0.45, fres * atmosphere);
-		col += vec3(0.80, 0.44, 0.24) * pow(fres, 1.7) * (0.25 + 0.75 * day) * 0.9 * atmosphere;
-		ALBEDO *= 1.0 - orbit;
-		EMISSION = col * orbit;
+		if (air_on) {
+			// lit like the rest: the map as albedo, its relief as
+			// normals; the air draws the limb
+			vec3 pert_view = normalize((VIEW_MATRIX * vec4(to_world * normalize(up + tilt * shade_vex), 0.0)).xyz);
+			ALBEDO = mix(ALBEDO, map, orbit);
+			NORMAL = normalize(mix(NORMAL, pert_view, orbit));
+		} else {
+			vec3 col = map * (iso_night + (1.0 - iso_night) * lam);
+			vec3 n_curve = v_up_view;
+			float fres = pow(1.0 - clamp(dot(n_curve, VIEW), 0.0, 1.0), 2.2);
+			float day = clamp(dot(d, sun) * 0.5 + 0.5, 0.0, 1.0);
+			col *= mix(1.0, 0.45, fres * atmosphere);
+			col += vec3(0.80, 0.44, 0.24) * pow(fres, 1.7) * (0.25 + 0.75 * day) * 0.9 * atmosphere;
+			ALBEDO *= 1.0 - orbit;
+			EMISSION = col * orbit;
+		}
 	}
 	profile_add(6, t_orbit);
+	if (air_on) {
+		// this point's own sun and sky, wherever the camera is
+		vec3 db = normalize(u_to_body * up);
+		float rr = air_shape.w + v_rho;
+		float mu = dot(db, normalize(sun_body));
+		// behind the planet's own limb: night
+		float dip = sqrt(max((rr - air_shape.z) * (rr + air_shape.z), 0.0)) / rr;
+		float day_side = smoothstep(-0.004, 0.004, mu + dip);
+		vec3 tr = textureLod(air_t, air_t_uv(rr, mu), 0.0).rgb * day_side;
+		v_sun_t = tr;
+		vec3 sky = textureLod(air_e, air_e_uv(rr, mu), 0.0).rgb;
+		// the sky above, the lit ground around, by the facing
+		float dome = 0.5 + 0.5 * dot(NORMAL, v_up_view);
+		vec3 bounce = ALBEDO * (tr * max(mu, 0.0) + sky);
+		EMISSION += ALBEDO * ((sky * dome + bounce * (1.0 - dome)) * sun_top + night_glow * dome);
+	}
 	} // the depth-pass branch above
 }
 
@@ -684,7 +742,9 @@ void fragment() {
 void light() {
 	float ndl = clamp(dot(NORMAL, LIGHT), 0.0, 1.0);
 	float direct = 1.0;
-	if (LIGHT_IS_DIRECTIONAL) {
+	// the physical air: the sun through it here, the sky as above
+	bool own_sun = air_on && LIGHT_IS_DIRECTIONAL;
+	if (LIGHT_IS_DIRECTIONAL && !own_sun) {
 		float s_e = dot(LIGHT, v_up_view);
 		direct = exp(-dust_tau / max(s_e + 0.05, 0.05));
 		// most dust scatter is forward: about 3/4 reaches the ground
@@ -703,7 +763,7 @@ void light() {
 		float fd90m1 = 2.0 * ldh * ldh * r - 0.5;
 		float fl = 1.0 + fd90m1 * pow(1.0 - ndl, 5.0);
 		float fv = 1.0 + fd90m1 * pow(1.0 - ndv, 5.0);
-		vec3 lit = LIGHT_COLOR * ATTENUATION * vis;
+		vec3 lit = own_sun ? sun_top * PI * v_sun_t * ATTENUATION * v_sun_vis : LIGHT_COLOR * ATTENUATION * vis;
 		DIFFUSE_LIGHT += lit * fl * fv * ndl / PI;
 		// dielectric f0 from the material's specular (fragment);
 		// SPECULAR_AMOUNT here is the light's own multiplier

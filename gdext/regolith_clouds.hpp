@@ -131,6 +131,8 @@ public:
 	NodePath get_weather_path() const { return weather_path_; }
 	void set_sun_path(const NodePath &p_v) { sun_path_ = p_v; }
 	NodePath get_sun_path() const { return sun_path_; }
+	void set_atmosphere_path(const NodePath &p_v) { atmosphere_path_ = p_v; }
+	NodePath get_atmosphere_path() const { return atmosphere_path_; }
 
 	void set_density(double p_v) { look_.density = p_v; }
 	double get_density() const { return look_.density; }
@@ -154,7 +156,7 @@ private:
 	void attach(Camera3D *p_cam);
 	void detach();
 
-	NodePath system_path_, body_path_, weather_path_, sun_path_;
+	NodePath system_path_, body_path_, weather_path_, sun_path_, atmosphere_path_;
 	RegolithCloudEffect::Look look_;
 	Ref<RegolithCloudEffect> effect_;
 	Camera3D *attached_ = nullptr;

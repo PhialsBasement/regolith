@@ -2,50 +2,443 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numbers>
 
 #include <godot_cpp/classes/camera3d.hpp>
+#include <godot_cpp/classes/compositor.hpp>
 #include <godot_cpp/classes/directional_light3d.hpp>
 #include <godot_cpp/classes/engine.hpp>
 #include <godot_cpp/classes/environment.hpp>
+#include <godot_cpp/classes/rd_texture_format.hpp>
+#include <godot_cpp/classes/rd_texture_view.hpp>
+#include <godot_cpp/classes/render_scene_buffers_rd.hpp>
+#include <godot_cpp/classes/image.hpp>
+#include <godot_cpp/classes/os.hpp>
+#include <godot_cpp/variant/utility_functions.hpp>
 #include <godot_cpp/classes/project_settings.hpp>
+#include <godot_cpp/classes/scene_tree.hpp>
+#include <godot_cpp/classes/render_scene_data.hpp>
+#include <godot_cpp/classes/resource_loader.hpp>
 #include <godot_cpp/classes/rendering_server.hpp>
-#include <godot_cpp/classes/shader.hpp>
-#include <godot_cpp/classes/sky.hpp>
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/classes/world3d.hpp>
 #include <godot_cpp/core/class_db.hpp>
 
 #include "convert.hpp"
+#include "rd_util.hpp"
+#include "regolith/body_presets.hpp"
 #include "regolith/ephemeris.hpp"
 #include "regolith_body.hpp"
 #include "regolith_system.hpp"
 
 using namespace godot;
+using namespace godot::rdu;
+using regolith::AirModel;
 using regolith::DVec3;
+using regolith::RGB;
 
 namespace {
 
-constexpr double SCALE_HEIGHT = 11100.0; // m
-constexpr double THIN_START = 12000.0; // full sky below this
+constexpr double AU = 1.495978707e11;
+constexpr double SUN_RADIUS = 6.957e8;
+// a daylit view's mean luminance: the eye's set point
+constexpr double VIEW_KEY = 0.1;
+// a sunlit disk's face at the eye's cap: bright, short of clipping
+constexpr double DISK_WHITE = 0.5;
+constexpr int T_W = 256, T_H = 64, MS_N = 32, SV_W = 192, SV_H = 108, AP_N = 32, E_W = 64, E_H = 16;
+// the tables reach this far under the datum: under any ground
+constexpr double TABLE_DEPTH = 15000.0;
 
-double sstep(double p_a, double p_b, double p_x) {
-	const double t = std::clamp((p_x - p_a) / (p_b - p_a), 0.0, 1.0);
-	return t * t * (3.0 - 2.0 * t);
+bool same_rgb(const RGB &p_a, const RGB &p_b) {
+	return p_a[0] == p_b[0] && p_a[1] == p_b[1] && p_a[2] == p_b[2];
 }
 
-DVec3 from_icrf(const DVec3 p_axes[3], const DVec3 &p_v) {
-	return { regolith::dot(p_axes[0], p_v), regolith::dot(p_axes[1], p_v), regolith::dot(p_axes[2], p_v) };
+// the tables only depend on these (not the ground under the
+// camera); the datum may drift 50 m
+bool same_air(const AirModel &p_a, const AirModel &p_b) {
+	return std::fabs(p_a.top - p_b.top) < 50.0 && std::fabs(p_a.datum - p_b.datum) < 50.0 &&
+			same_rgb(p_a.rayleigh, p_b.rayleigh) && p_a.rayleigh_height == p_b.rayleigh_height &&
+			same_rgb(p_a.mie_scattering, p_b.mie_scattering) && same_rgb(p_a.mie_absorption, p_b.mie_absorption) &&
+			p_a.mie_height == p_b.mie_height && same_rgb(p_a.mie_g, p_b.mie_g) && same_rgb(p_a.ozone, p_b.ozone) &&
+			p_a.ozone_center == p_b.ozone_center && p_a.ozone_width == p_b.ozone_width &&
+			same_rgb(p_a.ground_albedo, p_b.ground_albedo);
 }
 
-Vector3 dir_of(const Basis &p_icrf_to_render, const DVec3 &p_icrf) {
-	return p_icrf_to_render.xform(regolith::to_v(regolith::normalize(p_icrf))).normalized();
+void push_rgb(std::vector<float> &r_v, const RGB &p_c, double p_w) {
+	push4(r_v, p_c[0], p_c[1], p_c[2], p_w);
+}
+
+Vector3 to_v3(const RGB &p_c, double p_k) {
+	return Vector3(real_t(p_c[0] * p_k), real_t(p_c[1] * p_k), real_t(p_c[2] * p_k));
+}
+
+RGB from_v3(const Vector3 &p_v, double p_k) {
+	return { double(p_v.x) * p_k, double(p_v.y) * p_k, double(p_v.z) * p_k };
 }
 
 } // namespace
 
+// The effect.
+
+RegolithAirEffect::RegolithAirEffect() {
+	set_effect_callback_type(EFFECT_CALLBACK_TYPE_POST_SKY);
+}
+
+RegolithAirEffect::~RegolithAirEffect() {
+	free_all();
+}
+
+void RegolithAirEffect::_bind_methods() {
+	ClassDB::bind_method(D_METHOD("_on_ambient", "data"), &RegolithAirEffect::on_ambient);
+}
+
+void RegolithAirEffect::set_frame(const Frame &p_frame) {
+	std::lock_guard<std::mutex> guard(mutex_);
+	frame_ = p_frame;
+}
+
+Vector3 RegolithAirEffect::ambient_mean() const {
+	std::lock_guard<std::mutex> guard(mutex_);
+	return amb_mean_;
+}
+
+Vector3 RegolithAirEffect::ambient_up() const {
+	std::lock_guard<std::mutex> guard(mutex_);
+	return amb_up_;
+}
+
+bool RegolithAirEffect::tables(RID &r_t, RID &r_e, double &r_base, double &r_top, double &r_datum) const {
+	std::lock_guard<std::mutex> guard(mutex_);
+	if (!tables_ready_) {
+		return false;
+	}
+	r_t = t_lut_;
+	r_e = e_lut_;
+	r_base = built_base_;
+	r_top = built_air_.top;
+	r_datum = built_air_.datum;
+	return true;
+}
+
+double RegolithAirEffect::view_luminance() const {
+	std::lock_guard<std::mutex> guard(mutex_);
+	return view_lum_;
+}
+
+void RegolithAirEffect::on_ambient(const PackedByteArray &p_data) {
+	if (p_data.size() >= 48) {
+		const float *v = reinterpret_cast<const float *>(p_data.ptr());
+		std::lock_guard<std::mutex> guard(mutex_);
+		amb_mean_ = Vector3(v[0], v[1], v[2]);
+		amb_up_ = Vector3(v[4], v[5], v[6]);
+		view_lum_ = v[8];
+	}
+	reading_ = false;
+}
+
+void RegolithAirEffect::free_all() {
+	if (!rd_) {
+		return;
+	}
+	for (RID *r : { &t_pipe_, &ms_pipe_, &sv_pipe_, &ap_pipe_, &comp_pipe_, &amb_pipe_, &t_shader_, &ms_shader_,
+				 &sv_shader_, &ap_shader_, &comp_shader_, &amb_shader_, &lin_clamp_, &nearest_, &params_, &t_lut_,
+				 &ms_lut_, &sv_lut_, &ap_lut_, &amb_tex_, &e_pipe_, &e_shader_, &e_lut_, &stars_buf_, &cells_buf_, &ids_buf_, &mw_tex_, &mw_sampler_, &bodies_buf_ }) {
+		if (r->is_valid()) {
+			rd_->free_rid(*r);
+			*r = RID();
+		}
+	}
+	rd_ = nullptr;
+}
+
+bool RegolithAirEffect::ensure(RenderingDevice *p_rd) {
+	if (failed_) {
+		return false;
+	}
+	if (rd_ == p_rd && comp_pipe_.is_valid()) {
+		return true;
+	}
+	rd_ = p_rd;
+	const char *names[7] = { "regolith_air_transmittance", "regolith_air_multiscatter", "regolith_air_skyview",
+		"regolith_air_aerial", "regolith_air_composite", "regolith_air_ambient", "regolith_air_irradiance" };
+	RID *shaders[7] = { &t_shader_, &ms_shader_, &sv_shader_, &ap_shader_, &comp_shader_, &amb_shader_, &e_shader_ };
+	RID *pipes[7] = { &t_pipe_, &ms_pipe_, &sv_pipe_, &ap_pipe_, &comp_pipe_, &amb_pipe_, &e_pipe_ };
+	for (int k = 0; k < 7; ++k) {
+		*shaders[k] = compile(rd_, names[k]);
+		if (!shaders[k]->is_valid()) {
+			failed_ = true;
+			return false;
+		}
+		*pipes[k] = rd_->compute_pipeline_create(*shaders[k]);
+	}
+	lin_clamp_ = make_sampler(rd_, true, RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE, RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE);
+	nearest_ = make_sampler(rd_, false, RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE, RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE);
+	params_ = rd_->uniform_buffer_create(512);
+	t_lut_ = make_storage(rd_, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, T_W, T_H, 1);
+	ms_lut_ = make_storage(rd_, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, MS_N, MS_N, 1);
+	sv_lut_ = make_storage(rd_, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, SV_W, SV_H, 1);
+	ap_lut_ = make_storage(rd_, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, AP_N, AP_N, AP_N);
+	e_lut_ = make_storage(rd_, RD::DATA_FORMAT_R16G16B16A16_SFLOAT, E_W, E_H, 1);
+	{
+		// read back each frame: copyable
+		Ref<RDTextureFormat> f;
+		f.instantiate();
+		f->set_format(RD::DATA_FORMAT_R32G32B32A32_SFLOAT);
+		f->set_width(3);
+		f->set_height(1);
+		f->set_usage_bits(RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_CAN_COPY_FROM_BIT);
+		Ref<RDTextureView> v;
+		v.instantiate();
+		amb_tex_ = rd_->texture_create(f, v);
+	}
+	load_sky();
+	bodies_buf_ = rd_->storage_buffer_create(MAX_BODIES * 48);
+	built_ = false;
+	return true;
+}
+
+namespace {
+
+constexpr int CELLS = 64;
+
+// the cube face cell of an ICRF direction, as the shader finds it
+uint32_t star_cell(const DVec3 &p_d) {
+	const double mx = std::fabs(p_d.x), my = std::fabs(p_d.y), mz = std::fabs(p_d.z);
+	uint32_t face;
+	double u, v;
+	if (mx >= my && mx >= mz) {
+		face = p_d.x > 0.0 ? 0 : 1;
+		u = p_d.y / mx;
+		v = p_d.z / mx;
+	} else if (my >= mz) {
+		face = p_d.y > 0.0 ? 2 : 3;
+		u = p_d.x / my;
+		v = p_d.z / my;
+	} else {
+		face = p_d.z > 0.0 ? 4 : 5;
+		u = p_d.x / mz;
+		v = p_d.y / mz;
+	}
+	const int cu = std::clamp(int((u * 0.5 + 0.5) * CELLS), 0, CELLS - 1);
+	const int cv = std::clamp(int((v * 0.5 + 0.5) * CELLS), 0, CELLS - 1);
+	return face * CELLS * CELLS + uint32_t(cu * CELLS + cv);
+}
+
+} // namespace
+
+void RegolithAirEffect::load_sky() {
+	std::vector<float> star_data;
+	std::vector<std::vector<uint32_t>> bins(size_t(6 * CELLS * CELLS));
+	Ref<Image> si = ResourceLoader::get_singleton()->load("res://addons/regolith/regolith_stars.res");
+	if (si.is_valid()) {
+		const int n = int(si->get_meta("count", 0));
+		// each star in every cell within its glow's reach
+		const double reach = 0.35 * std::numbers::pi / 180.0;
+		for (int i = 0; i < n; ++i) {
+			const Color p = si->get_pixel((2 * i) % si->get_width(), (2 * i) / si->get_width());
+			const Color c = si->get_pixel((2 * i + 1) % si->get_width(), (2 * i + 1) / si->get_width());
+			star_data.insert(star_data.end(), { p.r, p.g, p.b, p.a, c.r, c.g, c.b, c.a });
+			const DVec3 d(p.r, p.g, p.b);
+			const DVec3 e = regolith::normalize(regolith::cross(d, std::fabs(d.z) < 0.9 ? DVec3(0, 0, 1) : DVec3(1, 0, 0)));
+			const DVec3 f = regolith::cross(d, e);
+			for (int a = -1; a <= 1; ++a) {
+				for (int b = -1; b <= 1; ++b) {
+					const uint32_t cell = star_cell(regolith::normalize(d + e * (a * reach) + f * (b * reach)));
+					std::vector<uint32_t> &bin = bins[cell];
+					if (bin.empty() || bin.back() != uint32_t(i)) {
+						if (std::find(bin.begin(), bin.end(), uint32_t(i)) == bin.end()) {
+							bin.push_back(uint32_t(i));
+						}
+					}
+				}
+			}
+		}
+	}
+	std::vector<uint32_t> first, ids;
+	first.reserve(bins.size() + 1);
+	for (const std::vector<uint32_t> &bin : bins) {
+		first.push_back(uint32_t(ids.size()));
+		ids.insert(ids.end(), bin.begin(), bin.end());
+	}
+	first.push_back(uint32_t(ids.size()));
+	// storage buffers may not be empty
+	star_data.resize(std::max<size_t>(star_data.size(), 8), 0.0f);
+	ids.resize(std::max<size_t>(ids.size(), 1), 0u);
+	stars_buf_ = rd_->storage_buffer_create(uint32_t(star_data.size() * 4), bytes_of(star_data.data(), star_data.size() * 4));
+	cells_buf_ = rd_->storage_buffer_create(uint32_t(first.size() * 4), bytes_of(first.data(), first.size() * 4));
+	ids_buf_ = rd_->storage_buffer_create(uint32_t(ids.size() * 4), bytes_of(ids.data(), ids.size() * 4));
+
+	Ref<Image> mw = ResourceLoader::get_singleton()->load("res://addons/regolith/regolith_milkyway.res");
+	if (mw.is_valid() && mw->get_format() == Image::FORMAT_RGBE9995) {
+		mw_unit_ = double(mw->get_meta("unit", 1.0));
+		mw_tex_ = make_texture(rd_, RD::DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32, mw->get_width(), mw->get_height(), 1,
+				mw->get_data());
+	} else {
+		const uint32_t black = 0;
+		mw_tex_ = make_texture(rd_, RD::DATA_FORMAT_E5B9G9R9_UFLOAT_PACK32, 1, 1, 1, bytes_of(&black, 4));
+	}
+	mw_sampler_ = make_sampler(rd_, true, RD::SAMPLER_REPEAT_MODE_REPEAT, RD::SAMPLER_REPEAT_MODE_CLAMP_TO_EDGE);
+}
+
+void RegolithAirEffect::_render_callback(int32_t p_type, RenderData *p_data) {
+	if (p_type != EFFECT_CALLBACK_TYPE_POST_SKY || !p_data) {
+		return;
+	}
+	RD *rd = RenderingServer::get_singleton()->get_rendering_device();
+	Ref<RenderSceneBuffersRD> buffers = p_data->get_render_scene_buffers();
+	RenderSceneData *scene = p_data->get_render_scene_data();
+	if (!rd || buffers.is_null() || !scene || !ensure(rd)) {
+		return;
+	}
+	Frame f;
+	{
+		std::lock_guard<std::mutex> guard(mutex_);
+		f = frame_;
+	}
+	if (!f.valid) {
+		return;
+	}
+	const Vector2i size = buffers->get_internal_size();
+	if (size.x <= 0 || size.y <= 0) {
+		return;
+	}
+	AirModel air = f.air;
+	if (!f.has_air) {
+		// no medium: only the ground sphere matters
+		air = AirModel();
+		air.bottom = f.air.bottom;
+		air.datum = f.air.datum;
+		air.top = f.air.bottom + 1.0;
+		air.ground_albedo = f.air.ground_albedo;
+		air.ozone_width = 1.0;
+	}
+	const bool rebuild = !built_ || !same_air(air, built_air_);
+	const double r = regolith::length(f.eye);
+	const double top = air.top, bot = air.bottom;
+	const double inside = std::sqrt(std::max((top - r) * (top + r), 0.0));
+	const double range = r < top ? inside + std::sqrt((top - bot) * (top + bot)) : r + top;
+	const Projection proj = scene->get_cam_projection();
+	const Basis cam = scene->get_cam_transform().basis;
+
+	std::vector<float> u;
+	u.reserve(128);
+	push4(u, bot, top, r, f.has_air ? 1.0 : 0.0);
+	push_rgb(u, air.rayleigh, air.rayleigh_height);
+	push_rgb(u, air.mie_scattering, air.mie_height);
+	push_rgb(u, air.mie_absorption, 0.0);
+	push_rgb(u, air.mie_g, 0.0);
+	push_rgb(u, air.ozone, air.ozone_center);
+	const double datum = air.datum > 0.0 ? air.datum : bot;
+	// the tables' base: fixed while they stand, under all ground
+	const double base = rebuild ? datum - TABLE_DEPTH : built_base_;
+	push4(u, air.ozone_width, f.sun_radius, datum, base);
+	push_rgb(u, air.ground_albedo, 0.0);
+	push3(u, f.eye, range);
+	push3(u, f.sun, f.sun_energy);
+	for (int k = 0; k < 3; ++k) {
+		push3(u, f.to_body[k], 0.0);
+	}
+	for (int k = 0; k < 3; ++k) {
+		push3(u, cam.get_column(k), 0.0);
+	}
+	push_mat(u, proj.inverse());
+	push4(u, size.x, size.y, f.exposure, f.airglow);
+	for (int k = 0; k < 3; ++k) {
+		push3(u, f.body_to_icrf[k], 0.0);
+	}
+	// one pixel's angle: the stars' point spread
+	const double pixel_angle = 2.0 / (std::fabs(double(proj.columns[1].y)) * size.y);
+	const int n_bodies = std::min(int(f.bodies.size() / 12), int(MAX_BODIES));
+	push4(u, pixel_angle, f.star_scale, n_bodies, mw_unit_);
+	push4(u, f.glow_color.r, f.glow_color.g, f.glow_color.b, 0.0);
+	rd_->buffer_update(params_, 0, uint32_t(u.size() * 4), bytes_of(u.data(), u.size() * 4));
+	if (n_bodies > 0) {
+		rd_->buffer_update(bodies_buf_, 0, uint32_t(n_bodies * 48), bytes_of(f.bodies.data(), size_t(n_bodies) * 48));
+	}
+
+	const Ref<RDUniform> ubo = uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_);
+	const RID depth = buffers->get_depth_layer(0);
+	const int64_t list = rd_->compute_list_begin();
+	auto pass = [&](RID p_pipe, RID p_shader, const std::vector<Ref<RDUniform>> &p_u, uint32_t p_x, uint32_t p_y,
+						uint32_t p_z) {
+		std::vector<Ref<RDUniform>> all = { ubo };
+		all.insert(all.end(), p_u.begin(), p_u.end());
+		rd_->compute_list_bind_compute_pipeline(list, p_pipe);
+		rd_->compute_list_bind_uniform_set(list, set_of(p_shader, all), 0);
+		rd_->compute_list_dispatch(list, p_x, p_y, p_z);
+		rd_->compute_list_add_barrier(list);
+	};
+	if (rebuild) {
+		pass(t_pipe_, t_shader_, { image(1, t_lut_) }, groups(T_W, 8), groups(T_H, 8), 1);
+		pass(ms_pipe_, ms_shader_, { image(1, ms_lut_), sampled(2, lin_clamp_, t_lut_) }, MS_N, MS_N, 1);
+		pass(e_pipe_, e_shader_, { image(1, e_lut_), sampled(2, lin_clamp_, t_lut_), sampled(3, lin_clamp_, ms_lut_) },
+				E_W, E_H, 1);
+		{
+			std::lock_guard<std::mutex> guard(mutex_);
+			built_air_ = air;
+			built_base_ = base;
+			tables_ready_ = true;
+		}
+		built_ = true;
+	}
+	if (f.has_air) {
+		pass(sv_pipe_, sv_shader_, { image(1, sv_lut_), sampled(2, lin_clamp_, t_lut_), sampled(3, lin_clamp_, ms_lut_) },
+				groups(SV_W, 8), groups(SV_H, 8), 1);
+		pass(ap_pipe_, ap_shader_, { image(1, ap_lut_), sampled(2, lin_clamp_, t_lut_), sampled(3, lin_clamp_, ms_lut_) },
+				groups(AP_N, 8), groups(AP_N, 8), 1);
+	}
+	pass(comp_pipe_, comp_shader_,
+			{ image(1, buffers->get_color_layer(0)), sampled(2, nearest_, depth), sampled(3, lin_clamp_, t_lut_),
+					sampled(4, lin_clamp_, ms_lut_), sampled(5, lin_clamp_, sv_lut_), sampled(6, lin_clamp_, ap_lut_),
+					uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, stars_buf_),
+					uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, cells_buf_),
+					uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, ids_buf_), sampled(10, mw_sampler_, mw_tex_),
+					uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, bodies_buf_) },
+			groups(size.x, 8), groups(size.y, 8), 1);
+	pass(amb_pipe_, amb_shader_,
+			{ image(1, amb_tex_), sampled(2, lin_clamp_, t_lut_), sampled(3, lin_clamp_, sv_lut_),
+					sampled(4, lin_clamp_, buffers->get_color_layer(0)), sampled(5, nearest_, depth) },
+			1, 1, 1);
+	rd_->compute_list_end();
+	// REGOLITH_AIR_DUMP: count bad texels per table, once
+	static int dump_frame = 0;
+	if (!OS::get_singleton()->get_environment("REGOLITH_AIR_DUMP").is_empty() && ++dump_frame == 30) {
+		auto half = [](uint16_t p_h) {
+			const uint32_t e = (p_h >> 10) & 31, m = p_h & 1023;
+			return e == 31 ? (m ? NAN : INFINITY) : std::ldexp(double(e ? m | 1024 : m), int(e ? e : 1) - 25);
+		};
+		const char *names[5] = { "transmittance", "multiscatter", "skyview", "aerial", "irradiance" };
+		RID texs[5] = { t_lut_, ms_lut_, sv_lut_, ap_lut_, e_lut_ };
+		for (int k = 0; k < 5; ++k) {
+			const PackedByteArray b = rd_->texture_get_data(texs[k], 0);
+			const uint16_t *h = reinterpret_cast<const uint16_t *>(b.ptr());
+			int64_t bad = 0, n = b.size() / 2;
+			double hi = 0.0;
+			for (int64_t i = 0; i < n; ++i) {
+				const double v = half(h[i]);
+				if (!std::isfinite(v)) {
+					++bad;
+				} else {
+					hi = std::max(hi, v);
+				}
+			}
+			UtilityFunctions::print("AIRDUMP ", names[k], ": ", bad, " bad of ", n, ", max ", hi, ", base ", base,
+					", datum ", datum, ", bottom ", bot, ", top ", top);
+		}
+	}
+	if (!reading_.exchange(true)) {
+		if (rd_->texture_get_data_async(amb_tex_, 0, Callable(this, "_on_ambient")) != OK) {
+			reading_ = false;
+		}
+	}
+}
+
+// The node.
+
 RegolithAtmosphere::RegolithAtmosphere() {
 	// After RegolithSystem (-100) has placed the sun.
 	set_process_priority(-90);
+	set_air("Mars");
 }
 
 void RegolithAtmosphere::_bind_methods() {
@@ -57,48 +450,314 @@ void RegolithAtmosphere::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_sun_path"), &RegolithAtmosphere::get_sun_path);
 	ClassDB::bind_method(D_METHOD("set_deimos_orbit_path", "path"), &RegolithAtmosphere::set_deimos_orbit_path);
 	ClassDB::bind_method(D_METHOD("get_deimos_orbit_path"), &RegolithAtmosphere::get_deimos_orbit_path);
+	ClassDB::bind_method(D_METHOD("set_moons", "moons"), &RegolithAtmosphere::set_moons);
+	ClassDB::bind_method(D_METHOD("get_moons"), &RegolithAtmosphere::get_moons);
+	ClassDB::bind_method(D_METHOD("set_air", "preset"), &RegolithAtmosphere::set_air);
+	ClassDB::bind_method(D_METHOD("get_air"), &RegolithAtmosphere::get_air);
 	ClassDB::bind_method(D_METHOD("set_dust_tau", "tau"), &RegolithAtmosphere::set_dust_tau);
 	ClassDB::bind_method(D_METHOD("get_dust_tau"), &RegolithAtmosphere::get_dust_tau);
 	ClassDB::bind_method(D_METHOD("set_sun_energy", "energy"), &RegolithAtmosphere::set_sun_energy);
 	ClassDB::bind_method(D_METHOD("get_sun_energy"), &RegolithAtmosphere::get_sun_energy);
+	ClassDB::bind_method(D_METHOD("set_exposure", "exposure"), &RegolithAtmosphere::set_exposure);
+	ClassDB::bind_method(D_METHOD("get_exposure"), &RegolithAtmosphere::get_exposure);
+	ClassDB::bind_method(D_METHOD("set_airglow", "radiance"), &RegolithAtmosphere::set_airglow);
+	ClassDB::bind_method(D_METHOD("get_airglow"), &RegolithAtmosphere::get_airglow);
+	ClassDB::bind_method(D_METHOD("set_air_value", "index", "value"), &RegolithAtmosphere::set_air_value);
+	ClassDB::bind_method(D_METHOD("get_air_value", "index"), &RegolithAtmosphere::get_air_value);
 	ClassDB::bind_method(D_METHOD("set_fog_density", "density"), &RegolithAtmosphere::set_fog_density);
 	ClassDB::bind_method(D_METHOD("get_fog_density"), &RegolithAtmosphere::get_fog_density);
 	ClassDB::bind_method(D_METHOD("get_sky_thin"), &RegolithAtmosphere::get_sky_thin);
 	ClassDB::bind_method(D_METHOD("get_terrain_sun"), &RegolithAtmosphere::get_terrain_sun);
+	ClassDB::bind_method(D_METHOD("get_sun_color"), &RegolithAtmosphere::get_sun_color);
+	ClassDB::bind_method(D_METHOD("get_haze"), &RegolithAtmosphere::get_haze);
+	ClassDB::bind_method(D_METHOD("get_sky_direction", "name", "body_frame"), &RegolithAtmosphere::get_sky_direction,
+			DEFVAL(false));
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "system"), "set_system_path", "get_system_path");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "body"), "set_body_path", "get_body_path");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "sun"), "set_sun_path", "get_sun_path");
-	ADD_PROPERTY(PropertyInfo(Variant::STRING, "deimos_orbit_path", PROPERTY_HINT_FILE, "*.rge"), "set_deimos_orbit_path",
-			"get_deimos_orbit_path");
+	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "moons"), "set_moons", "get_moons");
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "deimos_orbit_path", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE),
+			"set_deimos_orbit_path", "get_deimos_orbit_path");
+	// the preset first: values after it in a scene override it
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "air", PROPERTY_HINT_ENUM, "None,Mars,Earth,Custom"), "set_air", "get_air");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "dust_tau"), "set_dust_tau", "get_dust_tau");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sun_energy"), "set_sun_energy", "get_sun_energy");
-	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "fog_density"), "set_fog_density", "get_fog_density");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "exposure"), "set_exposure", "get_exposure");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "airglow"), "set_airglow", "get_airglow");
+	ClassDB::bind_method(D_METHOD("set_airglow_color", "color"), &RegolithAtmosphere::set_airglow_color);
+	ClassDB::bind_method(D_METHOD("get_airglow_color"), &RegolithAtmosphere::get_airglow_color);
+	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "airglow_color"), "set_airglow_color", "get_airglow_color");
+	ClassDB::bind_method(D_METHOD("set_night_vision", "factor"), &RegolithAtmosphere::set_night_vision);
+	ClassDB::bind_method(D_METHOD("get_night_vision"), &RegolithAtmosphere::get_night_vision);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "night_vision", PROPERTY_HINT_RANGE, "1,10000000,1,exp"), "set_night_vision",
+			"get_night_vision");
+	ClassDB::bind_method(D_METHOD("get_eye_gain"), &RegolithAtmosphere::get_eye_gain);
+	ClassDB::bind_method(D_METHOD("get_view_luminance"), &RegolithAtmosphere::get_view_luminance);
+	ADD_GROUP("Air (per km, heights in km)", "air_");
+	struct P {
+		const char *name;
+		Variant::Type type;
+	};
+	const P props[11] = { { "air_height", Variant::FLOAT }, { "air_rayleigh", Variant::VECTOR3 },
+		{ "air_rayleigh_height", Variant::FLOAT }, { "air_mie_scattering", Variant::VECTOR3 },
+		{ "air_mie_absorption", Variant::VECTOR3 }, { "air_mie_height", Variant::FLOAT },
+		{ "air_mie_g", Variant::VECTOR3 }, { "air_ozone", Variant::VECTOR3 }, { "air_ozone_center", Variant::FLOAT },
+		{ "air_ozone_width", Variant::FLOAT }, { "air_ground_albedo", Variant::COLOR } };
+	for (int k = 0; k < 11; ++k) {
+		ADD_PROPERTYI(PropertyInfo(props[k].type, props[k].name), "set_air_value", "get_air_value", k);
+	}
+	ADD_GROUP("", "");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "fog_density", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NO_EDITOR),
+			"set_fog_density", "get_fog_density");
+}
+
+void RegolithAtmosphere::set_moons(const PackedStringArray &p_v) {
+	moons_ = p_v;
+	moons_loaded_ = false;
+}
+
+void RegolithAtmosphere::set_deimos_orbit_path(const String &p_v) {
+	if (!p_v.is_empty()) {
+		moons_.push_back(String("Deimos:") + p_v);
+		moons_loaded_ = false;
+	}
+}
+
+std::vector<float> RegolithAtmosphere::sky_bodies(RegolithSystem *p_sys, RegolithBody *p_body, const DVec3 &p_cam) {
+	const double t = p_sys->get_time();
+	if (!moons_loaded_) {
+		moons_loaded_ = true;
+		moon_orbits_.clear();
+		for (const String &m : moons_) {
+			Moon moon;
+			moon.preset = m.get_slice(":", 0);
+			const String path = m.substr(moon.preset.length() + 1);
+			if (moon.orbit.open(ProjectSettings::get_singleton()->globalize_path(path).utf8().get_data())) {
+				moon_orbits_.push_back(std::move(moon));
+			} else {
+				ERR_PRINT("RegolithAtmosphere: cannot open moon orbit " + path);
+			}
+		}
+	}
+	// bodies drawn as terrain need no light of their own
+	std::vector<String> drawn;
+	TypedArray<Node> found = get_tree()->get_nodes_in_group("regolith_body");
+	for (int i = 0; i < found.size(); ++i) {
+		if (RegolithBody *b = Object::cast_to<RegolithBody>(found[i])) {
+			drawn.push_back(b->get_preset());
+			drawn.push_back(String(b->get_name()));
+		}
+	}
+	const RegolithBody *central = p_sys->central();
+	const String home = central ? central->get_preset() : String();
+	const DVec3 central_helio = p_sys->central_heliocentric(t) * AU;
+	const RegolithSystem::Pose &bp = p_sys->pose_of(p_body);
+	std::vector<float> out;
+	sky_dirs_.clear();
+	auto add = [&](const regolith::BodyPreset &p_b, const DVec3 &p_helio) {
+		if (out.size() / 12 >= size_t(RegolithAirEffect::MAX_BODIES) ||
+				std::find(drawn.begin(), drawn.end(), String(p_b.name.c_str())) != drawn.end()) {
+			return;
+		}
+		const DVec3 rel = p_helio - p_cam;
+		const double dist = regolith::length(rel);
+		if (dist < p_b.radius * 1.5) {
+			return; // on it, or inside
+		}
+		const DVec3 dir = regolith::normalize(rel);
+		sky_dirs_.push_back({ String(p_b.name.c_str()), dir });
+		const DVec3 sun = regolith::normalize(p_helio * -1.0);
+		auto body_frame = [&](const DVec3 &p_v) {
+			return DVec3(regolith::dot(p_v, bp.axes[0]), regolith::dot(p_v, bp.axes[1]), regolith::dot(p_v, bp.axes[2]));
+		};
+		const DVec3 d = body_frame(dir), s = body_frame(sun);
+		const double au = regolith::length(p_helio) / AU;
+		const double lum = 0.2126 * p_b.tint[0] + 0.7152 * p_b.tint[1] + 0.0722 * p_b.tint[2];
+		out.insert(out.end(), { float(d.x), float(d.y), float(d.z), float(std::asin(std::min(p_b.radius / dist, 1.0))),
+									  float(s.x), float(s.y), float(s.z), float(1.0 / (au * au)),
+									  float(p_b.albedo * p_b.tint[0] / lum), float(p_b.albedo * p_b.tint[1] / lum),
+									  float(p_b.albedo * p_b.tint[2] / lum), 0.0f });
+	};
+	for (const regolith::BodyPreset &b : regolith::body_presets()) {
+		if (b.heliocentric && b.name != std::string(home.utf8().get_data())) {
+			DVec3 helio = regolith::heliocentric(b.orbit, t) * AU;
+			if (b.name == "Earth") {
+				// the barycentre less the Moon's share
+				helio = helio - regolith::moon_geocentric(t) * (1.0 / 82.30);
+			}
+			add(b, helio);
+		}
+	}
+	if (home != "Moon" && home != "Earth") {
+		const regolith::BodyPreset *moon = regolith::find_body_preset("Moon");
+		const DVec3 earth = regolith::heliocentric(regolith::EARTH_ORBIT, t) * AU - regolith::moon_geocentric(t) * (1.0 / 82.30);
+		add(*moon, earth + regolith::moon_geocentric(t));
+	}
+	for (const Moon &m : moon_orbits_) {
+		if (const regolith::BodyPreset *b = regolith::find_body_preset(m.preset.utf8().get_data())) {
+			add(*b, central_helio + m.orbit.state(t).position);
+		}
+	}
+	return out;
+}
+
+Vector3 RegolithAtmosphere::get_sky_direction(const String &p_name, bool p_body_frame) const {
+	RegolithSystem *sys = Object::cast_to<RegolithSystem>(get_node_or_null(system_path_));
+	RegolithBody *body = Object::cast_to<RegolithBody>(get_node_or_null(body_path_));
+	if (!sys || !body) {
+		return Vector3();
+	}
+	DVec3 icrf;
+	bool found = false;
+	if (p_name == "Galactic Center") {
+		// Sagittarius A*: RA 266.405, Dec -29.008 (ICRF)
+		const double ra = 266.405 * std::numbers::pi / 180.0, dec = -29.008 * std::numbers::pi / 180.0;
+		icrf = DVec3(std::cos(dec) * std::cos(ra), std::cos(dec) * std::sin(ra), std::sin(dec));
+		found = true;
+	} else if (p_name == "Milky Way") {
+		// the galactic plane's point farthest from the sun: the
+		// band's part best seen at night now
+		const DVec3 n = regolith::galactic_pole();
+		const DVec3 away = regolith::normalize(sys->central_heliocentric(sys->get_time()));
+		icrf = regolith::normalize(away - n * regolith::dot(away, n));
+		found = true;
+	}
+	for (const std::pair<String, DVec3> &e : sky_dirs_) {
+		if (e.first == p_name) {
+			icrf = e.second;
+			found = true;
+		}
+	}
+	if (!found) {
+		return Vector3();
+	}
+	if (p_body_frame) {
+		const RegolithSystem::Pose &bp = sys->pose_of(body);
+		return regolith::to_v(DVec3(regolith::dot(icrf, bp.axes[0]), regolith::dot(icrf, bp.axes[1]), regolith::dot(icrf, bp.axes[2])));
+	}
+	return sys->icrf_to_render().xform(regolith::to_v(icrf)).normalized();
+}
+
+void RegolithAtmosphere::set_air(const String &p_v) {
+	air_ = p_v;
+	if (p_v == "Mars") {
+		custom_ = regolith::mars_air(0.0, dust_tau_);
+	} else if (p_v == "Earth") {
+		custom_ = regolith::earth_air(0.0);
+	}
+	notify_property_list_changed();
+}
+
+// km in the editor, metres inside; heights over the ground
+void RegolithAtmosphere::set_air_value(int p_index, const Variant &p_v) {
+	AirModel &a = custom_;
+	switch (p_index) {
+		case 0: a.top = double(p_v) * 1000.0; break;
+		case 1: a.rayleigh = from_v3(p_v, 1e-3); break;
+		case 2: a.rayleigh_height = double(p_v) * 1000.0; break;
+		case 3: a.mie_scattering = from_v3(p_v, 1e-3); break;
+		case 4: a.mie_absorption = from_v3(p_v, 1e-3); break;
+		case 5: a.mie_height = double(p_v) * 1000.0; break;
+		case 6: a.mie_g = from_v3(p_v, 1.0); break;
+		case 7: a.ozone = from_v3(p_v, 1e-3); break;
+		case 8: a.ozone_center = double(p_v) * 1000.0; break;
+		case 9: a.ozone_width = std::max(double(p_v), 0.001) * 1000.0; break;
+		case 10: {
+			const Color c = p_v;
+			a.ground_albedo = { c.r, c.g, c.b };
+		} break;
+		default: break;
+	}
+}
+
+Variant RegolithAtmosphere::get_air_value(int p_index) const {
+	const AirModel &a = custom_;
+	switch (p_index) {
+		case 0: return a.top / 1000.0;
+		case 1: return to_v3(a.rayleigh, 1e3);
+		case 2: return a.rayleigh_height / 1000.0;
+		case 3: return to_v3(a.mie_scattering, 1e3);
+		case 4: return to_v3(a.mie_absorption, 1e3);
+		case 5: return a.mie_height / 1000.0;
+		case 6: return to_v3(a.mie_g, 1.0);
+		case 7: return to_v3(a.ozone, 1e3);
+		case 8: return a.ozone_center / 1000.0;
+		case 9: return a.ozone_width / 1000.0;
+		case 10: return Color(a.ground_albedo[0], a.ground_albedo[1], a.ground_albedo[2]);
+		default: return Variant();
+	}
+}
+
+AirModel RegolithAtmosphere::model(double p_ground, double p_datum) const {
+	AirModel a = custom_;
+	if (air_ == "Mars") {
+		// the dust follows the weather; the rest stays as set
+		const AirModel d = regolith::mars_air(0.0, dust_tau_);
+		a.mie_scattering = d.mie_scattering;
+		a.mie_absorption = d.mie_absorption;
+	}
+	a.bottom = p_ground;
+	a.datum = p_datum;
+	a.top = std::max(p_datum, p_ground) + std::max(custom_.top, 1000.0);
+	return a;
 }
 
 void RegolithAtmosphere::_ready() {
 	if (Engine::get_singleton()->is_editor_hint()) {
 		return;
 	}
-	if (!deimos_orbit_path_.is_empty()) {
-		has_deimos_ = deimos_.open(ProjectSettings::get_singleton()->globalize_path(deimos_orbit_path_).utf8().get_data());
-	}
+	effect_.instantiate();
 	Ref<World3D> world = get_viewport() ? get_viewport()->get_world_3d() : Ref<World3D>();
 	Ref<Environment> env = world.is_valid() ? world->get_environment() : Ref<Environment>();
-	if (env.is_valid() && env->get_sky().is_valid()) {
-		sky_ = env->get_sky()->get_material();
-	}
-	if (sky_.is_null()) {
-		ERR_PRINT("RegolithAtmosphere: the environment has no sky ShaderMaterial");
+	if (env.is_valid()) {
+		// the effect draws the sky; ambient comes from it below
+		env->set_background(Environment::BG_COLOR);
+		env->set_bg_color(Color(0, 0, 0));
+		env->set_ambient_source(Environment::AMBIENT_SOURCE_COLOR);
+		env->set_ambient_light_energy(1.0);
+		env->set_reflection_source(Environment::REFLECTION_SOURCE_DISABLED);
+		env->set_fog_enabled(false);
 	}
 }
 
-// mars_daynight._sun_occlusion: the highest terrain along the
-// sun's azimuth, 16 km to ~600 km out, against the sun.
-void RegolithAtmosphere::occlusion(RegolithSystem *p_sys, RegolithBody *p_body, const DVec3 &p_eye, const DVec3 &p_sun,
-		double &r_vis, double &r_horizon, double &r_dist) const {
+void RegolithAtmosphere::attach(Camera3D *p_cam) {
+	if (p_cam == attached_) {
+		return;
+	}
+	detach();
+	Ref<Compositor> c = p_cam->get_compositor();
+	if (c.is_null()) {
+		c.instantiate();
+		p_cam->set_compositor(c);
+	}
+	TypedArray<Ref<CompositorEffect>> fx = c->get_compositor_effects();
+	fx.push_back(effect_);
+	c->set_compositor_effects(fx);
+	attached_ = p_cam;
+}
+
+void RegolithAtmosphere::detach() {
+	if (!attached_) {
+		return;
+	}
+	Ref<Compositor> c = attached_->get_compositor();
+	if (c.is_valid()) {
+		TypedArray<Ref<CompositorEffect>> fx = c->get_compositor_effects();
+		fx.erase(effect_);
+		c->set_compositor_effects(fx);
+	}
+	attached_ = nullptr;
+}
+
+void RegolithAtmosphere::_exit_tree() {
+	detach();
+}
+
+// The highest terrain along the sun's azimuth, 16 km to about
+// 600 km out: how much of the sun clears it.
+void RegolithAtmosphere::occlusion(RegolithSystem *p_sys, RegolithBody *p_body, const DVec3 &p_eye,
+		const DVec3 &p_sun, double &r_vis) const {
 	r_vis = 1.0;
-	r_horizon = -0.1;
-	r_dist = 1e5;
 	const DVec3 up = regolith::normalize(p_eye);
 	const double se = regolith::dot(p_sun, up);
 	if (se > 0.22 || se < -0.05) {
@@ -117,130 +776,159 @@ void RegolithAtmosphere::occlusion(RegolithSystem *p_sys, RegolithBody *p_body, 
 		const double sr = p_body->surface_radius(dir, false);
 		if (!std::isnan(sr)) {
 			const DVec3 v = dir * sr - p_eye;
-			const double ang = std::asin(std::clamp(regolith::dot(regolith::normalize(v), up), -1.0, 1.0));
-			if (ang > max_ang) {
-				max_ang = ang;
-				r_dist = d;
-			}
+			max_ang = std::max(max_ang, std::asin(std::clamp(regolith::dot(regolith::normalize(v), up), -1.0, 1.0)));
 		}
 		d *= 1.046;
 	}
-	r_horizon = max_ang;
 	r_vis = std::clamp((std::asin(std::clamp(se, -1.0, 1.0)) - max_ang) / 0.012 + 0.5, 0.0, 1.0);
 }
 
 void RegolithAtmosphere::_process(double p_delta) {
+	if (effect_.is_null()) {
+		return;
+	}
 	RegolithSystem *sys = Object::cast_to<RegolithSystem>(get_node_or_null(system_path_));
 	RegolithBody *body = Object::cast_to<RegolithBody>(get_node_or_null(body_path_));
 	Camera3D *cam = get_viewport() ? get_viewport()->get_camera_3d() : nullptr;
-	if (!sys || !body || !cam || !sys->is_anchored() || sky_.is_null()) {
+	if (!sys || !body || !cam || !sys->is_anchored()) {
 		return;
 	}
+	attach(cam);
 	const double t = sys->get_time();
-	const RegolithSystem::Pose &mp = sys->pose_of(body);
-	const DVec3 x = sys->to_state(cam->get_global_position(), Vector3()).x;
-	const DVec3 r_icrf = x - mp.position;
-	const DVec3 eye = from_icrf(mp.axes, r_icrf); // body-fixed
+	const RegolithSystem::Pose &bp = sys->pose_of(body);
+	const DVec3 eye = sys->body_point(body, cam->get_global_position());
 	const double r = regolith::length(eye);
-	const double alt = std::max(r - body->datum_radius(regolith::normalize(eye)), 0.0);
-	const Basis to_render = sys->icrf_to_render();
+	const DVec3 sun = sys->sun_in_body(body);
+	// the sky meets the terrain under the camera, which may lie
+	// km under the datum; the air's density follows the datum
+	const DVec3 down = regolith::normalize(eye);
+	const double datum = body->datum_radius(down);
+	const double surface = body->surface_radius(down, false);
+	const double bottom = std::min(std::isnan(surface) ? datum : surface - 10.0, r - 1.0);
+	const AirModel air = model(bottom, datum);
+	const bool has_air = air_ != "None";
 
-	// Air above you and the horizon dip, as mors.
-	sky_thin_ = std::exp(-std::max(alt - THIN_START, 0.0) / SCALE_HEIGHT);
-	const double dip = std::acos(std::clamp(body->r_ref() / (body->r_ref() + alt), 0.0, 1.0));
-	const Vector3 up = sys->get_up(cam->get_global_position());
-	const Vector3 sun_dir = sys->get_sun_direction();
-	sky_->set_shader_parameter("sky_thin", sky_thin_);
-	sky_->set_shader_parameter("horizon_dip", dip);
-	sky_->set_shader_parameter("up_dir", up);
-	sky_->set_shader_parameter("dust_tau", dust_tau_);
-	body->set_material_param("dust_tau", dust_tau_);
-
-	// Stars fixed to ICRF; galactic pole for the Milky Way.
-	sky_->set_shader_parameter("celestial_basis", to_render);
-	sky_->set_shader_parameter("milkyway_normal", regolith::to_v(regolith::galactic_pole()));
-
-	// Earth: real heliocentric orbits, phase from the triangle.
-	const DVec3 mars_h = regolith::mars_heliocentric(t);
-	const DVec3 earth_h = regolith::earth_heliocentric(t);
-	const DVec3 to_earth = earth_h - mars_h;
-	const double phase_ang = std::acos(std::clamp(regolith::dot(regolith::normalize(earth_h * -1.0), regolith::normalize(to_earth * -1.0)), -1.0, 1.0));
-	const Vector3 earth_dir = dir_of(to_render, to_earth);
-	const Vector3 pole = dir_of(to_render, mp.axes[2]);
-	const Vector3 perp = pole.cross(earth_dir).normalized();
-	sky_->set_shader_parameter("earth_dir", earth_dir);
-	sky_->set_shader_parameter("earth_phase", (1.0 + std::cos(phase_ang)) * 0.5);
-	sky_->set_shader_parameter("earth_moon_dir", earth_dir.rotated(perp, 0.0032));
-
-	// Deimos: JPL orbit, topocentric.
-	if (has_deimos_) {
-		const DVec3 dpos = mp.position + deimos_.state(t).position;
-		sky_->set_shader_parameter("deimos_dir", dir_of(to_render, dpos - x));
-		sky_->set_shader_parameter("deimos_brightness", 0.9);
-	} else {
-		sky_->set_shader_parameter("deimos_brightness", 0.0);
+	RegolithAirEffect::Frame f;
+	f.air = air;
+	f.has_air = has_air;
+	const regolith::RenderFrame rf = sys->frame_for(body);
+	f.to_body.set_column(0, regolith::to_v(rf.east));
+	f.to_body.set_column(1, regolith::to_v(rf.up));
+	f.to_body.set_column(2, regolith::to_v(rf.south));
+	f.eye = eye;
+	f.sun = regolith::to_v(sun);
+	f.sun_energy = sun_energy_;
+	const double dist = regolith::length(sys->central_heliocentric(t) * AU + bp.position);
+	f.sun_radius = SUN_RADIUS / std::max(dist, 1e9);
+	f.exposure = exposure_;
+	f.airglow = has_air ? airglow_ : 0.0;
+	{
+		const Color c = airglow_color_;
+		const float lum = std::max(0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b, 1e-4f);
+		f.glow_color = Color(c.r / lum, c.g / lum, c.b / lum);
 	}
+	// the sun_energy is at this distance; starlight is not
+	const double d_au = dist / AU;
+	// the eye adapts to the view's brightness over a few seconds,
+	// in log space; a daylit view keeps the stars true (gain 1)
+	// a bad reading must never reach the eye: it would blank the sky
+	const double lum = effect_->view_luminance();
+	const double scene = std::isfinite(lum) ? std::max(lum, 1e-12) : 1e-12;
+	if (!std::isfinite(eye_gain_)) {
+		eye_gain_ = 1.0;
+	}
+	const double want = std::clamp(VIEW_KEY / scene, 1.0, std::max(night_vision_, 1.0));
+	eye_gain_ = std::exp(std::log(eye_gain_) + (std::log(want) - std::log(eye_gain_)) * (1.0 - std::exp(-p_delta / 2.0)));
+	const DVec3 cam_helio = sys->central_heliocentric(t) * AU + sys->to_state(cam->get_global_position(), Vector3()).x;
+	f.bodies = sky_bodies(sys, body, cam_helio);
+	// a resolved, sunlit disk in view holds the eye's gain down,
+	// as a bright Moon does: its face stays displayable
+	const double base = std::numbers::pi * sun_energy_ * d_au * d_au * exposure_;
+	const Vector3 fwd = f.to_body.xform(-cam->get_global_basis().get_column(2)).normalized();
+	const double half_fov = Math::deg_to_rad(double(cam->get_fov())) * 0.75;
+	const double pixel = Math::deg_to_rad(double(cam->get_fov())) / std::max(1.0, double(get_viewport()->get_visible_rect().size.y));
+	for (size_t k = 0; k + 11 < f.bodies.size(); k += 12) {
+		const Vector3 dir(f.bodies[k], f.bodies[k + 1], f.bodies[k + 2]);
+		if (f.bodies[k + 3] > pixel && std::acos(std::clamp(double(dir.dot(fwd)), -1.0, 1.0)) < half_fov) {
+			const double albedo = std::max({ f.bodies[k + 8], f.bodies[k + 9], f.bodies[k + 10] });
+			const double face = base * 1.5 * albedo * f.bodies[k + 7] / std::numbers::pi;
+			eye_gain_ = std::min(eye_gain_, std::max(1.0, DISK_WHITE / std::max(face, 1e-12)));
+		}
+	}
+	f.star_scale = base * eye_gain_;
+	for (int k = 0; k < 3; ++k) {
+		f.body_to_icrf.set_column(k, regolith::to_v(bp.axes[k]));
+	}
+	f.valid = true;
+	effect_->set_frame(f);
 
-	// Terrain occlusion of a low sun, every 0.25 s, near ground.
-	const DVec3 sun_icrf = regolith::normalize(regolith::mars_heliocentric(t) * -1.0);
+	const double alt = std::max(r - bottom, 0.0);
+	sky_thin_ = has_air ? std::exp(-alt / std::max(air.rayleigh_height, 1.0)) : 0.0;
+	body->set_material_param("dust_tau", has_air ? dust_tau_ : 0.0);
+
+	// terrain hiding a low sun, every 0.25 s near the ground
 	occl_cool_ -= p_delta;
 	if (occl_cool_ <= 0.0) {
 		occl_cool_ = 0.25;
 		occl_target_ = 1.0;
-		occl_horiz_target_ = -0.1;
-		occl_dist_target_ = 1e5;
 		if (alt < 15000.0) {
-			occlusion(sys, body, eye, from_icrf(mp.axes, sun_icrf), occl_target_, occl_horiz_target_, occl_dist_target_);
+			occlusion(sys, body, eye, sun, occl_target_);
 		}
 	}
-	const double k = 1.0 - std::exp(-p_delta * 3.0);
-	sun_vis_ += (occl_target_ - sun_vis_) * k;
-	occl_horiz_ += (occl_horiz_target_ - occl_horiz_) * k;
-	occl_dist_ += (occl_dist_target_ - occl_dist_) * k;
-	sky_->set_shader_parameter("occl", 1.0 - sun_vis_);
-	sky_->set_shader_parameter("occl_horizon", occl_horiz_);
-	sky_->set_shader_parameter("occl_dist", occl_dist_);
+	sun_vis_ += (occl_target_ - sun_vis_) * (1.0 - std::exp(-p_delta * 3.0));
 
-	// Sun light: reddens and fades through the dust low down;
-	// without air it is a hard edge. Eclipses come from the system.
-	const double se = sun_dir.dot(up);
-	const double se_h = std::sin(std::asin(std::clamp(se, -1.0, 1.0)) + dip);
-	const double dust_dim = std::exp(-std::max(dust_tau_ - 0.35, 0.0) * 0.35);
-	const double rise = sky_thin_ * sstep(-0.03, 0.18, se_h) + (1.0 - sky_thin_) * sstep(-0.004, 0.004, se_h);
-	DirectionalLight3D *sun = Object::cast_to<DirectionalLight3D>(get_node_or_null(sun_path_));
-	if (sun) {
-		sun->set_param(Light3D::PARAM_ENERGY,
-				real_t(sun_energy_ * rise * dust_dim * sun_vis_ * sys->get_sun_visible()));
-		const double red = (1.0 - sstep(0.0, 0.3, se_h)) * sky_thin_;
-		sun->set_color(Color(1, 1, 1).lerp(Color(1.0, 0.62, 0.42), real_t(red)));
-		sun->set_shadow(se_h > -0.03 && sun_vis_ > 0.05);
+	// the sun through the air to the camera
+	const double mu_s = regolith::dot(regolith::normalize(eye), sun);
+	RGB tr = { 1.0, 1.0, 1.0 };
+	if (has_air) {
+		tr = regolith::air_transmittance(air, std::max(r, bottom + 1.0), mu_s);
+	} else if (mu_s < -std::sqrt(std::max(1.0 - (bottom / r) * (bottom / r), 0.0))) {
+		tr = { 0.0, 0.0, 0.0 }; // behind the body
+	}
+	// the terrain lights itself per point from the same tables:
+	// the night side stays dark whatever the camera sees
+	RID t_rid, e_rid;
+	double t_base = 0.0, t_top = 0.0, t_datum = 0.0;
+	if (effect_->tables(t_rid, e_rid, t_base, t_top, t_datum)) {
+		if (air_t_tex_.is_null()) {
+			air_t_tex_.instantiate();
+			air_t_tex_->set_texture_rd_rid(t_rid);
+			air_e_tex_.instantiate();
+			air_e_tex_->set_texture_rd_rid(e_rid);
+		}
+		body->set_material_param("air_on", true);
+		body->set_material_param("air_t", air_t_tex_);
+		body->set_material_param("air_e", air_e_tex_);
+		body->set_material_param("air_shape", Vector4(real_t(t_base), real_t(t_top), real_t(t_datum), real_t(body->r_ref())));
+		body->set_material_param("sun_top", real_t(sun_energy_ * exposure_ * sys->get_sun_visible()));
+		// airglow overhead lights the night ground: pi L, in suns at
+		// 1 AU, at the eye's gain; no air, no glow
+		const real_t glow = has_air ? real_t(f.star_scale * airglow_) : real_t(0.0);
+		body->set_material_param("night_glow", Vector3(f.glow_color.r, f.glow_color.g, f.glow_color.b) * glow);
+	}
+	const double peak = std::max({ tr[0], tr[1], tr[2], 1e-9 });
+	sun_color_ = Color(tr[0] / peak, tr[1] / peak, tr[2] / peak);
+	const double energy = sun_energy_ * peak * sun_vis_ * sys->get_sun_visible();
+	if (DirectionalLight3D *light = Object::cast_to<DirectionalLight3D>(get_node_or_null(sun_path_))) {
+		light->set_param(Light3D::PARAM_ENERGY, real_t(energy));
+		light->set_color(sun_color_);
+		light->set_shadow(energy > 1e-4);
 	}
 
-	// Ambient and haze follow the sun; unlit air does not glow.
+	// ambient: the sky and the sunlit ground, from the GPU
 	Ref<Environment> env = get_viewport()->get_world_3d()->get_environment();
+	const Vector3 mean = effect_->ambient_mean() * real_t(sun_energy_ * exposure_);
 	if (env.is_valid()) {
-		const double dayness = sstep(-0.10, 0.15, se);
-		const double amb = (0.04 + 0.20 * dayness) * (0.72 + 0.28 * sun_vis_);
-		env->set_ambient_light_energy(real_t(0.03 + (amb - 0.03) * sky_thin_));
-		// Night haze is the sky's own night horizon: distant ground
-		// fades into the sky behind it (a brighter fixed tint drew
-		// far terrain as a glowing band above black near ground).
-		Variant nh = sky_->get_shader_parameter("night_horizon");
-		if (nh.get_type() == Variant::NIL && sky_->get_shader().is_valid()) {
-			nh = RenderingServer::get_singleton()->shader_get_parameter_default(sky_->get_shader()->get_rid(), "night_horizon");
-		}
-		Color night_fog = nh.get_type() == Variant::COLOR ? Color(nh) :
-				(nh.get_type() == Variant::VECTOR3 ? Color(Vector3(nh).x, Vector3(nh).y, Vector3(nh).z) : Color(0, 0, 0));
-		// and dimmed by dust exactly as regolith_sky.gdshader dims
-		// its night colour (murk), or the haze outshines the sky
-		const double murk = sstep(0.8, 4.5, dust_tau_) * sky_thin_;
-		night_fog = night_fog * real_t(1.0 - 0.85 * murk);
-		Color fog = night_fog.lerp(Color(0.72f, 0.55f, 0.42f), real_t(dayness));
-		fog = fog * real_t(1.0 + ((1.0 + (0.45 - 1.0) * dayness) - 1.0) * (1.0 - sun_vis_));
-		env->set_fog_light_color(fog);
-		env->set_fog_density(real_t(fog_density_ * sky_thin_));
-		// Godot fogs the sky at full strength whatever the
-		// density; above the air there is nothing to fog.
-		env->set_fog_sky_affect(real_t(fog_sky_affect_ * sky_thin_));
+		env->set_ambient_light_color(Color(mean.x, mean.y, mean.z));
 	}
+	const Vector3 up_e = effect_->ambient_up() * real_t(sun_energy_ * exposure_);
+	double ext = 0.0;
+	if (has_air) {
+		const double h = r - datum;
+		const double dr = std::exp(-h / air.rayleigh_height), dm = std::exp(-h / air.mie_height);
+		for (int c = 0; c < 3; ++c) {
+			ext += (air.rayleigh[size_t(c)] * dr + (air.mie_scattering[size_t(c)] + air.mie_absorption[size_t(c)]) * dm) / 3.0;
+		}
+	}
+	haze_ = Color(up_e.x, up_e.y, up_e.z, real_t(ext));
 }

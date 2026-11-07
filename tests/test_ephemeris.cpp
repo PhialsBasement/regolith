@@ -1,6 +1,7 @@
 #include <cmath>
 #include <numbers>
 
+#include "regolith/body_presets.hpp"
 #include "regolith/ephemeris.hpp"
 #include "test.hpp"
 
@@ -87,4 +88,62 @@ TEST_CASE(mars_local_solar_time_runs_one_sol) {
 	const DVec3 s = mars_sun_direction(t);
 	const double subsolar = std::atan2(s.y, s.x) * 180.0 / std::numbers::pi;
 	CHECK(std::abs(mars_local_solar_time(t, subsolar) - 12.0) < 1e-6);
+}
+
+namespace {
+
+// the sun, body-fixed, for a central body preset
+DVec3 preset_sun(const BodyPreset &p_b, double p_t) {
+	return normalize(inertial_to_body(p_b.rotation, p_t, heliocentric(p_b.orbit, p_t) * -1.0));
+}
+
+} // namespace
+
+TEST_CASE(earth_preset_noon_at_greenwich_j2000) {
+	// 2000-01-01 12:00 TT: noon less the equation of time, about
+	// 3.3 minutes early in early January
+	const BodyPreset *earth = find_body_preset("Earth");
+	CHECK(earth != nullptr);
+	const double lst = local_solar_time(preset_sun(*earth, 0.0), 0.0);
+	std::printf("  Greenwich local solar time at J2000: %.4f h\n", lst);
+	CHECK(std::abs(lst - (12.0 - 3.3 / 60.0)) < 0.05);
+}
+
+TEST_CASE(vesta_preset_orbit_and_day) {
+	const BodyPreset *vesta = find_body_preset("Vesta");
+	CHECK(vesta != nullptr);
+	double lo = 1e9, hi = 0.0;
+	for (int k = 0; k < 400; ++k) {
+		const double r = length(heliocentric(vesta->orbit, k * 86400.0 * 4.0));
+		lo = std::min(lo, r);
+		hi = std::max(hi, r);
+	}
+	std::printf("  Vesta from the sun: %.3f to %.3f AU\n", lo, hi);
+	CHECK(lo > 2.14 && lo < 2.16 && hi > 2.56 && hi < 2.58);
+	// a solar day a little longer than the 5.3421 h sidereal one
+	const double t = 7.8e8;
+	const double a = local_solar_time(preset_sun(*vesta, t), 0.0);
+	const double b = local_solar_time(preset_sun(*vesta, t + 3600.0), 0.0);
+	const double day_h = 24.0 / std::fmod(b - a + 24.0, 24.0);
+	std::printf("  Vesta solar day: %.4f h\n", day_h);
+	CHECK(day_h > 5.3421 && day_h < 5.35);
+}
+
+TEST_CASE(moon_opposite_the_sun_at_the_2000_eclipse) {
+	// total lunar eclipse, 2000-01-21 04:44 UT (19.697 d after J2000)
+	const double t = 19.697 * 86400.0;
+	const DVec3 moon = moon_geocentric(t);
+	const DVec3 anti_sun = normalize(earth_heliocentric(t));
+	const double sep = std::acos(dot(normalize(moon), anti_sun)) * 180.0 / std::numbers::pi;
+	std::printf("  moon %.0f km away, %.2f deg from the anti-sun\n", length(moon) / 1000.0, sep);
+	CHECK(sep < 1.0);
+	CHECK(length(moon) > 356e6 && length(moon) < 407e6);
+}
+
+TEST_CASE(preset_rotations_round_trip) {
+	const DVec3 v = normalize(DVec3(0.3, -0.7, 0.4));
+	for (const BodyPreset &b : body_presets()) {
+		const DVec3 back = inertial_to_body(b.rotation, 5.0e8, body_to_inertial(b.rotation, 5.0e8, v));
+		CHECK(length(back - v) < 1e-12);
+	}
 }

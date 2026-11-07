@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <map>
+#include <numbers>
 #include <string>
 #include <vector>
 
@@ -17,9 +18,18 @@ namespace {
 
 const char *USAGE =
 		"usage:\n"
+		"  regolith_bake dem --name NAME --raster F --width W --height H --datum-radius R --out DIR\n"
+		"        [--type float32|int16] [--nodata V] [--intervals N] [--attribution TEXT]\n"
+		"        [--datum-raster F --datum-width W --datum-height H] [options]\n"
+		"      any body from a global equirectangular raster of heights (m) over its datum:\n"
+		"      row 0 at +90 lat, column 0 at -180 lon, little endian; NaN or --nodata missing.\n"
+		"      The datum is a sphere of radius R, or per point a float32 raster of radii (m).\n"
+		"      Writes NAME_height.rgp (and NAME_datum.rgp with a datum raster).\n"
 		"  regolith_bake mars --dem TIF --areoid IMG [--craters BIN] [--pits BIN] --out DIR [options]\n"
 		"  regolith_bake phobos --icq TAB --out DIR [options]\n"
-		"  regolith_bake orbit --horizons FILE[,FILE...] --out RGE (parent Mars)\n"
+		"  regolith_bake orbit --horizons FILE[,FILE...] --out RGE\n"
+		"        [--parent-gm M3S2 --parent-j2 J2 --parent-radius M --pole-ra DEG --pole-dec DEG]\n"
+		"      (the parent defaults to Mars)\n"
 		"options: --min-level N --max-level N --codec 1|2|3 --zstd N --step M --trial\n";
 
 struct Args {
@@ -138,6 +148,96 @@ int run_mars(const Args &p_args) {
 	return 0;
 }
 
+double number(const Args &p_args, const std::string &p_key, double p_default) {
+	return p_args.has(p_key) ? std::atof(p_args.get(p_key).c_str()) : p_default;
+}
+
+// The level whose lattice spacing is nearest the raster's
+// pixel: finer levels would only interpolate.
+int data_level_for(double p_pixel_deg, int p_intervals) {
+	const double pixel_rad = p_pixel_deg * std::numbers::pi / 180.0;
+	const double l = std::log2((std::numbers::pi / 2.0) / (double(p_intervals) * pixel_rad));
+	return std::clamp(int(std::lround(l)), 0, 24);
+}
+
+bool raster_spec(const Args &p_args, const std::string &p_prefix, RasterSpec &r_spec) {
+	r_spec.path = p_args.get(p_prefix + "raster");
+	r_spec.width = std::atoll(p_args.get(p_prefix + "width", "0").c_str());
+	r_spec.height = std::atoll(p_args.get(p_prefix + "height", "0").c_str());
+	r_spec.type = p_args.get(p_prefix + "type", "float32") == "int16" ? RasterSpec::INT16 : RasterSpec::FLOAT32;
+	if (p_args.has(p_prefix + "nodata")) {
+		r_spec.nodata = std::atof(p_args.get(p_prefix + "nodata").c_str());
+	}
+	if (r_spec.path.empty() || r_spec.width <= 0 || r_spec.height <= 0) {
+		std::fprintf(stderr, "dem: --%sraster, --%swidth and --%sheight are required\n", p_prefix.c_str(),
+				p_prefix.c_str(), p_prefix.c_str());
+		return false;
+	}
+	if (std::abs(double(r_spec.width) - 2.0 * double(r_spec.height)) > 2.0) {
+		std::fprintf(stderr, "dem: %s is %lld x %lld; a global raster is twice as wide as it is high\n",
+				r_spec.path.c_str(), (long long)r_spec.width, (long long)r_spec.height);
+		return false;
+	}
+	return true;
+}
+
+int run_dem(const Args &p_args) {
+	const std::string name = p_args.get("name");
+	const double radius = number(p_args, "datum-radius", 0.0);
+	if (name.empty() || name.size() > 31 || radius <= 0.0) {
+		std::fprintf(stderr, "dem: --name (up to 31 characters) and --datum-radius are required\n");
+		return 2;
+	}
+	RasterSpec spec;
+	if (!raster_spec(p_args, "", spec)) {
+		return 2;
+	}
+	const int intervals = std::atoi(p_args.get("intervals", "256").c_str());
+	const int data_level = data_level_for(360.0 / double(spec.width), intervals);
+	std::printf("%s: %lld x %lld raster, %.1f m pixels; data level %d\n", name.c_str(), (long long)spec.width,
+			(long long)spec.height, 360.0 / double(spec.width) * std::numbers::pi / 180.0 * radius, data_level);
+	RasterDem dem;
+	if (!dem.open(spec, data_level + 1)) {
+		return 1;
+	}
+	RasterDem datum;
+	const bool has_datum = p_args.has("datum-raster");
+	if (has_datum) {
+		RasterSpec ds;
+		if (!raster_spec(p_args, "datum-", ds) || !datum.open(ds, 1)) {
+			return 1;
+		}
+	}
+	const DemHeightSampler height(dem, has_datum ? &datum : nullptr, radius, radius, data_level);
+	if (p_args.has("trial")) {
+		codec_trial(height, { intervals, 2 }, trial_keys(data_level));
+		return 0;
+	}
+	BakeConfig h = config_from(p_args, name + "_height.rgp", name.c_str(), intervals, data_level, 1.0 / 4.0, radius);
+	h.header.layer = PACK_LAYER_HEIGHT;
+	h.attribution = p_args.get("attribution");
+	BakeStats hs;
+	if (!bake_pack(height, h, hs)) {
+		return 1;
+	}
+	report((name + "_height").c_str(), hs);
+	std::printf("  mip fallbacks: %llu\n", (unsigned long long)height.mip_fallbacks());
+	if (has_datum) {
+		const DemDatumSampler geoid(height, radius);
+		BakeConfig a = config_from(p_args, name + "_datum.rgp", name.c_str(), intervals, 3, 1.0 / 16.0, radius);
+		a.min_level = 0;
+		a.max_level = 3;
+		a.header.layer = PACK_LAYER_AREOID;
+		a.attribution = p_args.get("attribution");
+		BakeStats as;
+		if (!bake_pack(geoid, a, as)) {
+			return 1;
+		}
+		report((name + "_datum").c_str(), as);
+	}
+	return 0;
+}
+
 int run_phobos(const Args &p_args) {
 	IcqShape shape;
 	std::printf("loading ICQ shape\n");
@@ -229,12 +329,13 @@ int run_orbit(const Args &p_args) {
 		table.states_.push_back(rows[k - 1].s);
 	}
 	table.states_.push_back(rows.back().s);
-	// Mars: GM and J2 (JPL), IAU pole at J2000.
-	table.parent_gm_ = 4.282837e13;
-	table.parent_j2_ = 1.96045e-3;
-	table.parent_radius_ = 3396200.0;
-	table.pole_ra_ = 317.68143;
-	table.pole_dec_ = 52.88650;
+	// the parent: Mars unless given (GM and J2 from JPL, the IAU
+	// pole at J2000)
+	table.parent_gm_ = number(p_args, "parent-gm", 4.282837e13);
+	table.parent_j2_ = number(p_args, "parent-j2", 1.96045e-3);
+	table.parent_radius_ = number(p_args, "parent-radius", 3396200.0);
+	table.pole_ra_ = number(p_args, "pole-ra", 317.68143);
+	table.pole_dec_ = number(p_args, "pole-dec", 52.88650);
 	if (!table.save(p_args.get("out"))) {
 		return 1;
 	}
@@ -250,6 +351,9 @@ int main(int p_argc, char **p_argv) {
 	if (!parse(p_argc, p_argv, args)) {
 		std::fputs(USAGE, stderr);
 		return 2;
+	}
+	if (args.mode == "dem") {
+		return run_dem(args);
 	}
 	if (args.mode == "mars") {
 		return run_mars(args);

@@ -185,24 +185,32 @@ def round_away(x):
 
 # Mars sources.
 
-class MarsDem:
-    W, H = 106694, 53347
-    DEG = 0.003374120830641
+class RasterDem:
+    """A raw global raster: row 0 at +90, column 0 at -180."""
 
-    def __init__(self, path):
-        self.raw = np.memmap(path, dtype="<i2", mode="r", offset=854272, shape=(self.H, self.W))
+    def __init__(self, path, width, height, dtype="<f4", offset=0, deg=None, nodata=None, mips=8):
+        self.W, self.H = width, height
+        self.DEG = deg if deg else 360.0 / width
+        self.nodata = nodata
+        self.raw = np.memmap(path, dtype=dtype, mode="r", offset=offset, shape=(self.H, self.W))
         self.dims = [(self.W, self.H)]
-        for _ in range(8):
+        for _ in range(mips):
             w, h = self.dims[-1]
             self.dims.append(((w + 1) // 2, (h + 1) // 2))
         self.pixels = {}
         self.north = self.row_mean(0)
         self.south = self.row_mean(self.H - 1)
 
+    def masked(self, block):
+        block = np.asarray(block).astype(np.float64)
+        if self.nodata is not None:
+            block[block == self.nodata] = np.nan
+        return block
+
     def row_mean(self, y):
-        row = np.asarray(self.raw[y]).astype(np.float64)
-        row = row[row != -32768]
-        return float(row.mean())
+        row = self.masked(self.raw[y])
+        row = row[~np.isnan(row)]
+        return float(row.mean()) if row.size else 0.0
 
     def pixel(self, k, x, y):
         key = (k, x, y)
@@ -211,8 +219,7 @@ class MarsDem:
         span = 1 << k
         x0, y0 = x * span, y * span
         x1, y1 = min(x0 + span, self.W), min(y0 + span, self.H)
-        block = np.asarray(self.raw[y0:y1, x0:x1]).astype(np.float64)
-        block[block == -32768] = np.nan
+        block = self.masked(self.raw[y0:y1, x0:x1])
         for _ in range(k):
             h, w = block.shape
             padded = np.full((h + h % 2, w + w % 2), np.nan)
@@ -253,6 +260,10 @@ class MarsDem:
                 total += wgt * v
                 weight += wgt
         return total / weight if weight > 1e-12 else math.nan
+
+
+def MarsDem(path):
+    return RasterDem(path, 106694, 53347, dtype="<i2", offset=854272, deg=0.003374120830641, nodata=-32768)
 
 
 class Areoid:
@@ -341,6 +352,25 @@ def mars_rho(dem, areoid, cat, level, face, gi, gj, m, p, r_ref):
     if abs(stamp) > 1.0:
         cat.stamped.append(stamp)
     return h + stamp + areoid.radius(lat, lon) - r_ref
+
+
+def dem_rho(dem, data_level, datum_radius, level, face, gi, gj, m, p, r_ref):
+    """docs/rgp1.md for any body: Mars's method without craters."""
+    dirs = list(subsample_dirs(face, gi, gj, m))
+    k = max(0, data_level - level)
+    h = math.nan
+    while math.isnan(h) and k < len(dem.dims):
+        vals = [dem.sample(k, *lat_lon(d)) for d in dirs]
+        vals = [v for v in vals if not math.isnan(v)]
+        h = sum(vals) / len(vals) if vals else math.nan
+        k += 1
+    lat, lon = lat_lon(centre_dir(p, m))
+    blend = min(12000.0, 0.02 * datum_radius)
+    u = math.radians(90.0 - abs(lat)) * datum_radius / blend
+    if u < 1.0:
+        w = 1.0 - u * u * (3.0 - 2.0 * u)
+        h = h * (1.0 - w) + (dem.north if lat > 0 else dem.south) * w
+    return h + datum_radius - r_ref
 
 
 def dir_to_face(d):
@@ -471,9 +501,13 @@ def run(pack, picks, expected):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=["mars", "areoid", "phobos"])
+    ap.add_argument("mode", choices=["mars", "areoid", "phobos", "dem"])
     ap.add_argument("pack")
     ap.add_argument("--dem")
+    ap.add_argument("--raster")
+    ap.add_argument("--width", type=int)
+    ap.add_argument("--height", type=int)
+    ap.add_argument("--datum-radius", type=float)
     ap.add_argument("--areoid")
     ap.add_argument("--icq")
     ap.add_argument("--craters")
@@ -506,6 +540,14 @@ def main():
               % (dem.north, dem.south, cat.n_craters, len(cat.radius) - cat.n_craters))
         picks += feature_picks(pack, cat, a.features, rng)
         expected = lambda L, f, gi, gj, m, p: mars_rho(dem, areoid, cat, L, f, gi, gj, m, p, pack.r_ref)
+    elif a.mode == "dem":
+        # the baker's choice: the level nearest the pixel size
+        pixel = math.radians(360.0 / a.width)
+        data_level = min(max(round(math.log2((math.pi / 2.0) / (pack.n * pixel))), 0), 24)
+        dem = RasterDem(a.raster, a.width, a.height, mips=data_level)
+        radius = a.datum_radius or pack.r_ref
+        print("data level %d; pole caps: north %.1f south %.1f" % (data_level, dem.north, dem.south))
+        expected = lambda L, f, gi, gj, m, p: dem_rho(dem, data_level, radius, L, f, gi, gj, m, p, pack.r_ref)
     elif a.mode == "areoid":
         areoid = Areoid(a.areoid)
         expected = lambda L, f, gi, gj, m, p: areoid.radius(*lat_lon(centre_dir(p, m))) - pack.r_ref

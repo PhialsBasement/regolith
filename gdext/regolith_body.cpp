@@ -29,6 +29,7 @@
 #include <godot_cpp/variant/vector4.hpp>
 
 #include "convert.hpp"
+#include "regolith/body_presets.hpp"
 #include "regolith/cube.hpp"
 #include "regolith/ephemeris.hpp"
 #include "regolith_collider.hpp"
@@ -301,6 +302,50 @@ RegolithBody::~RegolithBody() {
 	free_render_resources();
 }
 
+void RegolithBody::set_preset(const String &p_v) {
+	preset_ = p_v;
+	const regolith::BodyPreset *b = regolith::find_body_preset(p_v.utf8().get_data());
+	if (!b) {
+		return; // Custom: the settings stay as they are
+	}
+	rotation_ = b->rotation;
+	orbit_elements_ = b->orbit;
+	rotation_model_ = b->synchronous ? ROTATION_SYNCHRONOUS : ROTATION_IAU;
+	gm_ = b->gm;
+	j2_ = b->j2;
+	j2_radius_ = b->j2_radius;
+	notify_property_list_changed();
+}
+
+// value and rate interleaved: ra, ra rate, dec, dec rate, w, w rate
+void RegolithBody::set_rotation_element(int p_index, double p_v) {
+	double *v[6] = { &rotation_.ra[0], &rotation_.ra[1], &rotation_.dec[0], &rotation_.dec[1], &rotation_.w[0],
+		&rotation_.w[1] };
+	if (p_index >= 0 && p_index < 6) {
+		*v[p_index] = p_v;
+	}
+}
+
+double RegolithBody::get_rotation_element(int p_index) const {
+	const double v[6] = { rotation_.ra[0], rotation_.ra[1], rotation_.dec[0], rotation_.dec[1], rotation_.w[0],
+		rotation_.w[1] };
+	return p_index >= 0 && p_index < 6 ? v[p_index] : 0.0;
+}
+
+void RegolithBody::set_orbit_element(int p_index, double p_v) {
+	double *rows[6] = { orbit_elements_.a, orbit_elements_.e, orbit_elements_.inc, orbit_elements_.mean_long,
+		orbit_elements_.peri, orbit_elements_.node };
+	if (p_index >= 0 && p_index < 12) {
+		rows[p_index / 2][p_index % 2] = p_v;
+	}
+}
+
+double RegolithBody::get_orbit_element(int p_index) const {
+	const double *rows[6] = { orbit_elements_.a, orbit_elements_.e, orbit_elements_.inc, orbit_elements_.mean_long,
+		orbit_elements_.peri, orbit_elements_.node };
+	return p_index >= 0 && p_index < 12 ? rows[p_index / 2][p_index % 2] : 0.0;
+}
+
 void RegolithBody::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_pack_path", "path"), &RegolithBody::set_pack_path);
 	ClassDB::bind_method(D_METHOD("get_pack_path"), &RegolithBody::get_pack_path);
@@ -353,10 +398,38 @@ void RegolithBody::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "pack_path", PROPERTY_HINT_FILE, "*.rgp"), "set_pack_path", "get_pack_path");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "datum_path", PROPERTY_HINT_FILE, "*.rgp"), "set_datum_path", "get_datum_path");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "system"), "set_system_path", "get_system_path");
+	// the preset first: settings after it in a scene override it
+	ClassDB::bind_method(D_METHOD("set_preset", "name"), &RegolithBody::set_preset);
+	ClassDB::bind_method(D_METHOD("get_preset"), &RegolithBody::get_preset);
+	ClassDB::bind_method(D_METHOD("set_rotation_element", "index", "value"), &RegolithBody::set_rotation_element);
+	ClassDB::bind_method(D_METHOD("get_rotation_element", "index"), &RegolithBody::get_rotation_element);
+	ClassDB::bind_method(D_METHOD("set_orbit_element", "index", "value"), &RegolithBody::set_orbit_element);
+	ClassDB::bind_method(D_METHOD("get_orbit_element", "index"), &RegolithBody::get_orbit_element);
+	{
+		String names = "Custom";
+		for (const regolith::BodyPreset &b : regolith::body_presets()) {
+			names += String(",") + String(b.name.c_str());
+		}
+		ADD_PROPERTY(PropertyInfo(Variant::STRING, "preset", PROPERTY_HINT_ENUM_SUGGESTION, names), "set_preset",
+				"get_preset");
+	}
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "gm"), "set_gm", "get_gm");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "orbit_path", PROPERTY_HINT_FILE, "*.rge"), "set_orbit_path", "get_orbit_path");
-	ADD_PROPERTY(PropertyInfo(Variant::INT, "rotation_model", PROPERTY_HINT_ENUM, "Mars IAU,Synchronous"), "set_rotation_model",
+	ADD_PROPERTY(PropertyInfo(Variant::INT, "rotation_model", PROPERTY_HINT_ENUM, "IAU,Synchronous"), "set_rotation_model",
 			"get_rotation_model");
+	ADD_GROUP("Rotation (IAU)", "");
+	const char *rot[6] = { "pole_ra", "pole_ra_rate", "pole_dec", "pole_dec_rate", "meridian", "meridian_rate" };
+	for (int k = 0; k < 6; ++k) {
+		ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, rot[k]), "set_rotation_element", "get_rotation_element", k);
+	}
+	ADD_GROUP("Heliocentric orbit", "orbit_");
+	const char *orb[12] = { "orbit_a", "orbit_a_rate", "orbit_e", "orbit_e_rate", "orbit_inclination",
+		"orbit_inclination_rate", "orbit_mean_longitude", "orbit_mean_longitude_rate", "orbit_perihelion",
+		"orbit_perihelion_rate", "orbit_node", "orbit_node_rate" };
+	for (int k = 0; k < 12; ++k) {
+		ADD_PROPERTYI(PropertyInfo(Variant::FLOAT, orb[k]), "set_orbit_element", "get_orbit_element", k);
+	}
+	ADD_GROUP("", "");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "j2"), "set_j2", "get_j2");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "j2_radius"), "set_j2_radius", "get_j2_radius");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "rotating_altitude"), "set_rotating_altitude", "get_rotating_altitude");
@@ -1022,7 +1095,7 @@ bool RegolithBody::update_push_frame(DVec3 &r_cam_body) {
 	}
 	{
 		const RegolithSystem::Pose &bp = sys->pose_of(this);
-		const regolith::DVec3 sun = regolith::normalize(regolith::mars_heliocentric(sys->get_time()) * -1.0 - bp.position / 1.495978707e11);
+		const regolith::DVec3 sun = regolith::normalize(sys->central_heliocentric(sys->get_time()) * -1.0 - bp.position / 1.495978707e11);
 		rs->material_set_param(material_, "sun_body",
 				Vector3(real_t(regolith::dot(bp.axes[0], sun)), real_t(regolith::dot(bp.axes[1], sun)), real_t(regolith::dot(bp.axes[2], sun))));
 	}
@@ -1556,9 +1629,9 @@ void RegolithBody::pose(double p_t, DVec3 &r_position, DVec3 &r_velocity, DVec3 
 		r_position = DVec3(0.0, 0.0, 0.0);
 		r_velocity = DVec3(0.0, 0.0, 0.0);
 	}
-	r_axes[0] = regolith::mars_body_to_inertial(p_t, DVec3(1.0, 0.0, 0.0));
-	r_axes[1] = regolith::mars_body_to_inertial(p_t, DVec3(0.0, 1.0, 0.0));
-	r_axes[2] = regolith::mars_body_to_inertial(p_t, DVec3(0.0, 0.0, 1.0));
+	r_axes[0] = regolith::body_to_inertial(rotation_, p_t, DVec3(1.0, 0.0, 0.0));
+	r_axes[1] = regolith::body_to_inertial(rotation_, p_t, DVec3(0.0, 1.0, 0.0));
+	r_axes[2] = regolith::body_to_inertial(rotation_, p_t, DVec3(0.0, 0.0, 1.0));
 }
 
 void RegolithBody::update_collision() {

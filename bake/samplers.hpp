@@ -7,6 +7,7 @@
 #include "catalog.hpp"
 #include "mars_dem.hpp"
 #include "phobos_icq.hpp"
+#include "raster_dem.hpp"
 #include "tile_bake.hpp"
 
 namespace regolith::bake {
@@ -39,6 +40,39 @@ public:
 
 private:
 	const Areoid &areoid_;
+};
+
+// Any body from a global raster of heights over its datum: a
+// sphere of datum_radius, or per point the radius in a datum
+// raster. 3x3 supersampled at mip (data_level - level), pole
+// caps converged, as Mars without its catalogue.
+class DemHeightSampler : public LevelSampler {
+public:
+	DemHeightSampler(const RasterDem &p_dem, const RasterDem *p_datum, double p_datum_radius, double p_r_ref,
+			int p_data_level) :
+			dem_(p_dem), datum_(p_datum), datum_radius_(p_datum_radius), r_ref_(p_r_ref), data_level_(p_data_level) {}
+	double rho(int p_level, const FaceSample &p_canonical, int64_t p_m, const IVec3 &p_point) const override;
+	uint64_t mip_fallbacks() const { return fallbacks_; }
+	double datum(double p_lat, double p_lon) const;
+
+private:
+	const RasterDem &dem_;
+	const RasterDem *datum_;
+	double datum_radius_;
+	double r_ref_;
+	int data_level_;
+	mutable std::atomic<uint64_t> fallbacks_{ 0 };
+};
+
+class DemDatumSampler : public LevelSampler {
+public:
+	DemDatumSampler(const DemHeightSampler &p_height, double p_r_ref) :
+			height_(p_height), r_ref_(p_r_ref) {}
+	double rho(int p_level, const FaceSample &p_canonical, int64_t p_m, const IVec3 &p_point) const override;
+
+private:
+	const DemHeightSampler &height_;
+	double r_ref_;
 };
 
 // Phobos: 3x3 supersampled ray casts against the ICQ mesh.

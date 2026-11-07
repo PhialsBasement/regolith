@@ -136,6 +136,7 @@ void RegolithSystem::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_shift_count"), &RegolithSystem::get_shift_count);
 	ClassDB::bind_method(D_METHOD("get_stats"), &RegolithSystem::get_stats);
 	ClassDB::bind_method(D_METHOD("get_time"), &RegolithSystem::get_time);
+	ClassDB::bind_method(D_METHOD("is_anchored"), &RegolithSystem::is_anchored);
 	ClassDB::bind_method(D_METHOD("get_local_solar_time", "position"), &RegolithSystem::get_local_solar_time);
 	ClassDB::bind_method(D_METHOD("get_sun_direction"), &RegolithSystem::get_sun_direction);
 	ClassDB::bind_method(D_METHOD("get_sun_visible"), &RegolithSystem::get_sun_visible);
@@ -219,8 +220,14 @@ void RegolithSystem::_ready() {
 		if (RegolithBody *b = Object::cast_to<RegolithBody>(found[i])) {
 			if (b->ensure_open()) {
 				bodies_.push_back(b);
+				if (!central_ && !b->has_orbit_table()) {
+					central_ = b;
+				}
 			}
 		}
+	}
+	if (!central_) {
+		central_ = dominant_;
 	}
 	anchor_at_start();
 	if (manage_camera_) {
@@ -234,10 +241,16 @@ void RegolithSystem::anchor_at_start() {
 	// Real clock: today's date, moved forward to the next
 	// start_local_time at the start longitude.
 	time_ = regolith::j2000_seconds_from_unix(Time::get_singleton()->get_unix_time_from_system());
+	auto local_time = [&](double p_t) {
+		return regolith::local_solar_time(sun_in_body_at(dominant_, p_t), start_lon_);
+	};
+	// this body's solar day, from how fast its local time runs
+	const double gained = std::fmod(local_time(time_ + 600.0) - local_time(time_) + 48.0, 24.0);
+	const double sol = gained > 1e-9 ? 24.0 / gained * 600.0 : regolith::MARS_SOL;
 	for (int k = 0; k < 4; ++k) {
-		double dh = start_local_time_ - regolith::mars_local_solar_time(time_, start_lon_);
+		double dh = start_local_time_ - local_time(time_);
 		dh = k == 0 ? std::fmod(dh + 24.0, 24.0) : std::remainder(dh, 24.0);
-		time_ += dh / 24.0 * regolith::MARS_SOL;
+		time_ += dh / 24.0 * sol;
 	}
 	update_poses();
 	const double lat = start_lat_ * DEG;
@@ -882,7 +895,7 @@ void RegolithSystem::update_sun() {
 	sun_visible_ = 1.0;
 	if (cam) {
 		const DVec3 x = to_state(cam->get_global_position(), Vector3()).x;
-		const DVec3 sun_pos = regolith::mars_heliocentric(time_) * (-AU);
+		const DVec3 sun_pos = central_heliocentric(time_) * (-AU);
 		const DVec3 to_sun = sun_pos - x;
 		const double sun_r = std::asin(SUN_RADIUS / regolith::length(to_sun));
 		for (const RegolithBody *b : bodies_) {
@@ -901,13 +914,38 @@ void RegolithSystem::update_sun() {
 }
 
 Vector3 RegolithSystem::get_sun_direction() const {
-	const DVec3 sun = regolith::normalize(regolith::mars_heliocentric(time_) * -1.0);
+	const DVec3 sun = regolith::normalize(central_heliocentric(time_) * -1.0);
 	return regolith::to_v(frame_.to_local_vec(from_icrf(ref_axes(), sun)));
+}
+
+DVec3 RegolithSystem::central_heliocentric(double p_t) const {
+	return regolith::heliocentric(central_ ? central_->orbit_elements() : regolith::MARS_ORBIT, p_t);
+}
+
+namespace {
+
+// the sun from a body at an ICRF place, in its fixed axes
+DVec3 sun_in_axes(const DVec3 &p_helio, const DVec3 &p_position, const DVec3 p_axes[3], double p_au) {
+	const DVec3 s = regolith::normalize(p_helio * -p_au - p_position);
+	return DVec3(regolith::dot(s, p_axes[0]), regolith::dot(s, p_axes[1]), regolith::dot(s, p_axes[2]));
+}
+
+} // namespace
+
+DVec3 RegolithSystem::sun_in_body(const RegolithBody *p_body) const {
+	const Pose &p = pose_of(p_body);
+	return sun_in_axes(central_heliocentric(time_), p.position, p.axes, AU);
+}
+
+DVec3 RegolithSystem::sun_in_body_at(const RegolithBody *p_body, double p_t) const {
+	DVec3 position, velocity, axes[3];
+	p_body->pose(p_t, position, velocity, axes);
+	return sun_in_axes(central_heliocentric(p_t), position, axes, AU);
 }
 
 double RegolithSystem::get_local_solar_time(const Vector3 &p_pos) const {
 	const Vector2 ll = get_latlon(p_pos);
-	return regolith::mars_local_solar_time(time_, double(ll.y));
+	return regolith::local_solar_time(sun_in_body(dominant_), double(ll.y));
 }
 
 Vector3 RegolithSystem::get_acceleration(const Vector3 &p_pos, const Vector3 &p_vel) const {
@@ -1128,8 +1166,11 @@ Vector3 RegolithSystem::get_surface_point(const String &p_body, double p_lat_deg
 }
 
 double RegolithSystem::get_solar_longitude_today() const {
-	return regolith::mars_solar_longitude(
-			regolith::j2000_seconds_from_unix(Time::get_singleton()->get_unix_time_from_system()));
+	const double now = regolith::j2000_seconds_from_unix(Time::get_singleton()->get_unix_time_from_system());
+	if (!central_) {
+		return regolith::mars_solar_longitude(now);
+	}
+	return regolith::solar_longitude(central_->orbit_elements(), central_->rotation(), now);
 }
 
 Vector3 RegolithSystem::get_body_point(const String &p_body, double p_lat_deg, double p_lon_deg, double p_radius) {

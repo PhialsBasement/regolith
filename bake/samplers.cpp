@@ -92,6 +92,53 @@ double MarsAreoidSampler::rho(int p_level, const FaceSample &p_canonical, int64_
 	return areoid_.radius(ll.lat, ll.lon) - MarsHeightSampler::R_REF;
 }
 
+double DemHeightSampler::datum(double p_lat, double p_lon) const {
+	return datum_ ? datum_->sample(0, p_lat, p_lon) : datum_radius_;
+}
+
+double DemHeightSampler::rho(int p_level, const FaceSample &p_canonical, int64_t p_m, const IVec3 &p_point) const {
+	LatLon lls[9];
+	for (int k = 0; k < 9; ++k) {
+		lls[k] = lat_lon(subsample_dir(p_canonical, p_m, k % 3 - 1, k / 3 - 1));
+	}
+	const int first = std::max(0, data_level_ - p_level);
+	double h = NaN;
+	for (int mip = first; mip < dem_.mip_count() && std::isnan(h); ++mip) {
+		double sum = 0.0;
+		int n = 0;
+		for (const LatLon &ll : lls) {
+			const double v = dem_.sample(mip, ll.lat, ll.lon);
+			if (!std::isnan(v)) {
+				sum += v;
+				++n;
+			}
+		}
+		h = n ? sum / n : NaN;
+		if (std::isnan(h)) {
+			++fallbacks_;
+		}
+	}
+	if (std::isnan(h)) {
+		return NaN;
+	}
+	const LatLon ll = lat_lon(lattice_dir(p_point, p_m));
+	// the pole rows converge to their mean, over a band that
+	// scales down for small bodies
+	const double blend_m = std::min(POLE_BLEND_M, 0.02 * datum_radius_);
+	const double u = (90.0 - std::abs(ll.lat)) / DEG * datum_radius_ / blend_m;
+	if (u < 1.0) {
+		const double w = 1.0 - u * u * (3.0 - 2.0 * u);
+		const double cap = ll.lat > 0.0 ? dem_.north_cap() : dem_.south_cap();
+		h = h * (1.0 - w) + cap * w;
+	}
+	return h + datum(ll.lat, ll.lon) - r_ref_;
+}
+
+double DemDatumSampler::rho(int p_level, const FaceSample &p_canonical, int64_t p_m, const IVec3 &p_point) const {
+	const LatLon ll = lat_lon(lattice_dir(p_point, p_m));
+	return height_.datum(ll.lat, ll.lon) - r_ref_;
+}
+
 double PhobosHeightSampler::rho(int p_level, const FaceSample &p_canonical, int64_t p_m, const IVec3 &p_point) const {
 	double sum = 0.0;
 	int n = 0;

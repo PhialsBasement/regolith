@@ -393,7 +393,8 @@ Vector3 RegolithWeather::get_cloud_layers(const Vector3 &p_pos) const {
 
 Vector3 RegolithWeather::get_sun_direction() const {
 	const RegolithSystem *sys = system();
-	return sys ? regolith::to_v(regolith::mars_sun_direction(sys->get_time())) : Vector3();
+	const RegolithBody *b = body();
+	return sys && b && sys->is_anchored() ? regolith::to_v(sys->sun_in_body(b)) : Vector3();
 }
 
 double RegolithWeather::get_vapor(const Vector3 &p_pos) const {

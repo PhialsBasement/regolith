@@ -30,18 +30,18 @@
 #include <godot_cpp/variant/utility_functions.hpp>
 
 #include "convert.hpp"
+#include "rd_util.hpp"
 #include "regolith/climate.hpp"
-#include "regolith/ephemeris.hpp"
+#include "regolith_atmosphere.hpp"
 #include "regolith_body.hpp"
 #include "regolith_system.hpp"
 #include "regolith_weather.hpp"
 
 using namespace godot;
+using namespace godot::rdu;
 using regolith::DVec3;
 
 namespace {
-
-using RD = RenderingDevice;
 
 constexpr int LIGHT_XY = 96, LIGHT_Z = 32;
 constexpr int SHAPE_N = 128, DETAIL_N = 32;
@@ -50,152 +50,8 @@ constexpr double Z_MIN = -8000.0, Z_MAX = 48000.0;
 // light cascade half widths (m) and re-bake intervals (s)
 constexpr double HALF[RegolithCloudEffect::NC] = { 24e3, 96e3, 384e3, 1536e3 };
 constexpr double INTERVAL[RegolithCloudEffect::NC] = { 3.0, 8.0, 20.0, 60.0 };
-// a C string: a global godot::String would be built before
-// the extension interface exists
-constexpr const char *DIR = "res://addons/regolith/";
-
-PackedByteArray bytes_of(const void *p_data, size_t p_size) {
-	PackedByteArray a;
-	a.resize(int64_t(p_size));
-	std::memcpy(a.ptrw(), p_data, p_size);
-	return a;
-}
-
-RID make_texture(RD *p_rd, RD::DataFormat p_format, int p_w, int p_h, int p_d, const PackedByteArray &p_data) {
-	Ref<RDTextureFormat> f;
-	f.instantiate();
-	f->set_format(p_format);
-	f->set_width(uint32_t(p_w));
-	f->set_height(uint32_t(p_h));
-	f->set_depth(uint32_t(p_d));
-	f->set_texture_type(p_d > 1 ? RD::TEXTURE_TYPE_3D : RD::TEXTURE_TYPE_2D);
-	f->set_usage_bits(RD::TEXTURE_USAGE_SAMPLING_BIT | RD::TEXTURE_USAGE_CAN_UPDATE_BIT);
-	Ref<RDTextureView> v;
-	v.instantiate();
-	TypedArray<PackedByteArray> data;
-	data.push_back(p_data);
-	return p_rd->texture_create(f, v, data);
-}
-
-RID make_storage(RD *p_rd, RD::DataFormat p_format, int p_w, int p_h, int p_d, int p_mips = 1) {
-	Ref<RDTextureFormat> f;
-	f.instantiate();
-	f->set_format(p_format);
-	f->set_width(uint32_t(p_w));
-	f->set_height(uint32_t(p_h));
-	f->set_depth(uint32_t(p_d));
-	f->set_mipmaps(uint32_t(p_mips));
-	f->set_texture_type(p_d > 1 ? RD::TEXTURE_TYPE_3D : RD::TEXTURE_TYPE_2D);
-	f->set_usage_bits(RD::TEXTURE_USAGE_STORAGE_BIT | RD::TEXTURE_USAGE_SAMPLING_BIT);
-	Ref<RDTextureView> v;
-	v.instantiate();
-	return p_rd->texture_create(f, v);
-}
-
-// The source with its #include lines inlined, from the same
-// directory; empty when the file is absent (an export).
-String source_of(const String &p_path) {
-	const String code = FileAccess::get_file_as_string(p_path);
-	if (code.is_empty()) {
-		return code;
-	}
-	String out;
-	for (const String &line : code.split("\n")) {
-		const String t = line.strip_edges();
-		if (t.begins_with("#[")) {
-			continue;
-		}
-		if (t.begins_with("#include")) {
-			out += FileAccess::get_file_as_string(String(DIR) + t.get_slice("\"", 1));
-		} else {
-			out += line;
-		}
-		out += String("\n");
-	}
-	return out;
-}
-
-RID compile(RD *p_rd, const String &p_name) {
-	const String path = String(DIR) + p_name + ".glsl";
-	const String code = source_of(path);
-	Ref<RDShaderSPIRV> spirv;
-	if (code.is_empty()) {
-		// an exported game ships the importer's SPIR-V only
-		Ref<RDShaderFile> file = ResourceLoader::get_singleton()->load(path);
-		if (file.is_valid()) {
-			spirv = file->get_spirv();
-		}
-	} else {
-		Ref<RDShaderSource> src;
-		src.instantiate();
-		src->set_stage_source(RD::SHADER_STAGE_COMPUTE, code);
-		spirv = p_rd->shader_compile_spirv_from_source(src);
-	}
-	const String err = spirv.is_valid() ? spirv->get_stage_compile_error(RD::SHADER_STAGE_COMPUTE) : "no SPIR-V";
-	if (!err.is_empty()) {
-		UtilityFunctions::push_error("RegolithClouds: ", p_name, " failed: ", err);
-		return RID();
-	}
-	return p_rd->shader_create_from_spirv(spirv, p_name);
-}
-
-RID make_sampler(RD *p_rd, bool p_linear, RD::SamplerRepeatMode p_u, RD::SamplerRepeatMode p_vw) {
-	Ref<RDSamplerState> s;
-	s.instantiate();
-	const RD::SamplerFilter f = p_linear ? RD::SAMPLER_FILTER_LINEAR : RD::SAMPLER_FILTER_NEAREST;
-	s->set_min_filter(f);
-	s->set_mag_filter(f);
-	s->set_mip_filter(f);
-	s->set_repeat_u(p_u);
-	s->set_repeat_v(p_vw);
-	s->set_repeat_w(p_vw);
-	return p_rd->sampler_create(s);
-}
-
-Ref<RDUniform> uniform(RD::UniformType p_type, int p_binding, RID p_a, RID p_b = RID()) {
-	Ref<RDUniform> u;
-	u.instantiate();
-	u->set_uniform_type(p_type);
-	u->set_binding(p_binding);
-	u->add_id(p_a);
-	if (p_b.is_valid()) {
-		u->add_id(p_b);
-	}
-	return u;
-}
-
-Ref<RDUniform> image(int p_binding, RID p_tex) {
-	return uniform(RD::UNIFORM_TYPE_IMAGE, p_binding, p_tex);
-}
-
-Ref<RDUniform> sampled(int p_binding, RID p_sampler, RID p_tex) {
-	return uniform(RD::UNIFORM_TYPE_SAMPLER_WITH_TEXTURE, p_binding, p_sampler, p_tex);
-}
-
-void push4(std::vector<float> &r_v, double p_x, double p_y, double p_z, double p_w) {
-	r_v.insert(r_v.end(), { float(p_x), float(p_y), float(p_z), float(p_w) });
-}
-
-void push3(std::vector<float> &r_v, const Vector3 &p_v, double p_w) {
-	push4(r_v, p_v.x, p_v.y, p_v.z, p_w);
-}
-
-void push3(std::vector<float> &r_v, const DVec3 &p_v, double p_w) {
-	push4(r_v, p_v.x, p_v.y, p_v.z, p_w);
-}
-
-void push_mat(std::vector<float> &r_v, const Projection &p_m) {
-	for (int c = 0; c < 4; ++c) {
-		push4(r_v, p_m.columns[c].x, p_m.columns[c].y, p_m.columns[c].z, p_m.columns[c].w);
-	}
-}
-
 double steady_now() {
 	return std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
-}
-
-uint32_t groups(int p_n, int p_local) {
-	return uint32_t((p_n + p_local - 1) / p_local);
 }
 
 } // namespace
@@ -462,13 +318,6 @@ void RegolithCloudEffect::_render_callback(int32_t p_type, RenderData *p_data) {
 	rd_->buffer_update(params_, 0, uint32_t(u.size() * 4), bytes_of(u.data(), u.size() * 4));
 
 	const RID depth = buffers->get_depth_layer(0);
-	auto set_of = [&](RID p_shader, const std::vector<Ref<RDUniform>> &p_list) {
-		TypedArray<Ref<RDUniform>> s;
-		for (const Ref<RDUniform> &x : p_list) {
-			s.push_back(x);
-		}
-		return UniformSetCacheRD::get_cache(p_shader, 0, s);
-	};
 	// the cloud's own inputs, the same bindings in every pass
 	const std::vector<Ref<RDUniform>> cloud_in = { uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_),
 		sampled(20, field_sampler_, tau_tex_), sampled(21, field_sampler_, topo_tex_),
@@ -544,6 +393,9 @@ void RegolithClouds::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "body_path"), "set_body_path", "get_body_path");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "weather_path"), "set_weather_path", "get_weather_path");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "sun_path"), "set_sun_path", "get_sun_path");
+	ClassDB::bind_method(D_METHOD("set_atmosphere_path", "path"), &RegolithClouds::set_atmosphere_path);
+	ClassDB::bind_method(D_METHOD("get_atmosphere_path"), &RegolithClouds::get_atmosphere_path);
+	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "atmosphere_path"), "set_atmosphere_path", "get_atmosphere_path");
 #define CLOUD_PROP(name, type)                                                              \
 	ClassDB::bind_method(D_METHOD("set_" #name, "value"), &RegolithClouds::set_##name);     \
 	ClassDB::bind_method(D_METHOD("get_" #name), &RegolithClouds::get_##name);              \
@@ -677,7 +529,7 @@ void RegolithClouds::_process(double p_delta) {
 	}
 	f.datum = radius_;
 	const double now = sys->get_time();
-	f.sun = regolith::to_v(regolith::mars_sun_direction(now));
+	f.sun = regolith::to_v(sys->sun_in_body(b));
 	DirectionalLight3D *sun = Object::cast_to<DirectionalLight3D>(get_node_or_null(sun_path_));
 	if (sun && sun->is_visible_in_tree()) {
 		f.sun_energy = sun->get_param(Light3D::PARAM_ENERGY);
@@ -690,6 +542,10 @@ void RegolithClouds::_process(double p_delta) {
 			const Color fc = env->get_fog_light_color() * float(env->get_fog_light_energy());
 			f.fog = Color(fc.r, fc.g, fc.b, env->get_fog_density());
 		}
+	}
+	// the physical air's haze, where there is one
+	if (RegolithAtmosphere *atmo = Object::cast_to<RegolithAtmosphere>(get_node_or_null(atmosphere_path_))) {
+		f.fog = atmo->get_haze();
 	}
 	// the clouds ride the winds aloft, smoothly and unwrapped
 	const double dt = last_time_ < 0.0 ? 0.0 : now - last_time_;

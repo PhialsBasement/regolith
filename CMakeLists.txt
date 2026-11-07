@@ -42,6 +42,8 @@ add_library(regolith_core STATIC
 	core/src/codec.cpp
 	core/src/cube.cpp
 	core/src/climate.cpp
+	core/src/air.cpp
+	core/src/body_presets.cpp
 	core/src/ephemeris.cpp
 	core/src/height_tile.cpp
 	core/src/horizon.cpp
@@ -66,7 +68,7 @@ if(REGOLITH_BUILD_BAKER)
 		bake/areoid.cpp
 		bake/catalog.cpp
 		bake/main.cpp
-		bake/mars_dem.cpp
+		bake/raster_dem.cpp
 		bake/phobos_icq.cpp
 		bake/samplers.cpp
 		bake/tile_bake.cpp
@@ -81,6 +83,7 @@ if(REGOLITH_BUILD_TESTS)
 		tests/test_main.cpp
 		tests/test_codec.cpp
 		tests/test_cube.cpp
+		tests/test_air.cpp
 		tests/test_ephemeris.cpp
 		tests/test_fold.cpp
 		tests/test_horizon.cpp
@@ -111,6 +114,7 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		gdext/regolith_system.cpp
 		gdext/regolith_vessel.cpp
 		gdext/regolith_weather.cpp
+		gdext/rd_util.cpp
 		gdext/regolith_clouds.cpp
 		gdext/regolith_editor.cpp
 		gdext/regolith_engine.cpp
@@ -129,9 +133,13 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		"${REGOLITH_ADDON_DIR}/regolith.gdextension" COPYONLY)
 	configure_file(addon/regolith_terrain.gdshader
 		"${REGOLITH_ADDON_DIR}/regolith_terrain.gdshader" COPYONLY)
-	foreach(f regolith_sky.gdshader regolith_clipmap.gdshader regolith_cloud_common.glsli
+	foreach(f regolith_clipmap.gdshader regolith_cloud_common.glsli
 			regolith_cloud_noise.glsl regolith_cloud_light.glsl regolith_cloud_march.glsl regolith_cloud_composite.glsl
-			regolith_cloud_mip.glsl regolith_cloud_resolve.glsl)
+			regolith_cloud_mip.glsl regolith_cloud_resolve.glsl
+			regolith_air_common.glsli regolith_air_transmittance.glsl regolith_air_multiscatter.glsl
+			regolith_air_skyview.glsl regolith_air_aerial.glsl regolith_air_composite.glsl
+			regolith_air_ambient.glsl regolith_air_irradiance.glsl regolith_sky_objects.glsli regolith_sky_bodies.glsli
+			regolith_stars.res regolith_milkyway.res)
 		configure_file(addon/${f} "${REGOLITH_ADDON_DIR}/${f}" COPYONLY)
 	endforeach()
 	# Stock Godot variants of the terrain shaders, without the

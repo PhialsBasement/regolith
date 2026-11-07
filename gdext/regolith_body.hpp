@@ -16,6 +16,7 @@
 #include <godot_cpp/variant/string.hpp>
 #include <godot_cpp/variant/vector4.hpp>
 
+#include "regolith/ephemeris.hpp"
 #include "regolith/height_tile.hpp"
 #include "regolith/horizon.hpp"
 #include "regolith/orbit.hpp"
@@ -36,7 +37,8 @@ class RegolithBody : public Node3D {
 
 public:
 	enum RotationModel {
-		ROTATION_MARS_IAU = 0,
+		ROTATION_IAU = 0, // the rotation elements below
+		ROTATION_MARS_IAU = ROTATION_IAU, // the old name
 		ROTATION_SYNCHRONOUS = 1,
 	};
 
@@ -53,6 +55,21 @@ public:
 	// Centre (m, ICRF, relative to the central body) and the
 	// body-fixed axes as ICRF columns, at TT seconds p_t.
 	void pose(double p_t, regolith::DVec3 &r_position, regolith::DVec3 &r_velocity, regolith::DVec3 r_axes[3]) const;
+	// A real body's spin, orbit and gravity in one go (Mercury,
+	// Venus, Earth, Moon, Mars, Phobos, Deimos, Vesta, Ceres);
+	// the settings below can then be changed one by one.
+	void set_preset(const String &p_v);
+	String get_preset() const { return preset_; }
+	// IAU rotation: pole RA, Dec (deg, per century), meridian
+	// (deg, per day). The heliocentric orbit sets the sun for a
+	// central body (one without an orbit table).
+	void set_rotation_element(int p_index, double p_v);
+	double get_rotation_element(int p_index) const;
+	void set_orbit_element(int p_index, double p_v);
+	double get_orbit_element(int p_index) const;
+	const regolith::Rotation &rotation() const { return rotation_; }
+	const regolith::OrbitElements &orbit_elements() const { return orbit_elements_; }
+	bool has_orbit_table() const { return has_orbit_; }
 	void set_j2(double p_v) { j2_ = p_v; }
 	double get_j2() const { return j2_; }
 	void set_j2_radius(double p_v) { j2_radius_ = p_v; }
@@ -215,6 +232,9 @@ private:
 	NodePath system_path_;
 	double gm_ = 4.282837e13;
 	int rotation_model_ = ROTATION_MARS_IAU;
+	String preset_ = "Mars";
+	regolith::Rotation rotation_ = regolith::MARS_ROTATION;
+	regolith::OrbitElements orbit_elements_ = regolith::MARS_ORBIT;
 	int synthesis_ = 0; // 0 none, 1 Mars, 2 Phobos
 	String dark_map_path_;
 	std::unique_ptr<regolith::Synth> synth_;

@@ -31,6 +31,7 @@ void initialize_regolith(ModuleInitializationLevel p_level) {
 	GDREGISTER_CLASS(RegolithBody);
 	GDREGISTER_CLASS(RegolithCollider);
 	GDREGISTER_CLASS(RegolithVessel);
+	GDREGISTER_CLASS(RegolithAirEffect);
 	GDREGISTER_CLASS(RegolithAtmosphere);
 	GDREGISTER_CLASS(RegolithWeather);
 	GDREGISTER_CLASS(RegolithCloudEffect);

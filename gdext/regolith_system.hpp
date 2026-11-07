@@ -56,6 +56,15 @@ public:
 	// Bumps whenever the frame is rebuilt (re-anchor, switch).
 	uint64_t rebuild_count() const { return uint64_t(rebases_); }
 	RegolithBody *dominant() const { return dominant_; }
+	// The body the others' positions are relative to: the one
+	// without an orbit table. Its heliocentric orbit places the
+	// sun (AU, ICRF), for every body.
+	RegolithBody *central() const { return central_; }
+	regolith::DVec3 central_heliocentric(double p_t) const;
+	// unit vector to the sun in a body's fixed axes, now
+	regolith::DVec3 sun_in_body(const RegolithBody *p_body) const;
+	// the same at any time, from the body's own pose there
+	regolith::DVec3 sun_in_body_at(const RegolithBody *p_body, double p_t) const;
 	bool is_parked(const Node *p_node) const;
 	const Pose &pose_of(const RegolithBody *p_body) const;
 	State to_state(const Vector3 &p_pos, const Vector3 &p_vel) const;
@@ -123,8 +132,8 @@ public:
 	// The render point at (lat, lon) and a fixed radius from the
 	// body's centre: body-fixed, whatever the terrain cache holds
 	Vector3 get_body_point(const String &p_body, double p_lat_deg, double p_lon_deg, double p_radius);
-	// Mars's solar longitude Ls (deg) for today's date, the date the
-	// clock starts from: usable before the system anchors
+	// The central body's solar longitude (deg) for today's date,
+	// the date the clock starts from (Mars's before it anchors)
 	double get_solar_longitude_today() const;
 	int get_rebase_count() const { return rebases_; }
 	int get_shift_count() const { return shifts_; }
@@ -192,6 +201,7 @@ private:
 	std::vector<RegolithBody *> bodies_;
 	std::unordered_map<const RegolithBody *, Pose> poses_;
 	RegolithBody *dominant_ = nullptr;
+	RegolithBody *central_ = nullptr;
 	bool rotating_ = true;
 	regolith::DVec3 frozen_[3]; // ref axes while inertial
 	regolith::DVec3 frame_velocity_; // ref coords, m/s
