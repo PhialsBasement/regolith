@@ -394,6 +394,10 @@ void RegolithBody::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::INT, "synthesis", PROPERTY_HINT_ENUM, "None,Mars,Phobos"), "set_synthesis", "get_synthesis");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "dark_map_path", PROPERTY_HINT_FILE, "*.jpg,*.png"), "set_dark_map_path",
 			"get_dark_map_path");
+	ClassDB::bind_method(D_METHOD("set_surface_path", "path"), &RegolithBody::set_surface_path);
+	ClassDB::bind_method(D_METHOD("get_surface_path"), &RegolithBody::get_surface_path);
+	ADD_PROPERTY(PropertyInfo(Variant::STRING, "surface_path", PROPERTY_HINT_FILE, "*.gdshaderinc"), "set_surface_path",
+			"get_surface_path");
 	ClassDB::bind_method(D_METHOD("is_collision_ready_at", "position"), &RegolithBody::is_collision_ready_at);
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "pack_path", PROPERTY_HINT_FILE, "*.rgp"), "set_pack_path", "get_pack_path");
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "datum_path", PROPERTY_HINT_FILE, "*.rgp"), "set_datum_path", "get_datum_path");
@@ -589,10 +593,14 @@ void RegolithBody::_ready() {
 void RegolithBody::create_render_resources() {
 	RenderingServer *rs = RenderingServer::get_singleton();
 	regolith_engine_warn_once();
-	const String shader_path = regolith_terrain_shader(clip_quads_ > 0 ? "regolith_clipmap" : "regolith_terrain");
-	shader_ = ResourceLoader::get_singleton()->load(shader_path);
+	if (clip_quads_ > 0) {
+		// the engine's terrain with this body's surface
+		shader_ = regolith_clipmap_shader(surface_path_);
+	} else {
+		shader_ = ResourceLoader::get_singleton()->load(regolith_terrain_shader("regolith_terrain"));
+	}
 	if (shader_.is_null()) {
-		ERR_PRINT("RegolithBody: missing " + shader_path);
+		ERR_PRINT("RegolithBody: no terrain shader");
 		return;
 	}
 	const regolith::TileLayout lay = source_.layout();

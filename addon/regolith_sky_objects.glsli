@@ -1,6 +1,6 @@
 // What lies beyond the air: stars (the Yale Bright Star
-// Catalogue), the Milky Way (NASA SVS) and the bodies, seen
-// through the air's transmittance Tv. d: view (body frame).
+// Catalogue) and the Milky Way (NASA SVS), seen through the
+// air's transmittance Tv. d: view (body frame).
 
 layout(set = 0, binding = 7, std430) restrict readonly buffer Stars {
 	vec4 s[]; // per star: dir, flux (suns); colour, V mag
@@ -38,8 +38,6 @@ vec3 to_icrf(vec3 v) {
 	return vec3(dot(a.icrf_r0.xyz, v), dot(a.icrf_r1.xyz, v), dot(a.icrf_r2.xyz, v));
 }
 
-#include "regolith_sky_bodies.glsli"
-
 vec3 sky_objects(vec3 d, vec3 Tv, float sun_ang) {
 	vec3 col = vec3(0.0);
 	float scale = a.stars.y; // pi x sun illuminance x eye
@@ -64,9 +62,6 @@ vec3 sky_objects(vec3 d, vec3 Tv, float sun_ang) {
 			}
 		}
 		col *= Tv;
-	}
-	if (scale > 0.0) {
-		col += sky_bodies(d, Tv);
 	}
 	return col;
 }

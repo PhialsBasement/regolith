@@ -1,0 +1,85 @@
+[gd_scene load_steps=4 format=3]
+
+[ext_resource type="Script" path="res://addons/regolith/example/fly.gd" id="1_fly"]
+
+[sub_resource type="Environment" id="env"]
+background_mode = 1
+ambient_light_source = 2
+tonemap_mode = 4
+ssao_enabled = true
+glow_enabled = true
+glow_normalized = true
+
+[sub_resource type="CameraAttributesPractical" id="cam_attr"]
+auto_exposure_enabled = true
+auto_exposure_min_sensitivity = 140.0
+auto_exposure_max_sensitivity = 12000.0
+auto_exposure_scale = 0.35
+auto_exposure_speed = 0.8
+
+[node name="RegolithExample" type="Node3D"]
+
+[node name="System" type="RegolithSystem" parent="."]
+body = NodePath("../Mars")
+focus = NodePath("../Flyer")
+sun = NodePath("../Sun")
+start_latitude = -5.4
+start_longitude = 137.8
+start_local_time = 10.0
+
+[node name="Mars" type="RegolithBody" parent="."]
+pack_path = "res://addons/regolith/example/data/mars_l3_height.rgp"
+system = NodePath("../System")
+preset = "Mars"
+synthesis = 1
+
+[node name="Mercury" type="RegolithBody" parent="."]
+pack_path = "res://addons/regolith/example/data/mercury_l3_height.rgp"
+surface_path = "res://addons/regolith/example/mercury_surface.gdshaderinc"
+system = NodePath("../System")
+preset = "Mercury"
+synthesis = 2
+
+[node name="Phobos" type="RegolithBody" parent="."]
+pack_path = "res://addons/regolith/example/data/phobos_height.rgp"
+orbit_path = "res://addons/regolith/example/data/phobos_orbit.rge"
+surface_path = "res://addons/regolith/example/phobos_surface.gdshaderinc"
+system = NodePath("../System")
+preset = "Phobos"
+synthesis = 2
+rotating_altitude = 30000.0
+max_level = 8
+collision_level = 7
+quads = 64
+
+[node name="Sun" type="DirectionalLight3D" parent="."]
+light_energy = 1.6
+shadow_enabled = true
+directional_shadow_max_distance = 4000.0
+
+[node name="WorldEnvironment" type="WorldEnvironment" parent="."]
+environment = SubResource("env")
+camera_attributes = SubResource("cam_attr")
+
+[node name="Atmosphere" type="RegolithAtmosphere" parent="."]
+system = NodePath("../System")
+body = NodePath("../Mars")
+sun = NodePath("../Sun")
+air = "Mars"
+
+[node name="Flyer" type="CharacterBody3D" parent="."]
+script = ExtResource("1_fly")
+system_path = NodePath("../System")
+hud_path = NodePath("../HUD/Label")
+
+[node name="Camera3D" type="Camera3D" parent="Flyer"]
+current = true
+fov = 70.0
+
+[node name="HUD" type="CanvasLayer" parent="."]
+
+[node name="Label" type="Label" parent="HUD"]
+offset_left = 16.0
+offset_top = 12.0
+offset_right = 1800.0
+offset_bottom = 100.0

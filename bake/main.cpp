@@ -25,6 +25,8 @@ const char *USAGE =
 		"      row 0 at +90 lat, column 0 at -180 lon, little endian; NaN or --nodata missing.\n"
 		"      The datum is a sphere of radius R, or per point a float32 raster of radii (m).\n"
 		"      Writes NAME_height.rgp (and NAME_datum.rgp with a datum raster).\n"
+		"  regolith_bake slice --in PACK --out PACK --max-level N\n"
+		"      the pack's levels up to N, tiles copied: a small pack for demos\n"
 		"  regolith_bake mars --dem TIF --areoid IMG [--craters BIN] [--pits BIN] --out DIR [options]\n"
 		"  regolith_bake phobos --icq TAB --out DIR [options]\n"
 		"  regolith_bake orbit --horizons FILE[,FILE...] --out RGE\n"
@@ -238,6 +240,41 @@ int run_dem(const Args &p_args) {
 	return 0;
 }
 
+// A pack's levels up to --max-level, tiles copied as they are:
+// a small pack for demos, its finer detail left to synthesis.
+int run_slice(const Args &p_args) {
+	PackReader in;
+	if (!in.open(p_args.get("in"))) {
+		std::fprintf(stderr, "slice: cannot open %s\n", p_args.get("in").c_str());
+		return 1;
+	}
+	const int max_level = std::atoi(p_args.get("max-level", "2").c_str());
+	PackHeader h = in.header();
+	h.max_level = uint32_t(std::min<int>(max_level, int(h.max_level)));
+	PackWriter out;
+	if (!out.open(p_args.get("out"), h, in.attribution())) {
+		return 1;
+	}
+	std::vector<uint8_t> blob;
+	size_t n = 0;
+	for (const PackEntry &e : in.entries()) {
+		if (e.key.level() > max_level) {
+			continue;
+		}
+		if (!in.read_blob(e, blob) || !out.add(e.key, blob, e.min, e.max)) {
+			std::fprintf(stderr, "slice: tile failed\n");
+			return 1;
+		}
+		++n;
+	}
+	if (!out.finish()) {
+		return 1;
+	}
+	std::printf("slice: %zu tiles, levels %u-%u, %.1f MB\n", n, h.min_level, h.max_level,
+			double(out.bytes_written()) / 1e6);
+	return 0;
+}
+
 int run_phobos(const Args &p_args) {
 	IcqShape shape;
 	std::printf("loading ICQ shape\n");
@@ -354,6 +391,9 @@ int main(int p_argc, char **p_argv) {
 	}
 	if (args.mode == "dem") {
 		return run_dem(args);
+	}
+	if (args.mode == "slice") {
+		return run_slice(args);
 	}
 	if (args.mode == "mars") {
 		return run_mars(args);

@@ -61,6 +61,10 @@ public:
 	// sun (AU, ICRF), for every body.
 	RegolithBody *central() const { return central_; }
 	regolith::DVec3 central_heliocentric(double p_t) const;
+	// the camera from the sun (ICRF, m), and the sun's brightness
+	// there over the central body's (inverse square)
+	regolith::DVec3 camera_heliocentric() const;
+	double get_sun_scale() const;
 	// unit vector to the sun in a body's fixed axes, now
 	regolith::DVec3 sun_in_body(const RegolithBody *p_body) const;
 	// the same at any time, from the body's own pose there

@@ -48,17 +48,74 @@ renders, as a compositor pass costing about 0.25 ms:
   light from the sky and sunlit ground, set on the scene each frame;
 - the night sky: the 9,096 stars of the Yale Bright Star Catalogue
   at their true positions, brightness and colour, and NASA's
-  Milky Way, on a dark-adapting eye (`night_vision` caps it);
-- the planets, the Moon and any moons on orbit tables (`moons`) as
-  lit disks with their real phases, or points when unresolved.
+  Milky Way, on a dark-adapting eye (`night_vision` caps it).
 
-Mars's dust follows `dust_tau`, which `RegolithWeather` sets. Ask
-`get_sky_direction("Earth")` where something is in the sky.
+The sky draws nothing you could fly to: planets and moons are
+`RegolithBody` nodes. Mars's dust follows `dust_tau`, which
+`RegolithWeather` sets.
 
 Data: Yale Bright Star Catalogue, 5th ed. (Hoffleit and Warren,
 1991). Milky Way: NASA/Goddard Space Flight Center Scientific
 Visualization Studio, Deep Star Maps 2020. `tools/make_sky_data.gd`
 rebuilds `regolith_stars.res` and `regolith_milkyway.res` from them.
+
+## Example
+
+Open `addons/regolith/example/regolith_example.tscn` and run it:
+two planets, Mars (with its air) and Mercury (airless), at their
+real positions for today's date, and Phobos as a bonus moon. Fly
+with the mouse and WASD (speed follows the height, up to an AU
+in seconds between the planets), or jump with 1 to 5. Its packs
+are small: the global DEMs to cube level 3, the finer detail
+synthesised. Mercury: MESSENGER Global DEM 665 m v2 (USGS
+Astrogeology). Mars: MOLA/HRSC blended DEM. Phobos: Gaskell's
+shape model. Cut a big pack down the same way with
+`regolith_bake slice --in A.rgp --out B.rgp --max-level 3`.
+
+Any number of planets can share one `RegolithSystem`: the body
+without an orbit table named by `body` is the centre, and every
+other such body sits at its own orbit round the sun (its
+`preset`). The sun's direction and brightness follow the camera.
+
+## Terrain surfaces
+
+What the ground looks like is a *surface*: one `.gdshaderinc` set
+on a `RegolithBody`'s `surface_path`. Regolith inlines it into its
+terrain core (geometry, heights, terrain shadows, the sun and sky
+per point), so a surface only decides the material. Leave
+`surface_path` empty for `regolith_surface_default.gdshaderinc`:
+procedural, no textures, ground coloured by height with rock on
+slopes, all of it tunable from its uniforms.
+
+A surface declares any uniforms it wants and one function:
+
+```glsl
+uniform vec3 sand : source_color = vec3(0.6, 0.4, 0.3);
+
+void surface(TerrainPoint p, inout TerrainSurface s) {
+	s.albedo = mix(sand, vec3(0.3), smoothstep(0.1, 0.3, p.slope));
+	s.roughness = 0.9;
+}
+```
+
+`TerrainPoint p` gives, per pixel: `normal`, `up` (model space),
+`slope` (1 - cos, 0 level), `height` (m over the reference radius),
+`body_dir` (body-fixed unit vector: latitude `asin(z)`, longitude
+`atan(y, x)`), `local` (face metres, precise near the camera),
+`noise_m` (metres wrapping every 20 km, for tiling noise), `dd`
+(screen gradients of `local`, for `textureGrad`), `geology`,
+`axis_x` / `axis_y` (tangents), `eye_height` and `ring`.
+
+`TerrainSurface s` starts at sensible defaults; set any of
+`albedo`, `roughness`, `specular`, `normal` (model space),
+`normal_map` with `normal_map_depth` (tangent space along
+`axis_x` / `axis_y`), `ao`, `ao_light_affect` and `emission`.
+
+For textures that tile exactly at planet scale, the core offers
+precise per-ring domains: `domain(id)` and `domain_scale(id)`.
+Set a surface's uniforms from code with
+`RegolithBody.set_material_param(name, value)`. The surface works
+on stock Godot too: Regolith fits the combined shader to the engine.
 
 ## Bodies
 

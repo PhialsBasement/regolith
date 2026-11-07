@@ -117,6 +117,10 @@ public:
 	int get_debug_mode() const { return debug_mode_; }
 	void set_synthesis(int p_v) { synthesis_ = p_v; }
 	int get_synthesis() const { return synthesis_; }
+	// What the ground looks like: a .gdshaderinc defining
+	// surface(TerrainPoint, inout TerrainSurface); empty: default
+	void set_surface_path(const String &p_v) { surface_path_ = p_v; }
+	String get_surface_path() const { return surface_path_; }
 	void set_dark_map_path(const String &p_v) { dark_map_path_ = p_v; }
 	String get_dark_map_path() const { return dark_map_path_; }
 	// Ground-shader uniforms (texture arrays, tints...), kept
@@ -237,6 +241,7 @@ private:
 	regolith::OrbitElements orbit_elements_ = regolith::MARS_ORBIT;
 	int synthesis_ = 0; // 0 none, 1 Mars, 2 Phobos
 	String dark_map_path_;
+	String surface_path_;
 	std::unique_ptr<regolith::Synth> synth_;
 	Dictionary material_params_;
 	Dictionary material_refs_;

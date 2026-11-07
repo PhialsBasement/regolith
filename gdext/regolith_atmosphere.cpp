@@ -26,7 +26,6 @@
 
 #include "convert.hpp"
 #include "rd_util.hpp"
-#include "regolith/body_presets.hpp"
 #include "regolith/ephemeris.hpp"
 #include "regolith_body.hpp"
 #include "regolith_system.hpp"
@@ -43,8 +42,6 @@ constexpr double AU = 1.495978707e11;
 constexpr double SUN_RADIUS = 6.957e8;
 // a daylit view's mean luminance: the eye's set point
 constexpr double VIEW_KEY = 0.1;
-// a sunlit disk's face at the eye's cap: bright, short of clipping
-constexpr double DISK_WHITE = 0.5;
 constexpr int T_W = 256, T_H = 64, MS_N = 32, SV_W = 192, SV_H = 108, AP_N = 32, E_W = 64, E_H = 16;
 // the tables reach this far under the datum: under any ground
 constexpr double TABLE_DEPTH = 15000.0;
@@ -142,7 +139,7 @@ void RegolithAirEffect::free_all() {
 	}
 	for (RID *r : { &t_pipe_, &ms_pipe_, &sv_pipe_, &ap_pipe_, &comp_pipe_, &amb_pipe_, &t_shader_, &ms_shader_,
 				 &sv_shader_, &ap_shader_, &comp_shader_, &amb_shader_, &lin_clamp_, &nearest_, &params_, &t_lut_,
-				 &ms_lut_, &sv_lut_, &ap_lut_, &amb_tex_, &e_pipe_, &e_shader_, &e_lut_, &stars_buf_, &cells_buf_, &ids_buf_, &mw_tex_, &mw_sampler_, &bodies_buf_ }) {
+				 &ms_lut_, &sv_lut_, &ap_lut_, &amb_tex_, &e_pipe_, &e_shader_, &e_lut_, &stars_buf_, &cells_buf_, &ids_buf_, &mw_tex_, &mw_sampler_ }) {
 		if (r->is_valid()) {
 			rd_->free_rid(*r);
 			*r = RID();
@@ -192,7 +189,6 @@ bool RegolithAirEffect::ensure(RenderingDevice *p_rd) {
 		amb_tex_ = rd_->texture_create(f, v);
 	}
 	load_sky();
-	bodies_buf_ = rd_->storage_buffer_create(MAX_BODIES * 48);
 	built_ = false;
 	return true;
 }
@@ -348,13 +344,9 @@ void RegolithAirEffect::_render_callback(int32_t p_type, RenderData *p_data) {
 	}
 	// one pixel's angle: the stars' point spread
 	const double pixel_angle = 2.0 / (std::fabs(double(proj.columns[1].y)) * size.y);
-	const int n_bodies = std::min(int(f.bodies.size() / 12), int(MAX_BODIES));
-	push4(u, pixel_angle, f.star_scale, n_bodies, mw_unit_);
+	push4(u, pixel_angle, f.star_scale, 0.0, mw_unit_);
 	push4(u, f.glow_color.r, f.glow_color.g, f.glow_color.b, 0.0);
 	rd_->buffer_update(params_, 0, uint32_t(u.size() * 4), bytes_of(u.data(), u.size() * 4));
-	if (n_bodies > 0) {
-		rd_->buffer_update(bodies_buf_, 0, uint32_t(n_bodies * 48), bytes_of(f.bodies.data(), size_t(n_bodies) * 48));
-	}
 
 	const Ref<RDUniform> ubo = uniform(RD::UNIFORM_TYPE_UNIFORM_BUFFER, 0, params_);
 	const RID depth = buffers->get_depth_layer(0);
@@ -392,8 +384,7 @@ void RegolithAirEffect::_render_callback(int32_t p_type, RenderData *p_data) {
 					sampled(4, lin_clamp_, ms_lut_), sampled(5, lin_clamp_, sv_lut_), sampled(6, lin_clamp_, ap_lut_),
 					uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 7, stars_buf_),
 					uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 8, cells_buf_),
-					uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, ids_buf_), sampled(10, mw_sampler_, mw_tex_),
-					uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 11, bodies_buf_) },
+					uniform(RD::UNIFORM_TYPE_STORAGE_BUFFER, 9, ids_buf_), sampled(10, mw_sampler_, mw_tex_) },
 			groups(size.x, 8), groups(size.y, 8), 1);
 	pass(amb_pipe_, amb_shader_,
 			{ image(1, amb_tex_), sampled(2, lin_clamp_, t_lut_), sampled(3, lin_clamp_, sv_lut_),
@@ -448,10 +439,6 @@ void RegolithAtmosphere::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_body_path"), &RegolithAtmosphere::get_body_path);
 	ClassDB::bind_method(D_METHOD("set_sun_path", "path"), &RegolithAtmosphere::set_sun_path);
 	ClassDB::bind_method(D_METHOD("get_sun_path"), &RegolithAtmosphere::get_sun_path);
-	ClassDB::bind_method(D_METHOD("set_deimos_orbit_path", "path"), &RegolithAtmosphere::set_deimos_orbit_path);
-	ClassDB::bind_method(D_METHOD("get_deimos_orbit_path"), &RegolithAtmosphere::get_deimos_orbit_path);
-	ClassDB::bind_method(D_METHOD("set_moons", "moons"), &RegolithAtmosphere::set_moons);
-	ClassDB::bind_method(D_METHOD("get_moons"), &RegolithAtmosphere::get_moons);
 	ClassDB::bind_method(D_METHOD("set_air", "preset"), &RegolithAtmosphere::set_air);
 	ClassDB::bind_method(D_METHOD("get_air"), &RegolithAtmosphere::get_air);
 	ClassDB::bind_method(D_METHOD("set_dust_tau", "tau"), &RegolithAtmosphere::set_dust_tau);
@@ -475,9 +462,6 @@ void RegolithAtmosphere::_bind_methods() {
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "system"), "set_system_path", "get_system_path");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "body"), "set_body_path", "get_body_path");
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "sun"), "set_sun_path", "get_sun_path");
-	ADD_PROPERTY(PropertyInfo(Variant::PACKED_STRING_ARRAY, "moons"), "set_moons", "get_moons");
-	ADD_PROPERTY(PropertyInfo(Variant::STRING, "deimos_orbit_path", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE),
-			"set_deimos_orbit_path", "get_deimos_orbit_path");
 	// the preset first: values after it in a scene override it
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "air", PROPERTY_HINT_ENUM, "None,Mars,Earth,Custom"), "set_air", "get_air");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "dust_tau"), "set_dust_tau", "get_dust_tau");
@@ -511,96 +495,6 @@ void RegolithAtmosphere::_bind_methods() {
 			"set_fog_density", "get_fog_density");
 }
 
-void RegolithAtmosphere::set_moons(const PackedStringArray &p_v) {
-	moons_ = p_v;
-	moons_loaded_ = false;
-}
-
-void RegolithAtmosphere::set_deimos_orbit_path(const String &p_v) {
-	if (!p_v.is_empty()) {
-		moons_.push_back(String("Deimos:") + p_v);
-		moons_loaded_ = false;
-	}
-}
-
-std::vector<float> RegolithAtmosphere::sky_bodies(RegolithSystem *p_sys, RegolithBody *p_body, const DVec3 &p_cam) {
-	const double t = p_sys->get_time();
-	if (!moons_loaded_) {
-		moons_loaded_ = true;
-		moon_orbits_.clear();
-		for (const String &m : moons_) {
-			Moon moon;
-			moon.preset = m.get_slice(":", 0);
-			const String path = m.substr(moon.preset.length() + 1);
-			if (moon.orbit.open(ProjectSettings::get_singleton()->globalize_path(path).utf8().get_data())) {
-				moon_orbits_.push_back(std::move(moon));
-			} else {
-				ERR_PRINT("RegolithAtmosphere: cannot open moon orbit " + path);
-			}
-		}
-	}
-	// bodies drawn as terrain need no light of their own
-	std::vector<String> drawn;
-	TypedArray<Node> found = get_tree()->get_nodes_in_group("regolith_body");
-	for (int i = 0; i < found.size(); ++i) {
-		if (RegolithBody *b = Object::cast_to<RegolithBody>(found[i])) {
-			drawn.push_back(b->get_preset());
-			drawn.push_back(String(b->get_name()));
-		}
-	}
-	const RegolithBody *central = p_sys->central();
-	const String home = central ? central->get_preset() : String();
-	const DVec3 central_helio = p_sys->central_heliocentric(t) * AU;
-	const RegolithSystem::Pose &bp = p_sys->pose_of(p_body);
-	std::vector<float> out;
-	sky_dirs_.clear();
-	auto add = [&](const regolith::BodyPreset &p_b, const DVec3 &p_helio) {
-		if (out.size() / 12 >= size_t(RegolithAirEffect::MAX_BODIES) ||
-				std::find(drawn.begin(), drawn.end(), String(p_b.name.c_str())) != drawn.end()) {
-			return;
-		}
-		const DVec3 rel = p_helio - p_cam;
-		const double dist = regolith::length(rel);
-		if (dist < p_b.radius * 1.5) {
-			return; // on it, or inside
-		}
-		const DVec3 dir = regolith::normalize(rel);
-		sky_dirs_.push_back({ String(p_b.name.c_str()), dir });
-		const DVec3 sun = regolith::normalize(p_helio * -1.0);
-		auto body_frame = [&](const DVec3 &p_v) {
-			return DVec3(regolith::dot(p_v, bp.axes[0]), regolith::dot(p_v, bp.axes[1]), regolith::dot(p_v, bp.axes[2]));
-		};
-		const DVec3 d = body_frame(dir), s = body_frame(sun);
-		const double au = regolith::length(p_helio) / AU;
-		const double lum = 0.2126 * p_b.tint[0] + 0.7152 * p_b.tint[1] + 0.0722 * p_b.tint[2];
-		out.insert(out.end(), { float(d.x), float(d.y), float(d.z), float(std::asin(std::min(p_b.radius / dist, 1.0))),
-									  float(s.x), float(s.y), float(s.z), float(1.0 / (au * au)),
-									  float(p_b.albedo * p_b.tint[0] / lum), float(p_b.albedo * p_b.tint[1] / lum),
-									  float(p_b.albedo * p_b.tint[2] / lum), 0.0f });
-	};
-	for (const regolith::BodyPreset &b : regolith::body_presets()) {
-		if (b.heliocentric && b.name != std::string(home.utf8().get_data())) {
-			DVec3 helio = regolith::heliocentric(b.orbit, t) * AU;
-			if (b.name == "Earth") {
-				// the barycentre less the Moon's share
-				helio = helio - regolith::moon_geocentric(t) * (1.0 / 82.30);
-			}
-			add(b, helio);
-		}
-	}
-	if (home != "Moon" && home != "Earth") {
-		const regolith::BodyPreset *moon = regolith::find_body_preset("Moon");
-		const DVec3 earth = regolith::heliocentric(regolith::EARTH_ORBIT, t) * AU - regolith::moon_geocentric(t) * (1.0 / 82.30);
-		add(*moon, earth + regolith::moon_geocentric(t));
-	}
-	for (const Moon &m : moon_orbits_) {
-		if (const regolith::BodyPreset *b = regolith::find_body_preset(m.preset.utf8().get_data())) {
-			add(*b, central_helio + m.orbit.state(t).position);
-		}
-	}
-	return out;
-}
-
 Vector3 RegolithAtmosphere::get_sky_direction(const String &p_name, bool p_body_frame) const {
 	RegolithSystem *sys = Object::cast_to<RegolithSystem>(get_node_or_null(system_path_));
 	RegolithBody *body = Object::cast_to<RegolithBody>(get_node_or_null(body_path_));
@@ -621,12 +515,6 @@ Vector3 RegolithAtmosphere::get_sky_direction(const String &p_name, bool p_body_
 		const DVec3 away = regolith::normalize(sys->central_heliocentric(sys->get_time()));
 		icrf = regolith::normalize(away - n * regolith::dot(away, n));
 		found = true;
-	}
-	for (const std::pair<String, DVec3> &e : sky_dirs_) {
-		if (e.first == p_name) {
-			icrf = e.second;
-			found = true;
-		}
 	}
 	if (!found) {
 		return Vector3();
@@ -798,7 +686,11 @@ void RegolithAtmosphere::_process(double p_delta) {
 	const RegolithSystem::Pose &bp = sys->pose_of(body);
 	const DVec3 eye = sys->body_point(body, cam->get_global_position());
 	const double r = regolith::length(eye);
-	const DVec3 sun = sys->sun_in_body(body);
+	// the sun from the camera, in the body's axes: right from
+	// any planet, the same as from the body's centre near it
+	const DVec3 to_sun = regolith::normalize(sys->camera_heliocentric() * -1.0);
+	const DVec3 *ax = bp.axes;
+	const DVec3 sun(regolith::dot(to_sun, ax[0]), regolith::dot(to_sun, ax[1]), regolith::dot(to_sun, ax[2]));
 	// the sky meets the terrain under the camera, which may lie
 	// km under the datum; the air's density follows the datum
 	const DVec3 down = regolith::normalize(eye);
@@ -839,22 +731,7 @@ void RegolithAtmosphere::_process(double p_delta) {
 	}
 	const double want = std::clamp(VIEW_KEY / scene, 1.0, std::max(night_vision_, 1.0));
 	eye_gain_ = std::exp(std::log(eye_gain_) + (std::log(want) - std::log(eye_gain_)) * (1.0 - std::exp(-p_delta / 2.0)));
-	const DVec3 cam_helio = sys->central_heliocentric(t) * AU + sys->to_state(cam->get_global_position(), Vector3()).x;
-	f.bodies = sky_bodies(sys, body, cam_helio);
-	// a resolved, sunlit disk in view holds the eye's gain down,
-	// as a bright Moon does: its face stays displayable
 	const double base = std::numbers::pi * sun_energy_ * d_au * d_au * exposure_;
-	const Vector3 fwd = f.to_body.xform(-cam->get_global_basis().get_column(2)).normalized();
-	const double half_fov = Math::deg_to_rad(double(cam->get_fov())) * 0.75;
-	const double pixel = Math::deg_to_rad(double(cam->get_fov())) / std::max(1.0, double(get_viewport()->get_visible_rect().size.y));
-	for (size_t k = 0; k + 11 < f.bodies.size(); k += 12) {
-		const Vector3 dir(f.bodies[k], f.bodies[k + 1], f.bodies[k + 2]);
-		if (f.bodies[k + 3] > pixel && std::acos(std::clamp(double(dir.dot(fwd)), -1.0, 1.0)) < half_fov) {
-			const double albedo = std::max({ f.bodies[k + 8], f.bodies[k + 9], f.bodies[k + 10] });
-			const double face = base * 1.5 * albedo * f.bodies[k + 7] / std::numbers::pi;
-			eye_gain_ = std::min(eye_gain_, std::max(1.0, DISK_WHITE / std::max(face, 1e-12)));
-		}
-	}
 	f.star_scale = base * eye_gain_;
 	for (int k = 0; k < 3; ++k) {
 		f.body_to_icrf.set_column(k, regolith::to_v(bp.axes[k]));
@@ -908,7 +785,7 @@ void RegolithAtmosphere::_process(double p_delta) {
 	}
 	const double peak = std::max({ tr[0], tr[1], tr[2], 1e-9 });
 	sun_color_ = Color(tr[0] / peak, tr[1] / peak, tr[2] / peak);
-	const double energy = sun_energy_ * peak * sun_vis_ * sys->get_sun_visible();
+	const double energy = sun_energy_ * peak * sun_vis_ * sys->get_sun_visible() * sys->get_sun_scale();
 	if (DirectionalLight3D *light = Object::cast_to<DirectionalLight3D>(get_node_or_null(sun_path_))) {
 		light->set_param(Light3D::PARAM_ENERGY, real_t(energy));
 		light->set_color(sun_color_);

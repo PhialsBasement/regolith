@@ -514,7 +514,9 @@ void RegolithClouds::_process(double p_delta) {
 	}
 	attach(cam);
 	RegolithCloudEffect::Frame f;
-	if (!sys->is_anchored()) {
+	// no air, no clouds: an invalid frame draws nothing
+	const RegolithAtmosphere *atmo = Object::cast_to<RegolithAtmosphere>(get_node_or_null(atmosphere_path_));
+	if (!sys->is_anchored() || (atmo && atmo->get_air() == String("None"))) {
 		effect_->set_frame(f);
 		return;
 	}

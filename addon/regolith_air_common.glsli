@@ -26,7 +26,7 @@ layout(set = 0, binding = 0, std140) uniform Air {
 	mat4 inv_proj;
 	vec4 size; // xy image size, z exposure, w airglow
 	vec4 icrf_r0, icrf_r1, icrf_r2; // body to ICRF, rows
-	vec4 stars; // x star scale, y milky way scale, z bodies
+	vec4 stars; // x pixel angle, y star scale, w milky way unit
 	vec4 glow_color; // airglow tint, luminance 1
 } a;
 

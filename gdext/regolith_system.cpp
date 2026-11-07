@@ -44,7 +44,9 @@ constexpr double SUN_RADIUS = 6.957e8;
 // Each camera pass spans this far/near ratio; float32
 // projections lose the far plane well before 1e8.
 constexpr double PASS_RATIO = 1e6;
-constexpr double FAR_PLANE = 1e9; // m, past Phobos and Deimos
+// m: past Neptune, so every planet stays drawn (reversed depth
+// keeps the precision near the camera)
+constexpr double FAR_PLANE = 5e12;
 // Floating velocity: Jolt never sees the focus faster than
 // SHIFT_HIGH; under SHIFT_LOW true speed the frame stops.
 constexpr double SHIFT_HIGH = 50.0;
@@ -139,6 +141,7 @@ void RegolithSystem::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("is_anchored"), &RegolithSystem::is_anchored);
 	ClassDB::bind_method(D_METHOD("get_local_solar_time", "position"), &RegolithSystem::get_local_solar_time);
 	ClassDB::bind_method(D_METHOD("get_sun_direction"), &RegolithSystem::get_sun_direction);
+	ClassDB::bind_method(D_METHOD("get_sun_scale"), &RegolithSystem::get_sun_scale);
 	ClassDB::bind_method(D_METHOD("get_sun_visible"), &RegolithSystem::get_sun_visible);
 	ClassDB::bind_method(D_METHOD("get_dominant_name"), &RegolithSystem::get_dominant_name);
 	ClassDB::bind_method(D_METHOD("get_frame_rotating"), &RegolithSystem::get_frame_rotating);
@@ -265,6 +268,16 @@ void RegolithSystem::update_poses() {
 	for (RegolithBody *b : bodies_) {
 		Pose &p = poses_[b];
 		b->pose(time_, p.position, p.velocity, p.axes);
+		// another planet: its own orbit round the sun, relative
+		// to the central body's
+		if (b != central_ && !b->has_orbit_table()) {
+			const double dt = 60.0;
+			auto rel = [&](double p_t) {
+				return (regolith::heliocentric(b->orbit_elements(), p_t) - central_heliocentric(p_t)) * AU;
+			};
+			p.position = rel(time_);
+			p.velocity = (rel(time_ + dt) - rel(time_ - dt)) / (2.0 * dt);
+		}
 		DVec3 a[5][3];
 		DVec3 dummy_p, dummy_v;
 		for (int k = 0; k < 5; ++k) {
@@ -910,11 +923,28 @@ void RegolithSystem::update_sun() {
 			sun_visible_ = std::fmin(sun_visible_, 1.0 - covered * area);
 		}
 	}
-	sun->set_param(Light3D::PARAM_ENERGY, real_t(sun_energy_ * sun_visible_));
+	sun->set_param(Light3D::PARAM_ENERGY, real_t(sun_energy_ * sun_visible_ * get_sun_scale()));
+}
+
+DVec3 RegolithSystem::camera_heliocentric() const {
+	DVec3 x;
+	Camera3D *cam = is_inside_tree() && get_viewport() ? get_viewport()->get_camera_3d() : nullptr;
+	if (cam && anchored_) {
+		x = to_state(cam->get_global_position(), Vector3()).x;
+	}
+	return central_heliocentric(time_) * AU + x;
+}
+
+double RegolithSystem::get_sun_scale() const {
+	// the light's energy is the central body's: inverse square
+	const double d0 = regolith::length(central_heliocentric(time_) * AU);
+	const double d = std::max(regolith::length(camera_heliocentric()), 1e9);
+	return (d0 * d0) / (d * d);
 }
 
 Vector3 RegolithSystem::get_sun_direction() const {
-	const DVec3 sun = regolith::normalize(central_heliocentric(time_) * -1.0);
+	// from the camera: on another planet the sun stands elsewhere
+	const DVec3 sun = regolith::normalize(camera_heliocentric() * -1.0);
 	return regolith::to_v(frame_.to_local_vec(from_icrf(ref_axes(), sun)));
 }
 

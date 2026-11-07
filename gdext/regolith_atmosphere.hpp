@@ -51,13 +51,9 @@ public:
 		// pi x the sun's illuminance at 1 AU x night vision: the
 		// stars' and the Milky Way's units
 		double star_scale = 0.0;
-		// up to MAX_BODIES x 3 vec4, as regolith_sky_bodies.glsli
-		std::vector<float> bodies;
 		Basis body_to_icrf;
 		bool valid = false;
 	};
-
-	static constexpr int MAX_BODIES = 32;
 
 	RegolithAirEffect();
 	~RegolithAirEffect() override;
@@ -98,7 +94,7 @@ private:
 	RID t_lut_, ms_lut_, sv_lut_, ap_lut_, amb_tex_, e_lut_;
 	double built_base_ = 0.0; // the tables' base radius
 	bool tables_ready_ = false;
-	RID stars_buf_, cells_buf_, ids_buf_, mw_tex_, mw_sampler_, bodies_buf_;
+	RID stars_buf_, cells_buf_, ids_buf_, mw_tex_, mw_sampler_;
 	double mw_unit_ = 0.0; // the Milky Way map's unit, suns per sr
 };
 
@@ -120,13 +116,6 @@ public:
 	NodePath get_body_path() const { return body_path_; }
 	void set_sun_path(const NodePath &p_v) { sun_path_ = p_v; }
 	NodePath get_sun_path() const { return sun_path_; }
-	// Moons on orbit tables (relative to the central body), drawn
-	// in the sky: "Preset:res://path.rge", e.g. Deimos's.
-	void set_moons(const PackedStringArray &p_v);
-	PackedStringArray get_moons() const { return moons_; }
-	// the old single-moon property, kept for saved scenes
-	void set_deimos_orbit_path(const String &p_v);
-	String get_deimos_orbit_path() const { return String(); }
 	// None (airless), Mars (CO2 and live dust), Earth, Custom
 	void set_air(const String &p_v);
 	String get_air() const { return air_; }
@@ -159,8 +148,8 @@ public:
 	// the air's colour and extinction (1/m) at the camera, for
 	// haze others draw (the clouds)
 	Color get_haze() const { return haze_; }
-	// where a planet or moon (or "Galactic Center") stands in the
-	// sky: render space, or the body's fixed frame; zero if unknown
+	// where "Galactic Center" or "Milky Way" (its part opposite the
+	// sun) stands: render space, or the body's fixed frame
 	Vector3 get_sky_direction(const String &p_name, bool p_body_frame = false) const;
 
 protected:
@@ -170,8 +159,6 @@ private:
 	// p_ground: the sphere the sky meets; p_datum: where the
 	// coefficients hold
 	regolith::AirModel model(double p_ground, double p_datum) const;
-	// the planets and moons in the sky, camera-relative
-	std::vector<float> sky_bodies(RegolithSystem *p_sys, RegolithBody *p_body, const regolith::DVec3 &p_cam_helio);
 	void attach(Camera3D *p_cam);
 	void detach();
 	void occlusion(RegolithSystem *p_sys, RegolithBody *p_body, const regolith::DVec3 &p_eye,
@@ -180,14 +167,6 @@ private:
 	NodePath system_path_;
 	NodePath body_path_;
 	NodePath sun_path_;
-	PackedStringArray moons_;
-	struct Moon {
-		String preset;
-		regolith::OrbitTable orbit;
-	};
-	std::vector<Moon> moon_orbits_;
-	std::vector<std::pair<String, regolith::DVec3>> sky_dirs_; // ICRF
-	bool moons_loaded_ = false;
 	String air_ = "Mars";
 	regolith::AirModel custom_; // per metre, heights in metres
 	double dust_tau_ = 0.35;

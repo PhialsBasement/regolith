@@ -133,18 +133,24 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		"${REGOLITH_ADDON_DIR}/regolith.gdextension" COPYONLY)
 	configure_file(addon/regolith_terrain.gdshader
 		"${REGOLITH_ADDON_DIR}/regolith_terrain.gdshader" COPYONLY)
-	foreach(f regolith_clipmap.gdshader regolith_cloud_common.glsli
+	foreach(f regolith_clipmap_core.gdshaderinc regolith_surface_default.gdshaderinc regolith_cloud_common.glsli
 			regolith_cloud_noise.glsl regolith_cloud_light.glsl regolith_cloud_march.glsl regolith_cloud_composite.glsl
 			regolith_cloud_mip.glsl regolith_cloud_resolve.glsl
 			regolith_air_common.glsli regolith_air_transmittance.glsl regolith_air_multiscatter.glsl
 			regolith_air_skyview.glsl regolith_air_aerial.glsl regolith_air_composite.glsl
-			regolith_air_ambient.glsl regolith_air_irradiance.glsl regolith_sky_objects.glsli regolith_sky_bodies.glsli
+			regolith_air_ambient.glsl regolith_air_irradiance.glsl regolith_sky_objects.glsli
 			regolith_stars.res regolith_milkyway.res)
 		configure_file(addon/${f} "${REGOLITH_ADDON_DIR}/${f}" COPYONLY)
 	endforeach()
+	# the example scene, its scripts and its small packs
+	file(GLOB_RECURSE example_files RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}/example" "${CMAKE_CURRENT_SOURCE_DIR}/example/*")
+	foreach(f ${example_files})
+		configure_file("example/${f}" "${REGOLITH_ADDON_DIR}/example/${f}" COPYONLY)
+	endforeach()
 	# Stock Godot variants of the terrain shaders, without the
 	# patched engine's features: slower, but they compile.
-	foreach(f regolith_clipmap regolith_terrain)
+	# (the clipmap terrain is fitted at runtime, with its surface)
+	foreach(f regolith_terrain)
 		set(src "${CMAKE_CURRENT_SOURCE_DIR}/addon/${f}.gdshader")
 		set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${src}")
 		file(READ "${src}" code)
