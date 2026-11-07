@@ -1,9 +1,33 @@
 # Regolith
 
-True-scale planetary terrain for Godot 4.7, as a C++ GDExtension. Every
-body is a cube-sphere displaced by its real elevation data, from orbit down
-to the ground. See `TERRAIN_PLAN.md` in the morsified project for the
-design.
+True-scale planets for Godot 4.7, as a C++ GDExtension. Every body is a
+cube-sphere displaced by its real elevation data, flown from orbit down to
+the ground in one take, under a physically based atmosphere and the real
+night sky, with orbital mechanics between the planets.
+
+![Standing on Phobos: Mars turns from day to a crescent](docs/media/phobos.gif)
+
+| ![Orbit to ground](docs/media/descent.gif) | ![Martian sunset](docs/media/sunset.gif) |
+|---|---|
+| 400 km orbit to 3 m over Mars, one take | Mars's blue sunset |
+
+| ![](docs/media/mars_limb.jpg) | ![](docs/media/mars_disc.jpg) | ![](docs/media/mars_high.jpg) |
+|---|---|---|
+| 400 km orbit | Mars from 6000 km | 40 km up, through the dust |
+| ![](docs/media/valles_marineris.jpg) | ![](docs/media/mars_from_phobos.jpg) | ![](docs/media/mercury_orbit.jpg) |
+| Valles Marineris | Mars from Phobos | Mercury from 300 km |
+
+Everything above is the included example, rendered in engine: Mars
+(MOLA/HRSC), Mercury (MESSENGER) and Phobos at their real positions.
+
+## Orbital mechanics
+
+`RegolithSystem` flies vessels the way KSP does, at true scale: gravity
+from every body and the Sun, patched conics between spheres of influence,
+vessels on rails when far away or under time warp (`set_warp`, up to
+10,000,000x), and an impact (`vessel_impact`) when a coasting vessel meets
+the ground. Plan transfers with `get_body_state_at` (where a body will be)
+and fly them with thrust on any `RigidBody3D` carrying a `RegolithVessel`.
 
 ## The engine
 
