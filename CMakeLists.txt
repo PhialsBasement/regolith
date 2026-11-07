@@ -3,8 +3,15 @@ project(regolith LANGUAGES CXX)
 
 option(REGOLITH_BUILD_GDEXTENSION "Build the Godot extension" ON)
 option(REGOLITH_BUILD_TESTS "Build the core unit tests" ON)
-set(REGOLITH_ADDON_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../addons/regolith"
-	CACHE PATH "Where the extension and its .gdextension land")
+# Where the built addon lands: a game holding Regolith as a
+# submodule (../addons/regolith beside it) gets it there; a
+# standalone checkout gets dist/addons/regolith inside itself.
+if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../addons/regolith")
+	set(regolith_default_addon "${CMAKE_CURRENT_SOURCE_DIR}/../addons/regolith")
+else()
+	set(regolith_default_addon "${CMAKE_CURRENT_SOURCE_DIR}/dist/addons/regolith")
+endif()
+set(REGOLITH_ADDON_DIR "${regolith_default_addon}" CACHE PATH "Where the extension and its .gdextension land")
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)

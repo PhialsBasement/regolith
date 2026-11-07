@@ -39,4 +39,6 @@ for platform in $platforms; do
 		done
 	done
 done
-echo "done: $(ls "$root/../addons/regolith/bin" | wc -l) libraries in addons/regolith/bin"
+addon="$root/dist/addons/regolith"
+[ -d "$root/../addons/regolith" ] && addon="$root/../addons/regolith"
+echo "done: $(ls "$addon/bin" | wc -l) libraries in $addon/bin"

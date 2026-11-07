@@ -148,8 +148,25 @@ cmake --build build -j 16
 ./build/regolith_core_tests
 ```
 
-The library and `regolith.gdextension` land in `../addons/regolith/`
-(override with `-DREGOLITH_ADDON_DIR=...`).
+The built addon lands in `dist/addons/regolith/`, or in
+`../addons/regolith/` when Regolith sits in a game as a submodule
+(override with `-DREGOLITH_ADDON_DIR=...`). `tools/build_all.sh`
+builds all eight libraries; `tools/package_release.sh VERSION`
+then makes the release downloads in `release/`.
+
+## Installing a release
+
+No compiling needed. From a release, take:
+
+- `regolith-VERSION-addon.zip`: unzip into your project, giving
+  `addons/regolith/` (all eight libraries, the example included).
+- `godot-4.7.2.stable.double-regolith-linux-editor.zip` or
+  `...-windows-editor.zip`: the patched double-precision Godot
+  editor. Open your project with it.
+- `godot-4.7.2.stable.double-regolith-export-templates.tpz`: in
+  that editor, Editor > Manage Export Templates > Install from File.
+
+Godot's own licence (MIT) is in the editor downloads.
 
 ## Exporting
 

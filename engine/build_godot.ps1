@@ -43,7 +43,8 @@ foreach ($p in Get-ChildItem (Join-Path $Here "patches\*.patch") | Sort-Object N
 $env:BUILD_NAME = "regolith"
 foreach ($target in @("editor", "template_debug", "template_release")) {
 	Write-Host "== building $target"
-	scons platform=windows arch=x86_64 precision=double target=$target -j $Jobs
+	# Vulkan only: Direct3D 12 needs an extra SDK, Regolith uses Vulkan
+	scons platform=windows arch=x86_64 precision=double target=$target d3d12=no -j $Jobs
 	if ($LASTEXITCODE -ne 0) { Die "$target build failed" }
 }
 
