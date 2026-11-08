@@ -2,6 +2,7 @@
 // Mozilla Public License, v. 2.0. If a copy of the MPL was
 // not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include <array>
 #include <cmath>
 #include <numbers>
 
@@ -10,52 +11,81 @@
 
 using namespace regolith;
 
+namespace {
+
+// A sample on a face edge and the sample one step past it.
+struct EdgeStep {
+	int64_t edge_i, edge_j;
+	int64_t past_i, past_j;
+};
+
+// The step outward at position p_along on each of a face's
+// four edges.
+std::array<EdgeStep, 4> outward_steps(int64_t p_along, int64_t p_edge_intervals) {
+	const int64_t m = p_edge_intervals;
+	return { EdgeStep{ 0, p_along, -1, p_along }, EdgeStep{ m, p_along, m + 1, p_along },
+		EdgeStep{ p_along, 0, p_along, -1 }, EdgeStep{ p_along, m, p_along, m + 1 } };
+}
+
+struct StepRange {
+	double fewest_texels = 1e9;
+	double most_texels = 0.0;
+};
+
+// One step past an edge lands on the neighbouring face, about
+// one texel from the edge sample.
+void measure_step(int p_face, const EdgeStep &p_step, int64_t p_edge_intervals, StepRange &r_range) {
+	const double texel_rad = std::numbers::pi / 2.0 / double(p_edge_intervals);
+	const IVec3 edge = fold_lattice(p_face, p_step.edge_i, p_step.edge_j, p_edge_intervals);
+	const IVec3 past = fold_lattice(p_face, p_step.past_i, p_step.past_j, p_edge_intervals);
+	const FaceSample owner = canonical_sample(past, p_edge_intervals);
+	CHECK(dot(face_axes(owner.face).f, past) == p_edge_intervals);
+	const double step_rad = length(lattice_dir(past, p_edge_intervals) - lattice_dir(edge, p_edge_intervals));
+	r_range.fewest_texels = std::fmin(r_range.fewest_texels, step_rad / texel_rad);
+	r_range.most_texels = std::fmax(r_range.most_texels, step_rad / texel_rad);
+}
+
+} // namespace
+
 TEST_CASE(fold_crosses_into_neighbour) {
-	const int64_t m = 208 << 3;
-	const double texel = std::numbers::pi / 2.0 / double(m);
-	double worst_ratio_lo = 1e9;
-	double worst_ratio_hi = 0.0;
+	const int64_t edge_intervals = 208 << 3;
+	const int64_t positions[] = { 0, 1, edge_intervals / 3, edge_intervals - 1, edge_intervals };
+	StepRange range;
 	for (int face = 0; face < FACE_COUNT; ++face) {
-		for (int64_t k : { int64_t(0), int64_t(1), m / 3, m - 1, m }) {
-			// (edge sample, one step past it) for each of 4 edges
-			const int64_t pairs[4][4] = {
-				{ 0, k, -1, k }, { m, k, m + 1, k }, { k, 0, k, -1 }, { k, m, k, m + 1 }
-			};
-			for (const auto &pr : pairs) {
-				const IVec3 edge = fold_lattice(face, pr[0], pr[1], m);
-				const IVec3 past = fold_lattice(face, pr[2], pr[3], m);
-				const FaceSample c = canonical_sample(past, m);
-				CHECK(dot(face_axes(c.face).f, past) == m);
-				const double ang = length(lattice_dir(past, m) - lattice_dir(edge, m));
-				worst_ratio_lo = std::fmin(worst_ratio_lo, ang / texel);
-				worst_ratio_hi = std::fmax(worst_ratio_hi, ang / texel);
+		for (int64_t along : positions) {
+			for (const EdgeStep &step : outward_steps(along, edge_intervals)) {
+				measure_step(face, step, edge_intervals, range);
 			}
 		}
 	}
-	std::printf("  one step across an edge: %.3f to %.3f texels\n", worst_ratio_lo, worst_ratio_hi);
-	CHECK(worst_ratio_lo > 0.4);
-	CHECK(worst_ratio_hi < 2.5);
+	std::printf("  one step across an edge: %.3f to %.3f texels\n", range.fewest_texels, range.most_texels);
+	CHECK(range.fewest_texels > 0.4);
+	CHECK(range.most_texels < 2.5);
 }
 
 TEST_CASE(fold_is_identity_inside_face) {
-	const int64_t m = 256 << 2;
+	const int64_t edge_intervals = 256 << 2;
 	for (int face = 0; face < FACE_COUNT; ++face) {
-		const FaceSample s{ face, 5, m - 7 };
-		CHECK(fold_lattice(face, s.gi, s.gj, m) == lattice_point(s, m));
+		const FaceSample interior{ face, 5, edge_intervals - 7 };
+		CHECK(fold_lattice(face, interior.gi, interior.gj, edge_intervals) == lattice_point(interior, edge_intervals));
 	}
 }
 
 TEST_CASE(canonical_is_lowest_face) {
-	const int64_t m = 208 << 4;
+	const int64_t edge_intervals = 208 << 4;
 	for (int face = 0; face < FACE_COUNT; ++face) {
-		for (const FaceSample &s : { FaceSample{ face, 0, 9 }, FaceSample{ face, m, m }, FaceSample{ face, 3, m } }) {
-			const IVec3 p = lattice_point(s, m);
+		const FaceSample edge_and_corner_samples[] = { { face, 0, 9 }, { face, edge_intervals, edge_intervals },
+			{ face, 3, edge_intervals } };
+		for (const FaceSample &sample : edge_and_corner_samples) {
+			const IVec3 point = lattice_point(sample, edge_intervals);
 			FaceSample owners[3];
-			const int n = lattice_faces(p, m, owners);
-			const FaceSample c = canonical_sample(p, m);
-			CHECK(n >= 1);
-			CHECK(c.face == owners[0].face && c.gi == owners[0].gi && c.gj == owners[0].gj);
-			CHECK(lattice_point(c, m) == p);
+			const int owner_count = lattice_faces(point, edge_intervals, owners);
+			const FaceSample canonical = canonical_sample(point, edge_intervals);
+			CHECK(owner_count >= 1);
+			CHECK(canonical.face == owners[0].face);
+			CHECK(canonical.gi == owners[0].gi);
+			CHECK(canonical.gj == owners[0].gj);
+			CHECK(lattice_point(canonical, edge_intervals) == point);
 		}
 	}
 }
