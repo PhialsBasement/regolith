@@ -458,6 +458,8 @@ void RegolithAtmosphere::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_air"), &RegolithAtmosphere::get_air);
 	ClassDB::bind_method(D_METHOD("set_dust_tau", "tau"), &RegolithAtmosphere::set_dust_tau);
 	ClassDB::bind_method(D_METHOD("get_dust_tau"), &RegolithAtmosphere::get_dust_tau);
+	ClassDB::bind_method(D_METHOD("set_dust_scale", "scale"), &RegolithAtmosphere::set_dust_scale);
+	ClassDB::bind_method(D_METHOD("get_dust_scale"), &RegolithAtmosphere::get_dust_scale);
 	ClassDB::bind_method(D_METHOD("set_sun_energy", "energy"), &RegolithAtmosphere::set_sun_energy);
 	ClassDB::bind_method(D_METHOD("get_sun_energy"), &RegolithAtmosphere::get_sun_energy);
 	ClassDB::bind_method(D_METHOD("set_exposure", "exposure"), &RegolithAtmosphere::set_exposure);
@@ -480,6 +482,8 @@ void RegolithAtmosphere::_bind_methods() {
 	// the preset first: values after it in a scene override it
 	ADD_PROPERTY(PropertyInfo(Variant::STRING, "air", PROPERTY_HINT_ENUM, "None,Mars,Earth,Custom"), "set_air", "get_air");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "dust_tau"), "set_dust_tau", "get_dust_tau");
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "dust_scale", PROPERTY_HINT_RANGE, "0,2,0.01,or_greater"), "set_dust_scale",
+			"get_dust_scale");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "sun_energy"), "set_sun_energy", "get_sun_energy");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "exposure"), "set_exposure", "get_exposure");
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "airglow"), "set_airglow", "get_airglow");
@@ -544,10 +548,18 @@ Vector3 RegolithAtmosphere::get_sky_direction(const String &p_name, bool p_body_
 	return sys->icrf_to_render().xform(regolith::to_v(icrf)).normalized();
 }
 
+void RegolithAtmosphere::set_dust_scale(double p_v) {
+	if (!std::isfinite(p_v) || p_v < 0.0) {
+		ERR_PRINT_ONCE("RegolithAtmosphere: dust_scale must be finite and not negative; kept " + String::num(dust_scale_));
+		return;
+	}
+	dust_scale_ = p_v;
+}
+
 void RegolithAtmosphere::set_air(const String &p_v) {
 	air_ = p_v;
 	if (p_v == "Mars") {
-		custom_ = regolith::mars_air(0.0, dust_tau_);
+		custom_ = regolith::mars_air(0.0, dust_tau_ * dust_scale_);
 	} else if (p_v == "Earth") {
 		custom_ = regolith::earth_air(0.0);
 	}
@@ -598,7 +610,7 @@ AirModel RegolithAtmosphere::model(double p_ground, double p_datum) const {
 	AirModel a = custom_;
 	if (air_ == "Mars") {
 		// the dust follows the weather; the rest stays as set
-		const AirModel d = regolith::mars_air(0.0, dust_tau_);
+		const AirModel d = regolith::mars_air(0.0, dust_tau_ * dust_scale_);
 		a.mie_scattering = d.mie_scattering;
 		a.mie_absorption = d.mie_absorption;
 	}
@@ -783,7 +795,7 @@ void RegolithAtmosphere::_process(double p_delta) {
 
 	const double alt = std::max(r - bottom, 0.0);
 	sky_thin_ = has_air ? std::exp(-alt / std::max(air.rayleigh_height, 1.0)) : 0.0;
-	body->set_material_param("dust_tau", has_air ? dust_tau_ : 0.0);
+	body->set_material_param("dust_tau", has_air ? dust_tau_ * dust_scale_ : 0.0);
 
 	// terrain hiding a low sun, every 0.25 s near the ground
 	occl_cool_ -= p_delta;

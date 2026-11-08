@@ -129,6 +129,8 @@ public:
 	String get_air() const { return air_; }
 	void set_dust_tau(double p_v) { dust_tau_ = p_v; }
 	double get_dust_tau() const { return dust_tau_; }
+	void set_dust_scale(double p_v);
+	double get_dust_scale() const { return dust_scale_; }
 	void set_sun_energy(double p_v) { sun_energy_ = p_v; }
 	double get_sun_energy() const { return sun_energy_; }
 	void set_exposure(double p_v) { exposure_ = p_v; }
@@ -178,6 +180,9 @@ private:
 	String air_ = "Mars";
 	regolith::AirModel custom_; // per metre, heights in metres
 	double dust_tau_ = 0.35;
+	// the share of dust_tau the air renders: a game's look over
+	// the optical depth its weather reports; 1 renders it as given
+	double dust_scale_ = 1.0;
 	double sun_energy_ = 1.7;
 	double exposure_ = 1.0;
 	// the zenith's glow per sr, in suns at 1 AU: 24 V mag/arcsec2,

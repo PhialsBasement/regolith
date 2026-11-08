@@ -80,7 +80,9 @@ renders, as a compositor pass costing about 0.25 ms:
 
 The sky draws nothing you could fly to: planets and moons are
 `RegolithBody` nodes. Mars's dust follows `dust_tau`, which
-`RegolithWeather` sets.
+`RegolithWeather` sets; `dust_scale` (1 by default) is the share
+of it the air renders, for a game that wants a clearer or hazier
+look than the optical depth its weather reports.
 
 Data: Yale Bright Star Catalogue, 5th ed. (Hoffleit and Warren,
 1991). Milky Way: NASA/Goddard Space Flight Center Scientific
