@@ -185,6 +185,17 @@ only, levels 0 to 3.
 
 The remaining bytes up to 256 are zero.
 
+A reader rejects a pack whose header breaks any of these:
+
+- 1 <= N <= 4096, and 2 <= B <= 16 (subdividing a tile reads two
+  samples past its edge).
+- codec is 1, 2 or 3.
+- step and r_ref are finite and above 0.
+- min level <= max level <= 28.
+- The index (`tile count` x 32 bytes from `index offset`), the
+  attribution and every blob lie inside the file, and the index keys
+  rise strictly.
+
 ### Index
 
 `tile count` entries of 32 bytes, sorted by key:

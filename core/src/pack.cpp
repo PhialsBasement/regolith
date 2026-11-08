@@ -5,6 +5,7 @@
 #include "regolith/pack.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <mutex>
 
@@ -25,6 +26,25 @@ bool seek(FILE *p_file, uint64_t p_offset) {
 #else
 	return fseeko(p_file, off_t(p_offset), SEEK_SET) == 0;
 #endif
+}
+
+bool file_size(FILE *p_file, uint64_t &r_size) {
+#ifdef _WIN32
+	if (_fseeki64(p_file, 0, SEEK_END) != 0) {
+		return false;
+	}
+	const int64_t end = _ftelli64(p_file);
+#else
+	if (fseeko(p_file, 0, SEEK_END) != 0) {
+		return false;
+	}
+	const int64_t end = int64_t(ftello(p_file));
+#endif
+	if (end < 0) {
+		return false;
+	}
+	r_size = uint64_t(end);
+	return true;
 }
 
 template <typename T>
@@ -84,6 +104,36 @@ bool decode_header(const uint8_t p_buf[PACK_HEADER_SIZE], PackHeader &r_h) {
 	r_h.attribution_offset = get<uint64_t>(p_buf, 112);
 	r_h.attribution_size = get<uint32_t>(p_buf, 120);
 	return r_h.version == 1;
+}
+
+// Everything a reader sizes memory or indexes arrays by comes
+// from the file, so all of it is checked before use.
+bool header_valid(const PackHeader &p_h, uint64_t p_file_size) {
+	// side = N + 1 + 2B, squared, stays far inside int
+	if (p_h.intervals < 1 || p_h.intervals > PACK_MAX_INTERVALS) {
+		return false;
+	}
+	// subdivide's 4-tap stencil reads two parent samples outside
+	if (p_h.border < PACK_MIN_BORDER || p_h.border > PACK_MAX_BORDER) {
+		return false;
+	}
+	if (p_h.codec != CODEC_ROW_DELTA && p_h.codec != CODEC_MED && p_h.codec != CODEC_MED_NO_PLANES) {
+		return false;
+	}
+	if (!std::isfinite(p_h.step) || p_h.step <= 0.0 || !std::isfinite(p_h.r_ref) || p_h.r_ref <= 0.0) {
+		return false;
+	}
+	if (p_h.min_level > p_h.max_level || p_h.max_level > uint32_t(TileKey::MAX_LEVEL)) {
+		return false;
+	}
+	// the index and the attribution lie inside the file
+	if (p_h.index_offset > p_file_size || p_h.tile_count > (p_file_size - p_h.index_offset) / PACK_ENTRY_SIZE) {
+		return false;
+	}
+	if (p_h.attribution_offset > p_file_size || p_h.attribution_size > p_file_size - p_h.attribution_offset) {
+		return false;
+	}
+	return true;
 }
 
 } // namespace
@@ -175,6 +225,10 @@ bool PackReader::open(const std::string &p_path) {
 	if (std::fread(head, 1, PACK_HEADER_SIZE, file_) != PACK_HEADER_SIZE || !decode_header(head, header_)) {
 		return false;
 	}
+	uint64_t size = 0;
+	if (!file_size(file_, size) || !header_valid(header_, size)) {
+		return false;
+	}
 	attribution_.resize(header_.attribution_size);
 	if (!seek(file_, header_.attribution_offset) ||
 			std::fread(attribution_.data(), 1, attribution_.size(), file_) != attribution_.size()) {
@@ -193,6 +247,13 @@ bool PackReader::open(const std::string &p_path) {
 		entries_[k].crc = get<uint32_t>(p, 20);
 		entries_[k].min = get<float>(p, 24);
 		entries_[k].max = get<float>(p, 28);
+		// blobs inside the file; keys strictly ascending, as find's
+		// binary search needs
+		const PackEntry &e = entries_[k];
+		if (e.offset > size || e.size > size - e.offset || (k > 0 && entries_[k - 1].key.bits >= e.key.bits)) {
+			entries_.clear();
+			return false;
+		}
 	}
 	return true;
 }

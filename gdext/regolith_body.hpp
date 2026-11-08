@@ -239,6 +239,7 @@ private:
 	bool build_patch(uint64_t p_id, regolith::TileKey p_tile, int p_bx, int p_by);
 	void place_patch(Patch &r_patch, bool p_teleport) const;
 	void free_render_resources();
+	void make_loader();
 
 	String pack_path_;
 	String datum_path_;

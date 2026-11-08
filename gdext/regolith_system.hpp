@@ -75,6 +75,8 @@ public:
 	regolith::DVec3 sun_in_body_at(const RegolithBody *p_body, double p_t) const;
 	bool is_parked(const Node *p_node) const;
 	const Pose &pose_of(const RegolithBody *p_body) const;
+	bool has_body(const RegolithBody *p_body) const;
+	void adopt(RegolithBody *p_body);
 	State to_state(const Vector3 &p_pos, const Vector3 &p_vel) const;
 	void from_state(const State &p_s, Vector3 &r_pos, Vector3 &r_vel) const;
 	// Spin of p_body as seen in the render frame.

@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <cstdio>
 #include <string>
 #include <vector>
 
@@ -25,7 +26,7 @@ public:
 	bool save(const std::string &p_path) const;
 	OrbitState state(double p_seconds) const;
 	double start() const { return t0_; }
-	double end() const { return t0_ + step_ * double(states_.size() - 1); }
+	double end() const { return states_.empty() ? t0_ : t0_ + step_ * double(states_.size() - 1); }
 
 	double t0_ = 0.0;
 	double step_ = 0.0;
@@ -37,6 +38,7 @@ public:
 	std::vector<OrbitState> states_;
 
 private:
+	bool read(FILE *p_file);
 	OrbitState propagate(const OrbitState &p_from_icrf, double p_dt) const;
 	DVec3 to_equator(const DVec3 &p_v) const;
 	DVec3 from_equator(const DVec3 &p_v) const;

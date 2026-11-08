@@ -424,15 +424,17 @@ void RegolithClouds::_ready() {
 }
 
 void RegolithClouds::detach() {
-	if (attached_ && effect_.is_valid()) {
-		Ref<Compositor> c = attached_->get_compositor();
+	// by id: the camera may have been freed since attach
+	Camera3D *cam = Object::cast_to<Camera3D>(ObjectDB::get_instance(attached_id_));
+	attached_id_ = 0;
+	if (cam && effect_.is_valid()) {
+		Ref<Compositor> c = cam->get_compositor();
 		if (c.is_valid()) {
 			TypedArray<Ref<CompositorEffect>> fx = c->get_compositor_effects();
 			fx.erase(effect_);
 			c->set_compositor_effects(fx);
 		}
 	}
-	attached_ = nullptr;
 }
 
 void RegolithClouds::_exit_tree() {
@@ -440,7 +442,7 @@ void RegolithClouds::_exit_tree() {
 }
 
 void RegolithClouds::attach(Camera3D *p_cam) {
-	if (p_cam == attached_) {
+	if (p_cam->get_instance_id() == attached_id_) {
 		return;
 	}
 	detach();
@@ -452,7 +454,7 @@ void RegolithClouds::attach(Camera3D *p_cam) {
 	TypedArray<Ref<CompositorEffect>> fx = c->get_compositor_effects();
 	fx.push_back(effect_);
 	c->set_compositor_effects(fx);
-	attached_ = p_cam;
+	attached_id_ = p_cam->get_instance_id();
 }
 
 namespace {
@@ -520,7 +522,7 @@ void RegolithClouds::_process(double p_delta) {
 	RegolithCloudEffect::Frame f;
 	// no air, no clouds: an invalid frame draws nothing
 	const RegolithAtmosphere *atmo = Object::cast_to<RegolithAtmosphere>(get_node_or_null(atmosphere_path_));
-	if (!sys->is_anchored() || (atmo && atmo->get_air() == String("None"))) {
+	if (!sys->is_anchored() || !sys->has_body(b) || (atmo && atmo->get_air() == String("None"))) {
 		effect_->set_frame(f);
 		return;
 	}

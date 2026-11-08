@@ -535,6 +535,9 @@ Vector3 RegolithAtmosphere::get_sky_direction(const String &p_name, bool p_body_
 		return Vector3();
 	}
 	if (p_body_frame) {
+		if (!sys->has_body(body)) {
+			return Vector3();
+		}
 		const RegolithSystem::Pose &bp = sys->pose_of(body);
 		return regolith::to_v(DVec3(regolith::dot(icrf, bp.axes[0]), regolith::dot(icrf, bp.axes[1]), regolith::dot(icrf, bp.axes[2])));
 	}
@@ -624,7 +627,7 @@ void RegolithAtmosphere::_ready() {
 }
 
 void RegolithAtmosphere::attach(Camera3D *p_cam) {
-	if (p_cam == attached_) {
+	if (p_cam->get_instance_id() == attached_id_) {
 		return;
 	}
 	detach();
@@ -636,20 +639,22 @@ void RegolithAtmosphere::attach(Camera3D *p_cam) {
 	TypedArray<Ref<CompositorEffect>> fx = c->get_compositor_effects();
 	fx.push_back(effect_);
 	c->set_compositor_effects(fx);
-	attached_ = p_cam;
+	attached_id_ = p_cam->get_instance_id();
 }
 
 void RegolithAtmosphere::detach() {
-	if (!attached_) {
+	// by id: the camera may have been freed since attach
+	Camera3D *cam = Object::cast_to<Camera3D>(ObjectDB::get_instance(attached_id_));
+	attached_id_ = 0;
+	if (!cam) {
 		return;
 	}
-	Ref<Compositor> c = attached_->get_compositor();
+	Ref<Compositor> c = cam->get_compositor();
 	if (c.is_valid()) {
 		TypedArray<Ref<CompositorEffect>> fx = c->get_compositor_effects();
 		fx.erase(effect_);
 		c->set_compositor_effects(fx);
 	}
-	attached_ = nullptr;
 }
 
 void RegolithAtmosphere::_exit_tree() {
@@ -707,6 +712,11 @@ void RegolithAtmosphere::_process(double p_delta) {
 	RegolithBody *body = Object::cast_to<RegolithBody>(get_node_or_null(body_path_));
 	Camera3D *cam = get_viewport() ? get_viewport()->get_camera_3d() : nullptr;
 	if (!sys || !body || !cam || !sys->is_anchored()) {
+		return;
+	}
+	if (!sys->has_body(body)) {
+		// its pack failed to open, or it is not a body of this system
+		WARN_PRINT_ONCE("RegolithAtmosphere: its body is not part of the RegolithSystem; the air is off");
 		return;
 	}
 	attach(cam);

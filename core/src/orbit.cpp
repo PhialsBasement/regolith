@@ -74,32 +74,70 @@ void put(std::vector<uint8_t> &r_out, T p_v) {
 } // namespace
 
 bool OrbitTable::open(const std::string &p_path) {
+	states_.clear();
 	FILE *f = std::fopen(p_path.c_str(), "rb");
 	if (!f) {
 		return false;
 	}
-	uint8_t head[80];
-	bool ok = std::fread(head, 1, sizeof(head), f) == sizeof(head) && std::memcmp(head, "RGE1", 4) == 0;
-	uint32_t count = 0;
-	if (ok) {
-		std::memcpy(&count, head + 8, 4);
-		std::memcpy(&t0_, head + 16, 8);
-		std::memcpy(&step_, head + 24, 8);
-		std::memcpy(&parent_gm_, head + 32, 8);
-		std::memcpy(&parent_j2_, head + 40, 8);
-		std::memcpy(&parent_radius_, head + 48, 8);
-		std::memcpy(&pole_ra_, head + 56, 8);
-		std::memcpy(&pole_dec_, head + 64, 8);
-		states_.resize(count);
-		std::vector<double> raw(size_t(count) * 6);
-		ok = std::fread(raw.data(), sizeof(double), raw.size(), f) == raw.size();
-		for (size_t k = 0; ok && k < count; ++k) {
-			const double *s = raw.data() + k * 6;
-			states_[k] = { DVec3(s[0], s[1], s[2]), DVec3(s[3], s[4], s[5]) };
+	const bool ok = read(f);
+	std::fclose(f);
+	if (!ok) {
+		states_.clear();
+	}
+	return ok;
+}
+
+bool OrbitTable::read(FILE *p_file) {
+	constexpr size_t HEAD = 80, SAMPLE = 6 * sizeof(double);
+	uint8_t head[HEAD];
+	if (std::fread(head, 1, HEAD, p_file) != HEAD || std::memcmp(head, "RGE1", 4) != 0) {
+		return false;
+	}
+	uint32_t version = 0, count = 0;
+	std::memcpy(&version, head + 4, 4);
+	std::memcpy(&count, head + 8, 4);
+	std::memcpy(&t0_, head + 16, 8);
+	std::memcpy(&step_, head + 24, 8);
+	std::memcpy(&parent_gm_, head + 32, 8);
+	std::memcpy(&parent_j2_, head + 40, 8);
+	std::memcpy(&parent_radius_, head + 48, 8);
+	std::memcpy(&pole_ra_, head + 56, 8);
+	std::memcpy(&pole_dec_, head + 64, 8);
+	// state() divides by step and indexes by the quotient; Kepler
+	// outside the table needs a parent with mass
+	if (version != 1 || count < 2 || !std::isfinite(t0_) || !std::isfinite(step_) || step_ <= 0.0 ||
+			!std::isfinite(parent_gm_) || parent_gm_ <= 0.0 || !std::isfinite(parent_j2_) ||
+			!std::isfinite(parent_radius_) || !std::isfinite(pole_ra_) || !std::isfinite(pole_dec_)) {
+		return false;
+	}
+	// the samples must be in the file before anything is sized by count
+#ifdef _WIN32
+	const bool sized = _fseeki64(p_file, 0, SEEK_END) == 0;
+	const int64_t end = sized ? _ftelli64(p_file) : -1;
+	const bool back = _fseeki64(p_file, int64_t(HEAD), SEEK_SET) == 0;
+#else
+	const bool sized = fseeko(p_file, 0, SEEK_END) == 0;
+	const int64_t end = sized ? int64_t(ftello(p_file)) : -1;
+	const bool back = fseeko(p_file, off_t(HEAD), SEEK_SET) == 0;
+#endif
+	if (!back || end < int64_t(HEAD) || uint64_t(count) * SAMPLE > uint64_t(end) - HEAD) {
+		return false;
+	}
+	std::vector<double> raw(size_t(count) * 6);
+	if (std::fread(raw.data(), sizeof(double), raw.size(), p_file) != raw.size()) {
+		return false;
+	}
+	for (double v : raw) {
+		if (!std::isfinite(v)) {
+			return false;
 		}
 	}
-	std::fclose(f);
-	return ok && count >= 2;
+	states_.resize(count);
+	for (size_t k = 0; k < count; ++k) {
+		const double *s = raw.data() + k * 6;
+		states_[k] = { DVec3(s[0], s[1], s[2]), DVec3(s[3], s[4], s[5]) };
+	}
+	return true;
 }
 
 bool OrbitTable::save(const std::string &p_path) const {
@@ -163,6 +201,11 @@ OrbitState OrbitTable::propagate(const OrbitState &p_from_icrf, double p_dt) con
 }
 
 OrbitState OrbitTable::state(double p_seconds) const {
+	// open() guarantees two samples and a finite step above 0; a
+	// table never opened has nothing to give
+	if (states_.size() < 2 || !(step_ > 0.0)) {
+		return {};
+	}
 	const double u = (p_seconds - t0_) / step_;
 	if (u <= 0.0) {
 		return propagate(states_.front(), p_seconds - t0_);

@@ -454,8 +454,19 @@ RegolithSystem *RegolithBody::system() const {
 	return Object::cast_to<RegolithSystem>(get_node_or_null(system_path_));
 }
 
+void RegolithBody::make_loader() {
+	// Half the cores: the rest stay free for the game.
+	const int threads = std::max(1, int(std::thread::hardware_concurrency()) / 2);
+	loader_ = std::make_unique<regolith::TileLoader>(source_, *cache_, threads, synth_.get());
+}
+
 bool RegolithBody::ensure_open() {
 	if (opened_) {
+		// leaving the tree stops the loader's threads; the pack,
+		// cache and synthesis stay, so a new loader picks them up
+		if (!loader_) {
+			make_loader();
+		}
 		return true;
 	}
 	if (!source_.open(path_of(pack_path_))) {
@@ -493,9 +504,7 @@ bool RegolithBody::ensure_open() {
 		synth_->set_dark(load_dark_field(dark_map_path_));
 	}
 	cache_ = std::make_unique<regolith::TileCache>(size_t(page_capacity_) * 2, PINNED_LEVEL);
-	// Half the cores: the rest stay free for the game.
-	const int threads = std::max(1, int(std::thread::hardware_concurrency()) / 2);
-	loader_ = std::make_unique<regolith::TileLoader>(source_, *cache_, threads, synth_.get());
+	make_loader();
 
 	// The never-a-hole set, loaded before the first frame.
 	float lowest = std::numeric_limits<float>::infinity();
@@ -555,7 +564,7 @@ double RegolithBody::surface_radius(const DVec3 &p_dir, bool p_exact) {
 
 void RegolithBody::height_grid(int p_w, int p_h, int p_level, std::vector<float> &r_out) {
 	r_out.assign(size_t(p_w) * size_t(p_h), 0.0f);
-	if (!opened_) {
+	if (!opened_ || !loader_) {
 		return;
 	}
 	const regolith::TileLayout lay = source_.layout();
@@ -593,6 +602,10 @@ void RegolithBody::_ready() {
 	set_global_transform(Transform3D());
 	if (ensure_open()) {
 		create_render_resources();
+		// ready after the system (added at runtime): join it now
+		if (RegolithSystem *sys = system()) {
+			sys->adopt(this);
+		}
 	}
 }
 
@@ -1009,7 +1022,7 @@ void RegolithBody::upload_finished(int p_budget) {
 
 void RegolithBody::_process(double p_delta) {
 	RegolithSystem *sys = system();
-	if (!opened_ || !atlas_.is_valid() || !sys) {
+	if (!opened_ || !atlas_.is_valid() || !sys || !sys->has_body(this)) {
 		return;
 	}
 	Viewport *vp = get_viewport();
@@ -1612,7 +1625,7 @@ void RegolithBody::push_domains(RID p_inst, double p_s, double p_t, double p_rho
 
 void RegolithBody::_physics_process(double p_delta) {
 	RegolithSystem *sys = system();
-	if (!opened_ || !sys) {
+	if (!opened_ || !sys || !sys->has_body(this)) {
 		return;
 	}
 	++physics_tick_;
@@ -1925,6 +1938,8 @@ Dictionary RegolithBody::get_stats() const {
 
 void RegolithBody::_exit_tree() {
 	free_render_resources();
+	// back in the tree, _ready runs again and rebuilds the terrain
+	request_ready();
 }
 
 void RegolithBody::free_render_resources() {
@@ -1966,5 +1981,11 @@ void RegolithBody::free_render_resources() {
 	pages_.clear();
 	lru_.clear();
 	page_bounds_.clear();
+	to_upload_.clear();
+	memo_key_ = UINT64_MAX;
+	memo_tile_.reset();
+	// the next _process uploads the pinned set again
+	frame_ = 0;
+	push_valid_ = false;
 	loader_.reset();
 }

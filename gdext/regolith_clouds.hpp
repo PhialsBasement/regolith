@@ -163,7 +163,7 @@ private:
 	NodePath system_path_, body_path_, weather_path_, sun_path_, atmosphere_path_;
 	RegolithCloudEffect::Look look_;
 	Ref<RegolithCloudEffect> effect_;
-	Camera3D *attached_ = nullptr;
+	uint64_t attached_id_ = 0; // instance id: the camera can be freed under us
 	uint64_t field_version_ = 0;
 	regolith::DVec3 drift_;
 	double last_time_ = -1.0;

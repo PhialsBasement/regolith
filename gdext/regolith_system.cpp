@@ -388,7 +388,39 @@ void RegolithSystem::update_poses() {
 }
 
 const RegolithSystem::Pose &RegolithSystem::pose_of(const RegolithBody *p_body) const {
-	return poses_.at(p_body);
+	auto it = poses_.find(p_body);
+	if (it != poses_.end()) {
+		return it->second;
+	}
+	// A body the system does not hold (not anchored yet, or its
+	// pack failed to open): never abort the game over it. Callers
+	// that can tell check has_body first.
+	static const Pose none = [] {
+		Pose p;
+		p.axes[0] = DVec3(1, 0, 0);
+		p.axes[1] = DVec3(0, 1, 0);
+		p.axes[2] = DVec3(0, 0, 1);
+		return p;
+	}();
+	ERR_PRINT_ONCE("RegolithSystem: asked for a body it does not hold (not anchored yet, or its pack failed to open)");
+	return none;
+}
+
+bool RegolithSystem::has_body(const RegolithBody *p_body) const {
+	return poses_.count(p_body) != 0;
+}
+
+void RegolithSystem::adopt(RegolithBody *p_body) {
+	// Bodies ready before the system are found by its _ready; one
+	// ready later (added at runtime, or back in the tree) joins here.
+	if (!anchored_ || !p_body || std::find(bodies_.begin(), bodies_.end(), p_body) != bodies_.end()) {
+		return;
+	}
+	if (!p_body->ensure_open()) {
+		return;
+	}
+	bodies_.push_back(p_body);
+	update_poses();
 }
 
 const DVec3 *RegolithSystem::ref_axes() const {
@@ -1205,6 +1237,9 @@ double RegolithSystem::get_sun_scale() const {
 }
 
 Vector3 RegolithSystem::get_sun_direction() const {
+	if (!anchored_) {
+		return Vector3();
+	}
 	// from the camera: on another planet the sun stands elsewhere
 	const DVec3 sun = regolith::normalize(camera_heliocentric() * -1.0);
 	return regolith::to_v(frame_.to_local_vec(from_icrf(ref_axes(), sun)));
@@ -1236,6 +1271,9 @@ DVec3 RegolithSystem::sun_in_body_at(const RegolithBody *p_body, double p_t) con
 }
 
 double RegolithSystem::get_local_solar_time(const Vector3 &p_pos) const {
+	if (!anchored_) {
+		return 0.0;
+	}
 	const Vector2 ll = get_latlon(p_pos);
 	return regolith::local_solar_time(sun_in_body(dominant_), double(ll.y));
 }
@@ -1269,16 +1307,22 @@ Vector3 RegolithSystem::get_frame_velocity() const {
 }
 
 Vector2 RegolithSystem::get_latlon(const Vector3 &p_pos) const {
+	if (!anchored_) {
+		return Vector2();
+	}
 	const DVec3 x = body_point(dominant_, p_pos);
 	return Vector2(real_t(std::atan2(x.z, std::hypot(x.x, x.y)) / DEG), real_t(std::atan2(x.y, x.x) / DEG));
 }
 
 double RegolithSystem::get_radius(const Vector3 &p_pos) const {
+	if (!anchored_) {
+		return 0.0;
+	}
 	return regolith::length(body_point(dominant_, p_pos));
 }
 
 double RegolithSystem::get_altitude(const Vector3 &p_pos) const {
-	if (!dominant_) {
+	if (!dominant_ || !anchored_) {
 		return 0.0;
 	}
 	const DVec3 x = body_point(dominant_, p_pos);
@@ -1286,7 +1330,7 @@ double RegolithSystem::get_altitude(const Vector3 &p_pos) const {
 }
 
 double RegolithSystem::get_ground_clearance(const Vector3 &p_pos) const {
-	if (!dominant_) {
+	if (!dominant_ || !anchored_) {
 		return std::nan("");
 	}
 	const DVec3 x = body_point(dominant_, p_pos);

@@ -26,6 +26,10 @@ little-endian.
 `count` records of six f64: position x, y, z (m) and velocity vx, vy, vz
 (m/s), parent-centred, ICRF.
 
+A reader rejects a table whose version is not 1, whose count is under 2
+or larger than the file holds, whose step or parent GM is not above 0,
+or that has any value that is not finite.
+
 ## Use
 
 **Inside the table:** cubic Hermite on position and velocity between the

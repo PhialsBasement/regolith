@@ -50,6 +50,10 @@ struct PackEntry {
 
 constexpr size_t PACK_HEADER_SIZE = 256;
 constexpr size_t PACK_ENTRY_SIZE = 32;
+// Limits a reader holds a pack's header to (docs/rgp1.md).
+constexpr uint32_t PACK_MAX_INTERVALS = 4096;
+constexpr uint32_t PACK_MIN_BORDER = 2;
+constexpr uint32_t PACK_MAX_BORDER = 16;
 
 // Blobs must be added in ascending key order.
 class PackWriter {

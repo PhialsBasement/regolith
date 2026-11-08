@@ -190,7 +190,7 @@ private:
 	double fog_density_ = 0.0;
 
 	Ref<RegolithAirEffect> effect_;
-	Camera3D *attached_ = nullptr;
+	uint64_t attached_id_ = 0; // instance id: the camera can be freed under us
 	// the effect's tables, as textures the terrain can sample
 	Ref<Texture2DRD> air_t_tex_, air_e_tex_;
 	double sky_thin_ = 1.0;
