@@ -300,7 +300,8 @@ void RegolithBody::set_material_param(const StringName &p_name, const Variant &p
 }
 
 RegolithBody::RegolithBody() {
-	set_process_priority(-50);
+	// after the atmosphere has set its material's dust
+	set_process_priority(CAMERA_PASSES_PRIORITY + 50);
 	set_physics_process_priority(-50);
 }
 

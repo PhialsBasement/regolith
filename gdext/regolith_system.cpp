@@ -132,7 +132,7 @@ RegolithVessel *vessel_of(Node *p_node) {
 } // namespace
 
 RegolithSystem::RegolithSystem() {
-	set_process_priority(-100);
+	set_process_priority(CAMERA_PASSES_PRIORITY);
 	set_physics_process_priority(-100);
 }
 

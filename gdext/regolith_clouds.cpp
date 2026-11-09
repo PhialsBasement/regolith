@@ -384,6 +384,10 @@ void RegolithCloudEffect::_render_callback(int32_t p_type, RenderData *p_data) {
 	rd_->compute_list_end();
 }
 
+RegolithClouds::RegolithClouds() {
+	set_process_priority(CAMERA_PASSES_PRIORITY + 60);
+}
+
 void RegolithClouds::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_system_path", "path"), &RegolithClouds::set_system_path);
 	ClassDB::bind_method(D_METHOD("get_system_path"), &RegolithClouds::get_system_path);

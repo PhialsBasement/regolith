@@ -442,8 +442,8 @@ void RegolithAirEffect::_render_callback(int32_t p_type, RenderData *p_data) {
 // The node.
 
 RegolithAtmosphere::RegolithAtmosphere() {
-	// After RegolithSystem (-100) has placed the sun.
-	set_process_priority(-90);
+	// after the system has placed the sun
+	set_process_priority(CAMERA_PASSES_PRIORITY + 10);
 	set_air("Mars");
 }
 

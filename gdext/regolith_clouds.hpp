@@ -123,6 +123,7 @@ class RegolithClouds : public Node3D {
 	GDCLASS(RegolithClouds, Node3D)
 
 public:
+	RegolithClouds();
 	void _ready() override;
 	void _process(double p_delta) override;
 	void _exit_tree() override;
