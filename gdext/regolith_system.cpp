@@ -1404,8 +1404,15 @@ Dictionary RegolithSystem::get_orbit_info(Node *p_node) const {
 	d["eccentricity"] = o.e;
 	d["inclination"] = o.inclination / DEG;
 	d["period"] = o.period;
+	const DVec3 v_surface = primary ? v - regolith::cross(pose_of(primary).omega, r) : v;
 	d["orbital_speed"] = regolith::length(v);
-	d["surface_speed"] = primary ? regolith::length(v - regolith::cross(pose_of(primary).omega, r)) : regolith::length(v);
+	d["surface_speed"] = regolith::length(v_surface);
+	// the same as render-space vectors (a navball's prograde, normal and
+	// radial), whichever way the render frame turns
+	const Basis to_render = icrf_to_render();
+	d["position"] = to_render.xform(regolith::to_v(r));
+	d["orbital_velocity"] = to_render.xform(regolith::to_v(v));
+	d["surface_velocity"] = to_render.xform(regolith::to_v(v_surface));
 	d["soi_radius"] = soi_at(primary, time_);
 	if (RegolithVessel *ves = vessel_of(Object::cast_to<Node>(p_node))) {
 		d["on_rails"] = ves->parked_;
