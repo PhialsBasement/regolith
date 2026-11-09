@@ -138,6 +138,9 @@ public:
 	NodePath get_sun_path() const { return sun_path_; }
 	void set_atmosphere_path(const NodePath &p_v) { atmosphere_path_ = p_v; }
 	NodePath get_atmosphere_path() const { return atmosphere_path_; }
+	// off: the effect leaves the camera, costing nothing
+	void set_enabled(bool p_v);
+	bool get_enabled() const { return enabled_; }
 
 	void set_density(double p_v) { look_.density = p_v; }
 	double get_density() const { return look_.density; }
@@ -169,6 +172,7 @@ private:
 	regolith::DVec3 drift_;
 	double last_time_ = -1.0;
 	double radius_ = 0.0; // the volume's datum, fixed at start
+	bool enabled_ = true;
 };
 
 } // namespace godot

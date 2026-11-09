@@ -404,6 +404,9 @@ void RegolithClouds::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_atmosphere_path", "path"), &RegolithClouds::set_atmosphere_path);
 	ClassDB::bind_method(D_METHOD("get_atmosphere_path"), &RegolithClouds::get_atmosphere_path);
 	ADD_PROPERTY(PropertyInfo(Variant::NODE_PATH, "atmosphere_path"), "set_atmosphere_path", "get_atmosphere_path");
+	ClassDB::bind_method(D_METHOD("set_enabled", "enabled"), &RegolithClouds::set_enabled);
+	ClassDB::bind_method(D_METHOD("get_enabled"), &RegolithClouds::get_enabled);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "enabled"), "set_enabled", "get_enabled");
 #define CLOUD_PROP(name, type)                                                              \
 	ClassDB::bind_method(D_METHOD("set_" #name, "value"), &RegolithClouds::set_##name);     \
 	ClassDB::bind_method(D_METHOD("get_" #name), &RegolithClouds::get_##name);              \
@@ -438,6 +441,13 @@ void RegolithClouds::detach() {
 			fx.erase(effect_);
 			c->set_compositor_effects(fx);
 		}
+	}
+}
+
+void RegolithClouds::set_enabled(bool p_v) {
+	enabled_ = p_v;
+	if (!enabled_) {
+		detach();
 	}
 }
 
@@ -519,7 +529,7 @@ void RegolithClouds::_process(double p_delta) {
 	RegolithBody *b = Object::cast_to<RegolithBody>(get_node_or_null(body_path_));
 	RegolithWeather *w = Object::cast_to<RegolithWeather>(get_node_or_null(weather_path_));
 	Camera3D *cam = get_viewport() ? get_viewport()->get_camera_3d() : nullptr;
-	if (!effect_.is_valid() || !sys || !b || !w || !cam) {
+	if (!enabled_ || !effect_.is_valid() || !sys || !b || !w || !cam) {
 		return;
 	}
 	attach(cam);
