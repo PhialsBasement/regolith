@@ -29,13 +29,8 @@ class RegolithBody;
 class RegolithVessel;
 class SubViewport;
 
-// _process priority of the passes that follow the camera (the system's
-// near and far planes, the atmosphere, the body's tiles, the clouds):
-// after every game script (priority 0 and well past), so they see the
-// camera where it is drawn this frame. Read earlier, a camera orbiting
-// thousands of km out had moved km since: the air was ray-marched from
-// the wrong point and the planet swam as the view turned. Each pass
-// adds its own small offset to keep their order.
+// Camera-following passes run after the game's scripts, so they see
+// this frame's camera; each adds an offset to keep their order.
 constexpr int CAMERA_PASSES_PRIORITY = 1 << 24;
 
 // Owns the reference frame everything is simulated in (see
