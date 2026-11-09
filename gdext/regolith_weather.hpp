@@ -56,6 +56,7 @@ public:
 	Vector3 get_wind(const Vector3 &p_pos) const; // surface, render space
 	Vector2 get_wind_local(const Vector3 &p_pos) const; // east, north
 	Vector3 get_layer_wind(const Vector3 &p_pos) const;
+	// the air at the point: the ground's under it, thinned with height
 	double get_pressure(const Vector3 &p_pos) const;
 	double get_density(const Vector3 &p_pos) const;
 	double get_air_temperature(const Vector3 &p_pos) const;
@@ -102,6 +103,9 @@ private:
 	bool locate(const Vector3 &p_pos, double &r_px, double &r_py, regolith::DVec3 *r_dir = nullptr) const;
 	double pub_at(const std::vector<float> &p_f, const Vector3 &p_pos) const;
 	Vector3 to_render(const regolith::DVec3 &p_dir, double p_east, double p_north) const;
+	double height_over_ground(const Vector3 &p_pos) const;
+	double r_gas() const;
+	double gravity() const;
 	void upload_maps();
 
 	NodePath system_path_;

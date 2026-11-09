@@ -44,6 +44,21 @@ TEST_CASE(earth_zenith_transmittance_matches_layer_depths) {
 	}
 }
 
+TEST_CASE(pressure_falls_by_e_every_scale_height) {
+	// Mars's air: CO2 (191.8 J/(kg K)) at 210 K under 3.711 m/s2, 610 Pa at the ground
+	const double ground_pa = 610.0, temperature_k = 210.0, r_gas = 191.8, gravity = 3.711;
+	const double scale_height_m = r_gas * temperature_k / gravity; // about 10.9 km
+	const double at_ground = pressure_at_height(ground_pa, 0.0, temperature_k, r_gas, gravity);
+	const double one_up = pressure_at_height(ground_pa, scale_height_m, temperature_k, r_gas, gravity);
+	const double high_up = pressure_at_height(ground_pa, 82000.0, temperature_k, r_gas, gravity);
+	std::printf("  ground %.1f Pa, one scale height (%.0f m) up %.2f Pa (expected %.2f), 82 km up %.3f Pa\n", at_ground,
+			scale_height_m, one_up, ground_pa / std::exp(1.0), high_up);
+	CHECK(at_ground == ground_pa);
+	CHECK(std::abs(one_up - ground_pa / std::exp(1.0)) < 1e-9);
+	// 82 km is past 7.5 scale heights: under a thousandth of the ground's
+	CHECK(high_up < ground_pa * 1e-3);
+}
+
 TEST_CASE(air_transmittance_is_zero_into_the_ground) {
 	const AirModel air = mars_air(MARS_GROUND_RADIUS_M, MARS_DUST_TAU);
 	const RGB into_ground = air_transmittance(air, air.bottom + 1000.0, LOOKING_DOWN);

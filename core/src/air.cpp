@@ -94,4 +94,10 @@ RGB air_transmittance(const AirModel &p_air, double p_r, double p_mu) {
 	return { std::exp(-depth[0]), std::exp(-depth[1]), std::exp(-depth[2]) };
 }
 
+double pressure_at_height(double p_ground_pa, double p_height_m, double p_temperature_k, double p_r_gas,
+		double p_gravity) {
+	const double scale_height = p_r_gas * p_temperature_k / p_gravity;
+	return p_ground_pa * std::exp(-p_height_m / scale_height);
+}
+
 } // namespace regolith

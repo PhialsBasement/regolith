@@ -39,6 +39,12 @@ AirModel earth_air(double p_bottom);
 // blue (Wolff et al. 2009): the butterscotch sky and blue dusk.
 AirModel mars_air(double p_bottom, double p_dust_tau);
 
+// The air's pressure p_height_m over the ground (Pa), from p_ground_pa
+// there: an isothermal column at p_temperature_k, falling by e every
+// scale height p_r_gas * p_temperature_k / p_gravity (J/(kg K), m/s2).
+double pressure_at_height(double p_ground_pa, double p_height_m, double p_temperature_k, double p_r_gas,
+		double p_gravity);
+
 // Transmittance from radius p_r along a ray at cosine p_mu to
 // the local vertical, out of the air; zero if it meets the
 // ground. The CPU twin of the transmittance LUT.

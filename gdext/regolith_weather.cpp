@@ -28,6 +28,7 @@
 #include "regolith/ephemeris.hpp"
 #include "regolith_atmosphere.hpp"
 #include "regolith_body.hpp"
+#include "regolith/air.hpp"
 #include "regolith_system.hpp"
 
 using namespace godot;
@@ -38,6 +39,12 @@ namespace {
 
 constexpr double PI = std::numbers::pi;
 constexpr double DEG = PI / 180.0;
+// the air before the climate has published (or off its grid)
+constexpr double FALLBACK_PRESSURE_PA = 610.0;
+// no colder than this in the gas law (a stray sample must not blow it up)
+constexpr double MIN_TEMPERATURE_K = 100.0;
+// before the climate is built: its own defaults
+const regolith::ClimateConfig FALLBACK_CONFIG;
 constexpr int TOPO_LEVEL = 1; // ~40 km samples for 2 deg cells
 constexpr int REFRESH_MS = 250;
 
@@ -346,10 +353,43 @@ Vector3 RegolithWeather::get_layer_wind(const Vector3 &p_pos) const {
 	return to_render(dir, climate_->sample(pub_.lu, px, py), -climate_->sample(pub_.lv, px, py));
 }
 
+// The climate's fields are the air at the ground; the pressure at p_pos
+// is the ground's under it, thinned with the height above that ground
+// (an isothermal column at the air's temperature there).
 double RegolithWeather::get_pressure(const Vector3 &p_pos) const {
-	std::lock_guard<std::mutex> guard(mutex_);
-	const double p = pub_at(pub_.p, p_pos);
-	return std::isnan(p) ? 610.0 : p;
+	double ground_pa;
+	{
+		std::lock_guard<std::mutex> guard(mutex_);
+		const double p = pub_at(pub_.p, p_pos);
+		ground_pa = std::isnan(p) ? FALLBACK_PRESSURE_PA : p;
+	}
+	const double temperature_k = std::max(get_air_temperature(p_pos), MIN_TEMPERATURE_K);
+	return regolith::pressure_at_height(ground_pa, height_over_ground(p_pos), temperature_k, r_gas(), gravity());
+}
+
+// Metres from the ground up to p_pos (0 at or under it); from the datum
+// where the ground there is not loaded.
+double RegolithWeather::height_over_ground(const Vector3 &p_pos) const {
+	const RegolithSystem *sys = system();
+	RegolithBody *b = body();
+	if (!sys || !b) {
+		return 0.0;
+	}
+	const DVec3 x = sys->body_point(b, p_pos);
+	const DVec3 dir = regolith::normalize(x);
+	double ground = b->surface_radius(dir, false);
+	if (!std::isfinite(ground)) {
+		ground = b->datum_radius(dir);
+	}
+	return std::max(regolith::length(x) - ground, 0.0);
+}
+
+double RegolithWeather::r_gas() const {
+	return climate_ ? climate_->config().r_gas : FALLBACK_CONFIG.r_gas;
+}
+
+double RegolithWeather::gravity() const {
+	return climate_ ? climate_->config().gravity : FALLBACK_CONFIG.gravity;
 }
 
 double RegolithWeather::get_air_temperature(const Vector3 &p_pos) const {
@@ -365,9 +405,8 @@ double RegolithWeather::get_ground_temperature(const Vector3 &p_pos) const {
 }
 
 double RegolithWeather::get_density(const Vector3 &p_pos) const {
-	const double t = get_air_temperature(p_pos);
-	const double r = climate_ ? climate_->config().r_gas : 191.8;
-	return get_pressure(p_pos) / r / std::max(t, 100.0);
+	const double temperature_k = std::max(get_air_temperature(p_pos), MIN_TEMPERATURE_K);
+	return get_pressure(p_pos) / r_gas() / temperature_k;
 }
 
 Vector2 RegolithWeather::get_frost(const Vector3 &p_pos) const {
