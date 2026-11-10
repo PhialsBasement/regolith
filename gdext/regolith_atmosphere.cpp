@@ -334,8 +334,9 @@ void RegolithAirEffect::_render_callback(int32_t p_type, RenderData *p_data) {
 	push_rgb(u, air.mie_g, 0.0);
 	push_rgb(u, air.ozone, air.ozone_center);
 	const double datum = air.datum > 0.0 ? air.datum : bot;
-	// the tables' base: fixed while they stand, under all ground
-	const double base = rebuild ? datum - TABLE_DEPTH : built_base_;
+	// the tables' base: fixed while they stand, under all ground (the
+	// air's floor is under the body's lowest ground)
+	const double base = rebuild ? std::min(datum - TABLE_DEPTH, bot) : built_base_;
 	push4(u, air.ozone_width, f.sun_radius, datum, base);
 	push_rgb(u, air.ground_albedo, 0.0);
 	push3(u, f.eye, range);

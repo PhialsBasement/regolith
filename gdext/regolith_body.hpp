@@ -88,6 +88,8 @@ public:
 	// the lowest ground anywhere on the body (m from its centre),
 	// 0 before the first frame
 	double lowest_radius() const { return occluder_radius_; }
+	// the highest ground on the coarse tiles (m from its centre), 0 before the first frame
+	double highest_radius() const { return highest_radius_; }
 	// Height over the datum at equirect cell centres (row 0
 	// north, column 0 at -180), from level p_level; any thread.
 	void height_grid(int p_w, int p_h, int p_level, std::vector<float> &r_out);
@@ -317,6 +319,7 @@ private:
 	std::vector<regolith::TileKey> to_upload_;
 	uint64_t frame_ = 0;
 	double occluder_radius_ = 0.0;
+	double highest_radius_ = 0.0;
 
 	// Node constants are pushed in push_frame_; each frame one
 	// shared instance transform carries them into the current

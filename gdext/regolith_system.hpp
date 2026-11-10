@@ -69,6 +69,7 @@ public:
 	// sun (AU, ICRF), for every body.
 	RegolithBody *central() const { return central_; }
 	regolith::DVec3 central_heliocentric(double p_t) const;
+	const RegolithBody *season_body() const;
 	// the camera from the sun (ICRF, m), and the sun's brightness
 	// there over the central body's (inverse square)
 	regolith::DVec3 camera_heliocentric() const;

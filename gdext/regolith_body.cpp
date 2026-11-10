@@ -509,6 +509,7 @@ bool RegolithBody::ensure_open() {
 
 	// The never-a-hole set, loaded before the first frame.
 	float lowest = std::numeric_limits<float>::infinity();
+	float highest = -std::numeric_limits<float>::infinity();
 	for (int face = 0; face < regolith::FACE_COUNT; ++face) {
 		for (int level = 0; level <= std::min(PINNED_LEVEL, source_.max_level()); ++level) {
 			const uint32_t n = 1u << level;
@@ -516,12 +517,14 @@ bool RegolithBody::ensure_open() {
 				for (uint32_t y = 0; y < n; ++y) {
 					if (HeightTilePtr t = loader_->produce(TileKey::make(face, level, x, y))) {
 						lowest = std::min(lowest, t->min);
+						highest = std::max(highest, t->max);
 					}
 				}
 			}
 		}
 	}
 	occluder_radius_ = source_.r_ref() + double(lowest);
+	highest_radius_ = source_.r_ref() + double(highest);
 
 	// Main thread only: ranges of uploaded pages, no locking.
 	selector_.rho_bounds = [this](TileKey p_k, float &r_lo, float &r_hi) {

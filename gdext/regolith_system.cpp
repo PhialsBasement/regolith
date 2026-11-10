@@ -52,7 +52,11 @@ constexpr double AU = 1.495978707e11;
 constexpr double SUN_RADIUS = 6.957e8;
 constexpr double GM_SUN = 1.32712440018e20; // m^3/s^2 (IAU)
 // tracing a Kepler arc (rails and predictions)
-constexpr double MAX_RELIEF_M = 30000.0; // ground stands no higher than this over a body's reference sphere
+// how far over a body's reference sphere its ground is looked for: at
+// least this, and past its highest coarse ground by RELIEF_SLACK_M (finer
+// tiles stand a little above their coarse parents)
+constexpr double MAX_RELIEF_M = 30000.0;
+constexpr double RELIEF_SLACK_M = 5000.0;
 constexpr double MIN_STEP_M = 50.0; // the step near a ground: half the height over it, no less than this
 constexpr int BISECT_STEPS = 40;
 constexpr int CHANGES_MAX = 16; // sphere-of-influence changes in one rails check
@@ -302,10 +306,11 @@ void RegolithSystem::anchor_at_start() {
 	auto local_time = [&](double p_t) {
 		return regolith::local_solar_time(sun_in_body_at(dominant_, p_t), start_lon_);
 	};
-	// this body's solar day, from how fast its local time runs
+	// this body's solar day, from how fast its local time runs; a body
+	// whose hour never changes keeps today's
 	const double gained = std::fmod(local_time(time_ + 600.0) - local_time(time_) + 48.0, 24.0);
-	const double sol = gained > 1e-9 ? 24.0 / gained * 600.0 : regolith::MARS_SOL;
-	for (int k = 0; k < 4; ++k) {
+	const double sol = 24.0 / gained * 600.0;
+	for (int k = 0; k < 4 && gained > 1e-9; ++k) {
 		double dh = start_local_time_ - local_time(time_);
 		dh = k == 0 ? std::fmod(dh + 24.0, 24.0) : std::remainder(dh, 24.0);
 		time_ += dh / 24.0 * sol;
@@ -829,7 +834,8 @@ RegolithSystem::State RegolithSystem::arc_state(const Arc &p_arc, double p_t) co
 const RegolithBody *RegolithSystem::struck(const DVec3 &p_x, double p_t) const {
 	for (const RegolithBody *b : bodies_) {
 		const double rough = regolith::length(p_x - body_state_at(b, p_t).x) - b->r_ref();
-		if (rough < MAX_RELIEF_M && ground_clearance_at(b, p_x, p_t) < 0.0) {
+		const double relief = std::max(MAX_RELIEF_M, b->highest_radius() - b->r_ref() + RELIEF_SLACK_M);
+		if (rough < relief && ground_clearance_at(b, p_x, p_t) < 0.0) {
 			return b;
 		}
 	}
@@ -1442,7 +1448,17 @@ Vector3 RegolithSystem::get_sun_direction() const {
 }
 
 DVec3 RegolithSystem::central_heliocentric(double p_t) const {
-	return regolith::heliocentric(central_ ? central_->orbit_elements() : regolith::MARS_ORBIT, p_t);
+	const RegolithBody *b = season_body();
+	if (!b) {
+		return { 1.0, 0.0, 0.0 }; // no body: one AU out, so the sun has a direction
+	}
+	return regolith::heliocentric(b->orbit_elements(), p_t);
+}
+
+// The body whose path the system's sun follows: the central one once
+// anchored, the body it will anchor on before that.
+const RegolithBody *RegolithSystem::season_body() const {
+	return central_ ? central_ : Object::cast_to<RegolithBody>(get_node_or_null(body_path_));
 }
 
 namespace {
@@ -1476,7 +1492,7 @@ double RegolithSystem::get_local_solar_time(const Vector3 &p_pos) const {
 
 Vector3 RegolithSystem::get_acceleration(const Vector3 &p_pos, const Vector3 &p_vel) const {
 	if (!anchored_) {
-		return Vector3(0, -3.71, 0);
+		return Vector3(); // no body yet: nothing pulls
 	}
 	const DVec3 a = accel_icrf(to_state(p_pos, p_vel), true);
 	return regolith::to_v(frame_.to_local_vec(from_icrf(ref_axes(), a)));
@@ -1484,7 +1500,7 @@ Vector3 RegolithSystem::get_acceleration(const Vector3 &p_pos, const Vector3 &p_
 
 Vector3 RegolithSystem::get_gravity(const Vector3 &p_pos) const {
 	if (!anchored_) {
-		return Vector3(0, -3.71, 0);
+		return Vector3(); // no body yet: nothing pulls
 	}
 	const DVec3 a = accel_icrf(to_state(p_pos, Vector3()), false);
 	return regolith::to_v(frame_.to_local_vec(from_icrf(ref_axes(), a)));
@@ -1781,10 +1797,11 @@ Vector3 RegolithSystem::get_surface_point(const String &p_body, double p_lat_deg
 
 double RegolithSystem::get_solar_longitude_today() const {
 	const double now = regolith::j2000_seconds_from_unix(Time::get_singleton()->get_unix_time_from_system());
-	if (!central_) {
-		return regolith::mars_solar_longitude(now);
+	const RegolithBody *b = season_body();
+	if (!b) {
+		return 0.0; // no body: no seasons
 	}
-	return regolith::solar_longitude(central_->orbit_elements(), central_->rotation(), now);
+	return regolith::solar_longitude(b->orbit_elements(), b->rotation(), now);
 }
 
 Vector3 RegolithSystem::get_body_point(const String &p_body, double p_lat_deg, double p_lon_deg, double p_radius) {
