@@ -26,10 +26,8 @@ void main() {
 	vec3 up = pb / r;
 	float vox = p.c[k].e.w;
 	// in the planet's shadow the sun is simply gone
-	float mu = dot(up, p.sun.xyz);
-	bool night = mu < 0.0 && r * sqrt(max(1.0 - mu * mu, 0.0)) < p.planet.x;
-	float ts = 50.0;
-	if (!night) {
+	float ts = SUN_GONE_DEPTH;
+	if (!sun_hidden(pb)) {
 		ts = 0.0;
 		float t = 0.0, ds = 150.0;
 		for (int i = 0; i < 14; i++) {
@@ -44,5 +42,5 @@ void main() {
 		t += ds;
 		ds *= 1.6;
 	}
-	imageStore(light_out, v, vec4(min(ts, 50.0), min(tu, 50.0), 0.0, 0.0));
+	imageStore(light_out, v, vec4(min(ts, SUN_GONE_DEPTH), min(tu, SUN_GONE_DEPTH), 0.0, 0.0));
 }

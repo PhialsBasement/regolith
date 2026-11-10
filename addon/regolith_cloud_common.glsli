@@ -55,6 +55,17 @@ layout(set = 0, binding = 22) uniform sampler3D shape_tex;
 layout(set = 0, binding = 23) uniform sampler3D detail_tex;
 layout(set = 0, binding = 24) uniform sampler2D band_tex;
 
+// optical depth toward the sun past which a cloud sees none of it:
+// the light bake's cap, and the depth given where the planet hides it
+const float SUN_GONE_DEPTH = 50.0;
+
+// The planet stands between p_at (body frame, from its centre) and the sun.
+bool sun_hidden(vec3 p_at) {
+	float r = length(p_at);
+	float mu = dot(p_at / r, p.sun.xyz);
+	return mu < 0.0 && r * sqrt(max(1.0 - mu * mu, 0.0)) < p.planet.x;
+}
+
 float remap(float v, float lo, float hi, float nlo, float nhi) {
 	return nlo + (v - lo) / (hi - lo) * (nhi - nlo);
 }

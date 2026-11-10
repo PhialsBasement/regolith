@@ -40,7 +40,9 @@ vec3 cascade_at(int k, vec3 pb) {
 }
 
 // optical depth to the sun and the sky, from the finest light
-// cascade holding the point, faded into the next at its edge
+// cascade holding the point, faded into the next at its edge;
+// past every cascade (far from the eye, seen from orbit) only the
+// planet's shadow, so the night side is not lit by the hidden sun
 vec2 light_at(vec3 pb) {
 	for (int k = 0; k < NC; k++) {
 		if (p.c[k].n.w < 0.5) {
@@ -61,7 +63,7 @@ vec2 light_at(vec3 pb) {
 		}
 		return lt;
 	}
-	return vec2(0.0);
+	return vec2(sun_hidden(pb) ? SUN_GONE_DEPTH : 0.0, 0.0);
 }
 
 vec3 to_body(vec3 v) {
