@@ -1203,8 +1203,7 @@ void RegolithSystem::update_vessels(Node3D *p_focus, double p_delta) {
 			advance_parked(v);
 		}
 		if (warp_ > 1.0) {
-			// warping: all on rails, nothing comes off; placed once
-			// the clock and the bodies have moved on
+			// warping: all on rails, nothing comes off
 			if (!v->parked_) {
 				park(v, node);
 			}
@@ -1215,12 +1214,10 @@ void RegolithSystem::update_vessels(Node3D *p_focus, double p_delta) {
 			from_state(parked_state(v), pos, vel);
 			const bool rigid = Object::cast_to<RigidBody3D>(node) != nullptr;
 			const bool near = (pos - focus_pos).length() < v->get_rails_distance() * 0.9;
-			if ((near || v->get_thrusting()) && !(rigid && vel.length() > UNPARK_MAX_SPEED)) {
-				unpark(v, node);
-			} else {
-				place_parked(v, node);
-				continue;
+			if (!(near || v->get_thrusting()) || (rigid && vel.length() > UNPARK_MAX_SPEED)) {
+				continue;                       // stays on rails: placed after the clock moves on
 			}
+			unpark(v, node);
 		} else if (node != p_focus && !v->get_thrusting() &&
 				(node->get_global_position() - focus_pos).length() > v->get_rails_distance()) {
 			park(v, node);
@@ -1231,6 +1228,21 @@ void RegolithSystem::update_vessels(Node3D *p_focus, double p_delta) {
 			const Vector3 a = get_acceleration(rb->get_global_position(), rb->get_linear_velocity());
 			rb->apply_central_force(a * rb->get_mass());
 		}
+	}
+}
+
+// Every vessel on rails where it is at the new time: after the clock,
+// the frame and the bodies have moved on, as Jolt moves the rest.
+void RegolithSystem::place_all_parked() {
+	TypedArray<Node> vessels = get_tree()->get_nodes_in_group("regolith_vessel");
+	for (int i = 0; i < vessels.size(); ++i) {
+		RegolithVessel *v = Object::cast_to<RegolithVessel>(vessels[i]);
+		Node3D *node = v ? Object::cast_to<Node3D>(v->get_parent()) : nullptr;
+		if (!node || !v->parked_) {
+			continue;
+		}
+		advance_parked(v);
+		place_parked(v, node);
 	}
 }
 
@@ -1259,17 +1271,7 @@ void RegolithSystem::_physics_process(double p_delta) {
 	time_ += dt;
 	frame_.anchor = frame_.anchor + frame_velocity_ * dt;
 	update_poses();
-	if (warp_ > 1.0) {
-		TypedArray<Node> vessels = get_tree()->get_nodes_in_group("regolith_vessel");
-		for (int i = 0; i < vessels.size(); ++i) {
-			RegolithVessel *v = Object::cast_to<RegolithVessel>(vessels[i]);
-			Node3D *node = v ? Object::cast_to<Node3D>(v->get_parent()) : nullptr;
-			if (node && v->parked_) {
-				advance_parked(v);
-				place_parked(v, node);
-			}
-		}
-	}
+	place_all_parked();
 	const uint64_t t3 = clock->get_ticks_usec();
 	stats_["frame_ms"] = double(t1 - t0) * 1e-3;
 	stats_["vessels_ms"] = double(t2 - t1) * 1e-3;

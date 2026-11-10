@@ -209,6 +209,7 @@ private:
 	void manage_frame(Node3D *p_focus);
 	void floating_velocity(Node3D *p_focus);
 	void update_vessels(Node3D *p_focus, double p_delta);
+	void place_all_parked();
 	bool rests_landed(Node3D *p_node, int p_depth);
 	void park(RegolithVessel *p_vessel, Node3D *p_node);
 	void unpark(RegolithVessel *p_vessel, Node3D *p_node);
