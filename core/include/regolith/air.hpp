@@ -39,11 +39,28 @@ AirModel earth_air(double p_bottom);
 // blue (Wolff et al. 2009): the butterscotch sky and blue dusk.
 AirModel mars_air(double p_bottom, double p_dust_tau);
 
+// Mars's air cooling with height (NASA Glenn's fit to Mars Global
+// Surveyor data): K per metre below and above MARS_LAPSE_TURN_M, down
+// to MARS_AIR_FLOOR_K (the climate's coldest air).
+constexpr double MARS_LAPSE_LOW = 0.000998;
+constexpr double MARS_LAPSE_HIGH = 0.00222;
+constexpr double MARS_LAPSE_TURN_M = 7000.0;
+constexpr double MARS_AIR_FLOOR_K = 140.0;
+// CO2's adiabatic index with its bending mode relaxed, 9/7: the
+// low-frequency value on Mars (Maurice et al. 2022, Nature)
+constexpr double MARS_GAMMA = 9.0 / 7.0;
+
+// The air's temperature p_height_m over the ground (K), p_ground_k there.
+double air_temperature_at_height(double p_ground_k, double p_height_m);
+
 // The air's pressure p_height_m over the ground (Pa), from p_ground_pa
-// there: an isothermal column at p_temperature_k, falling by e every
-// scale height p_r_gas * p_temperature_k / p_gravity (J/(kg K), m/s2).
-double pressure_at_height(double p_ground_pa, double p_height_m, double p_temperature_k, double p_r_gas,
+// and p_ground_k there: hydrostatic through air_temperature_at_height's
+// profile, gas constant p_r_gas (J/(kg K)) under p_gravity (m/s2).
+double pressure_at_height(double p_ground_pa, double p_height_m, double p_ground_k, double p_r_gas,
 		double p_gravity);
+
+// The speed of sound (m/s) in Mars's air at p_temperature_k.
+double speed_of_sound(double p_temperature_k, double p_r_gas);
 
 // Transmittance from radius p_r along a ray at cosine p_mu to
 // the local vertical, out of the air; zero if it meets the

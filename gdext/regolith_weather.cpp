@@ -41,8 +41,6 @@ constexpr double PI = std::numbers::pi;
 constexpr double DEG = PI / 180.0;
 // the air before the climate has published (or off its grid)
 constexpr double FALLBACK_PRESSURE_PA = 610.0;
-// no colder than this in the gas law (a stray sample must not blow it up)
-constexpr double MIN_TEMPERATURE_K = 100.0;
 // before the climate is built: its own defaults
 const regolith::ClimateConfig FALLBACK_CONFIG;
 constexpr int TOPO_LEVEL = 1; // ~40 km samples for 2 deg cells
@@ -95,6 +93,7 @@ void RegolithWeather::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_pressure", "position"), &RegolithWeather::get_pressure);
 	ClassDB::bind_method(D_METHOD("get_density", "position"), &RegolithWeather::get_density);
 	ClassDB::bind_method(D_METHOD("get_air_temperature", "position"), &RegolithWeather::get_air_temperature);
+	ClassDB::bind_method(D_METHOD("get_speed_of_sound", "position"), &RegolithWeather::get_speed_of_sound);
 	ClassDB::bind_method(D_METHOD("get_ground_temperature", "position"), &RegolithWeather::get_ground_temperature);
 	ClassDB::bind_method(D_METHOD("get_frost", "position"), &RegolithWeather::get_frost);
 	ClassDB::bind_method(D_METHOD("get_cloud", "position"), &RegolithWeather::get_cloud);
@@ -355,7 +354,7 @@ Vector3 RegolithWeather::get_layer_wind(const Vector3 &p_pos) const {
 
 // The climate's fields are the air at the ground; the pressure at p_pos
 // is the ground's under it, thinned with the height above that ground
-// (an isothermal column at the air's temperature there).
+// through the air's cooling profile (regolith::pressure_at_height).
 double RegolithWeather::get_pressure(const Vector3 &p_pos) const {
 	double ground_pa;
 	{
@@ -363,8 +362,7 @@ double RegolithWeather::get_pressure(const Vector3 &p_pos) const {
 		const double p = pub_at(pub_.p, p_pos);
 		ground_pa = std::isnan(p) ? FALLBACK_PRESSURE_PA : p;
 	}
-	const double temperature_k = std::max(get_air_temperature(p_pos), MIN_TEMPERATURE_K);
-	return regolith::pressure_at_height(ground_pa, height_over_ground(p_pos), temperature_k, r_gas(), gravity());
+	return regolith::pressure_at_height(ground_pa, height_over_ground(p_pos), ground_air_temperature(p_pos), r_gas(), gravity());
 }
 
 // Metres from the ground up to p_pos (0 at or under it); from the datum
@@ -392,10 +390,19 @@ double RegolithWeather::gravity() const {
 	return climate_ ? climate_->config().gravity : FALLBACK_CONFIG.gravity;
 }
 
-double RegolithWeather::get_air_temperature(const Vector3 &p_pos) const {
+// The air at the ground under p_pos (K).
+double RegolithWeather::ground_air_temperature(const Vector3 &p_pos) const {
 	std::lock_guard<std::mutex> guard(mutex_);
 	const double t = pub_at(pub_.tair, p_pos);
 	return std::isnan(t) ? 210.0 : t;
+}
+
+double RegolithWeather::get_air_temperature(const Vector3 &p_pos) const {
+	return regolith::air_temperature_at_height(ground_air_temperature(p_pos), height_over_ground(p_pos));
+}
+
+double RegolithWeather::get_speed_of_sound(const Vector3 &p_pos) const {
+	return regolith::speed_of_sound(get_air_temperature(p_pos), r_gas());
 }
 
 double RegolithWeather::get_ground_temperature(const Vector3 &p_pos) const {
@@ -405,8 +412,7 @@ double RegolithWeather::get_ground_temperature(const Vector3 &p_pos) const {
 }
 
 double RegolithWeather::get_density(const Vector3 &p_pos) const {
-	const double temperature_k = std::max(get_air_temperature(p_pos), MIN_TEMPERATURE_K);
-	return get_pressure(p_pos) / r_gas() / temperature_k;
+	return get_pressure(p_pos) / r_gas() / get_air_temperature(p_pos);
 }
 
 Vector2 RegolithWeather::get_frost(const Vector3 &p_pos) const {

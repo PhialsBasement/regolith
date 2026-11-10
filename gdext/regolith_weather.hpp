@@ -56,10 +56,11 @@ public:
 	Vector3 get_wind(const Vector3 &p_pos) const; // surface, render space
 	Vector2 get_wind_local(const Vector3 &p_pos) const; // east, north
 	Vector3 get_layer_wind(const Vector3 &p_pos) const;
-	// the air at the point: the ground's under it, thinned with height
+	// the air at the point: the ground's under it, thinned and cooled with height
 	double get_pressure(const Vector3 &p_pos) const;
 	double get_density(const Vector3 &p_pos) const;
 	double get_air_temperature(const Vector3 &p_pos) const;
+	double get_speed_of_sound(const Vector3 &p_pos) const; // m/s
 	double get_ground_temperature(const Vector3 &p_pos) const;
 	Vector2 get_frost(const Vector3 &p_pos) const; // CO2, water ice, kg/m2
 	double get_cloud(const Vector3 &p_pos) const; // visible tau
@@ -104,6 +105,7 @@ private:
 	double pub_at(const std::vector<float> &p_f, const Vector3 &p_pos) const;
 	Vector3 to_render(const regolith::DVec3 &p_dir, double p_east, double p_north) const;
 	double height_over_ground(const Vector3 &p_pos) const;
+	double ground_air_temperature(const Vector3 &p_pos) const;
 	double r_gas() const;
 	double gravity() const;
 	void upload_maps();

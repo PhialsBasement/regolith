@@ -44,19 +44,64 @@ TEST_CASE(earth_zenith_transmittance_matches_layer_depths) {
 	}
 }
 
-TEST_CASE(pressure_falls_by_e_every_scale_height) {
-	// Mars's air: CO2 (191.8 J/(kg K)) at 210 K under 3.711 m/s2, 610 Pa at the ground
-	const double ground_pa = 610.0, temperature_k = 210.0, r_gas = 191.8, gravity = 3.711;
-	const double scale_height_m = r_gas * temperature_k / gravity; // about 10.9 km
-	const double at_ground = pressure_at_height(ground_pa, 0.0, temperature_k, r_gas, gravity);
-	const double one_up = pressure_at_height(ground_pa, scale_height_m, temperature_k, r_gas, gravity);
-	const double high_up = pressure_at_height(ground_pa, 82000.0, temperature_k, r_gas, gravity);
-	std::printf("  ground %.1f Pa, one scale height (%.0f m) up %.2f Pa (expected %.2f), 82 km up %.3f Pa\n", at_ground,
-			scale_height_m, one_up, ground_pa / std::exp(1.0), high_up);
-	CHECK(at_ground == ground_pa);
-	CHECK(std::abs(one_up - ground_pa / std::exp(1.0)) < 1e-9);
-	// 82 km is past 7.5 scale heights: under a thousandth of the ground's
-	CHECK(high_up < ground_pa * 1e-3);
+// Mars's air for the profile tests: CO2 under Mars's gravity, the
+// climate's 640 Pa annual mean at a 230 K afternoon ground
+constexpr double MARS_R_GAS = 191.8;      // J/(kg K)
+constexpr double MARS_GRAVITY = 3.711;    // m/s2
+constexpr double GROUND_PA = 640.0;
+constexpr double GROUND_K = 230.0;
+
+// Hydrostatic pressure by small steps up the same temperature profile:
+// dp/dh = -p g / (R T(h)). An independent check of the closed form.
+static double pressure_by_steps(double p_height_m) {
+	constexpr int STEPS = 200000;
+	const double dh = p_height_m / STEPS;
+	double p = GROUND_PA;
+	for (int i = 0; i < STEPS; ++i) {
+		const double t = air_temperature_at_height(GROUND_K, (i + 0.5) * dh);
+		p *= std::exp(-MARS_GRAVITY * dh / (MARS_R_GAS * t));
+	}
+	return p;
+}
+
+TEST_CASE(air_cools_at_nasa_glenns_mars_lapse_rates) {
+	// 0.998 K/km to 7 km, 2.22 K/km above (NASA Glenn's Mars model)
+	const double at_7km = air_temperature_at_height(GROUND_K, 7000.0);
+	const double at_20km = air_temperature_at_height(GROUND_K, 20000.0);
+	const double expected_7km = GROUND_K - 0.998 * 7.0;
+	const double expected_20km = expected_7km - 2.22 * 13.0;
+	std::printf("  7 km %.3f K (expected %.3f), 20 km %.3f K (expected %.3f)\n", at_7km, expected_7km, at_20km, expected_20km);
+	CHECK(std::abs(at_7km - expected_7km) < 1e-9);
+	CHECK(std::abs(at_20km - expected_20km) < 1e-9);
+	CHECK(air_temperature_at_height(GROUND_K, -50.0) == GROUND_K);
+}
+
+TEST_CASE(air_no_colder_than_the_floor) {
+	// 230 K reaches the 140 K floor near 44 km
+	const double at_80km = air_temperature_at_height(GROUND_K, 80000.0);
+	std::printf("  80 km %.1f K (floor %.1f K)\n", at_80km, MARS_AIR_FLOOR_K);
+	CHECK(at_80km == MARS_AIR_FLOOR_K);
+}
+
+TEST_CASE(pressure_matches_the_profile_integrated_by_steps) {
+	// through the low layer, the high layer, and past the floor
+	for (const double height_m : { 0.0, 3000.0, 7000.0, 20000.0, 60000.0, 100000.0 }) {
+		const double closed = pressure_at_height(GROUND_PA, height_m, GROUND_K, MARS_R_GAS, MARS_GRAVITY);
+		const double stepped = height_m > 0.0 ? pressure_by_steps(height_m) : GROUND_PA;
+		const double error = std::abs(closed - stepped) / stepped;
+		std::printf("  %6.0f m: %.6g Pa, by steps %.6g Pa, relative error %.1e\n", height_m, closed, stepped, error);
+		CHECK(error < 1e-6);
+	}
+}
+
+TEST_CASE(speed_of_sound_matches_perseverances_240_ms) {
+	// Perseverance heard about 240 m/s near the ground (Maurice et al.
+	// 2022); daytime air there is about 230 to 245 K
+	const double at_235k = speed_of_sound(235.0, MARS_R_GAS);
+	const double expected = std::sqrt(9.0 / 7.0 * MARS_R_GAS * 235.0);
+	std::printf("  235 K: %.1f m/s (gamma 9/7: %.1f)\n", at_235k, expected);
+	CHECK(std::abs(at_235k - expected) < 1e-9);
+	CHECK(std::abs(at_235k - 240.0) < 5.0);
 }
 
 TEST_CASE(air_transmittance_is_zero_into_the_ground) {
