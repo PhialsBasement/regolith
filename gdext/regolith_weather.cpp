@@ -24,6 +24,7 @@
 #include <godot_cpp/classes/viewport.hpp>
 #include <godot_cpp/core/class_db.hpp>
 
+#include "climate_model_config.hpp"
 #include "convert.hpp"
 #include "regolith/ephemeris.hpp"
 #include "regolith_atmosphere.hpp"
@@ -39,30 +40,8 @@ namespace {
 
 constexpr double PI = std::numbers::pi;
 constexpr double DEG = PI / 180.0;
-// the air before the climate has published (or off its grid)
-constexpr double FALLBACK_PRESSURE_PA = 610.0;
-// before the climate is built: its own defaults
-const regolith::ClimateConfig FALLBACK_CONFIG;
 constexpr int TOPO_LEVEL = 1; // ~40 km samples for 2 deg cells
 constexpr int REFRESH_MS = 250;
-
-regolith::ClimateConfig config_from(const Dictionary &p_d) {
-	regolith::ClimateConfig c;
-	c.radius = double(p_d.get("radius", c.radius));
-	c.gravity = double(p_d.get("gravity", c.gravity));
-	c.sol_s = double(p_d.get("sol_s", c.sol_s));
-	c.obliquity_deg = double(p_d.get("obliquity_deg", c.obliquity_deg));
-	c.eccentricity = double(p_d.get("eccentricity", c.eccentricity));
-	c.perihelion_ls = double(p_d.get("perihelion_ls", c.perihelion_ls));
-	c.solar_flux = double(p_d.get("solar_flux", c.solar_flux));
-	c.scale_height = double(p_d.get("scale_height", c.scale_height));
-	c.datum_pressure = double(p_d.get("datum_pressure", c.datum_pressure));
-	c.r_gas = double(p_d.get("r_gas", c.r_gas));
-	c.gw = int(p_d.get("gw", c.gw));
-	c.gh = int(p_d.get("gh", c.gh));
-	c.px_per_turn = double(p_d.get("px_per_turn", c.px_per_turn));
-	return c;
-}
 
 PackedByteArray bytes_of(const std::vector<uint8_t> &p_v) {
 	PackedByteArray a;
@@ -141,7 +120,13 @@ RegolithBody *RegolithWeather::body() const {
 // Main-thread setup: the albedo proxy and climatology are read
 // here; the terrain grid is sampled on the worker.
 void RegolithWeather::start() {
-	climate_ = std::make_unique<Climate>(config_from(config_));
+	regolith::ClimateConfig c = parsed_;
+	if (const RegolithBody *b = body()) {
+		// its seasons and hours: the body's own path and spin
+		c.orbit = b->orbit_elements();
+		c.rotation = b->rotation();
+	}
+	climate_ = std::make_unique<Climate>(c);
 	const int gw = climate_->GW, gh = climate_->GH;
 	if (!albedo_map_path_.is_empty()) {
 		Ref<Texture2D> tex = ResourceLoader::get_singleton()->load(albedo_map_path_);
@@ -319,7 +304,8 @@ Vector3 RegolithWeather::to_render(const DVec3 &p_dir, double p_east, double p_n
 double RegolithWeather::get_tau(const Vector3 &p_pos) const {
 	std::lock_guard<std::mutex> guard(mutex_);
 	const double d = pub_at(pub_.dust, p_pos);
-	return std::isnan(d) ? 0.35 : Climate::TAU_FLOOR + Climate::TAU_PER_DUST * d;
+	const regolith::ClimateModel &m = parsed_.model;
+	return std::isnan(d) ? m.tau_unknown : m.dust_tau_floor + m.tau_per_dust * d;
 }
 
 Vector2 RegolithWeather::get_wind_local(const Vector3 &p_pos) const {
@@ -360,9 +346,10 @@ double RegolithWeather::get_pressure(const Vector3 &p_pos) const {
 	{
 		std::lock_guard<std::mutex> guard(mutex_);
 		const double p = pub_at(pub_.p, p_pos);
-		ground_pa = std::isnan(p) ? FALLBACK_PRESSURE_PA : p;
+		ground_pa = std::isnan(p) ? parsed_.datum_pressure : p;
 	}
-	return regolith::pressure_at_height(ground_pa, height_over_ground(p_pos), ground_air_temperature(p_pos), r_gas(), gravity());
+	return regolith::pressure_at_height(parsed_.lapse, ground_pa, height_over_ground(p_pos), ground_air_temperature(p_pos),
+			parsed_.r_gas, parsed_.gravity);
 }
 
 // Metres from the ground up to p_pos (0 at or under it); from the datum
@@ -382,27 +369,24 @@ double RegolithWeather::height_over_ground(const Vector3 &p_pos) const {
 	return std::max(regolith::length(x) - ground, 0.0);
 }
 
-double RegolithWeather::r_gas() const {
-	return climate_ ? climate_->config().r_gas : FALLBACK_CONFIG.r_gas;
-}
-
-double RegolithWeather::gravity() const {
-	return climate_ ? climate_->config().gravity : FALLBACK_CONFIG.gravity;
+void RegolithWeather::set_config(const Dictionary &p_v) {
+	config_ = p_v;
+	parsed_ = climate_config_from(p_v);
 }
 
 // The air at the ground under p_pos (K).
 double RegolithWeather::ground_air_temperature(const Vector3 &p_pos) const {
 	std::lock_guard<std::mutex> guard(mutex_);
 	const double t = pub_at(pub_.tair, p_pos);
-	return std::isnan(t) ? 210.0 : t;
+	return std::isnan(t) ? parsed_.mean_air_k : t;
 }
 
 double RegolithWeather::get_air_temperature(const Vector3 &p_pos) const {
-	return regolith::air_temperature_at_height(ground_air_temperature(p_pos), height_over_ground(p_pos));
+	return regolith::air_temperature_at_height(parsed_.lapse, ground_air_temperature(p_pos), height_over_ground(p_pos));
 }
 
 double RegolithWeather::get_speed_of_sound(const Vector3 &p_pos) const {
-	return regolith::speed_of_sound(get_air_temperature(p_pos), r_gas());
+	return regolith::speed_of_sound(get_air_temperature(p_pos), parsed_.r_gas, parsed_.gamma);
 }
 
 double RegolithWeather::get_ground_temperature(const Vector3 &p_pos) const {
@@ -412,7 +396,7 @@ double RegolithWeather::get_ground_temperature(const Vector3 &p_pos) const {
 }
 
 double RegolithWeather::get_density(const Vector3 &p_pos) const {
-	return get_pressure(p_pos) / r_gas() / get_air_temperature(p_pos);
+	return get_pressure(p_pos) / parsed_.r_gas / get_air_temperature(p_pos);
 }
 
 Vector2 RegolithWeather::get_frost(const Vector3 &p_pos) const {

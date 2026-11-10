@@ -48,6 +48,8 @@ TEST_CASE(earth_zenith_transmittance_matches_layer_depths) {
 // climate's 640 Pa annual mean at a 230 K afternoon ground
 constexpr double MARS_R_GAS = 191.8;      // J/(kg K)
 constexpr double MARS_GRAVITY = 3.711;    // m/s2
+constexpr double MARS_GAMMA = 9.0 / 7.0;  // CO2, bending mode relaxed (Maurice et al. 2022)
+const LapseProfile MARS_LAPSE;            // the defaults: NASA Glenn's Mars model
 constexpr double GROUND_PA = 640.0;
 constexpr double GROUND_K = 230.0;
 
@@ -58,7 +60,7 @@ static double pressure_by_steps(double p_height_m) {
 	const double dh = p_height_m / STEPS;
 	double p = GROUND_PA;
 	for (int i = 0; i < STEPS; ++i) {
-		const double t = air_temperature_at_height(GROUND_K, (i + 0.5) * dh);
+		const double t = air_temperature_at_height(MARS_LAPSE, GROUND_K, (i + 0.5) * dh);
 		p *= std::exp(-MARS_GRAVITY * dh / (MARS_R_GAS * t));
 	}
 	return p;
@@ -66,27 +68,27 @@ static double pressure_by_steps(double p_height_m) {
 
 TEST_CASE(air_cools_at_nasa_glenns_mars_lapse_rates) {
 	// 0.998 K/km to 7 km, 2.22 K/km above (NASA Glenn's Mars model)
-	const double at_7km = air_temperature_at_height(GROUND_K, 7000.0);
-	const double at_20km = air_temperature_at_height(GROUND_K, 20000.0);
+	const double at_7km = air_temperature_at_height(MARS_LAPSE, GROUND_K, 7000.0);
+	const double at_20km = air_temperature_at_height(MARS_LAPSE, GROUND_K, 20000.0);
 	const double expected_7km = GROUND_K - 0.998 * 7.0;
 	const double expected_20km = expected_7km - 2.22 * 13.0;
 	std::printf("  7 km %.3f K (expected %.3f), 20 km %.3f K (expected %.3f)\n", at_7km, expected_7km, at_20km, expected_20km);
 	CHECK(std::abs(at_7km - expected_7km) < 1e-9);
 	CHECK(std::abs(at_20km - expected_20km) < 1e-9);
-	CHECK(air_temperature_at_height(GROUND_K, -50.0) == GROUND_K);
+	CHECK(air_temperature_at_height(MARS_LAPSE, GROUND_K, -50.0) == GROUND_K);
 }
 
 TEST_CASE(air_no_colder_than_the_floor) {
 	// 230 K reaches the 140 K floor near 44 km
-	const double at_80km = air_temperature_at_height(GROUND_K, 80000.0);
-	std::printf("  80 km %.1f K (floor %.1f K)\n", at_80km, MARS_AIR_FLOOR_K);
-	CHECK(at_80km == MARS_AIR_FLOOR_K);
+	const double at_80km = air_temperature_at_height(MARS_LAPSE, GROUND_K, 80000.0);
+	std::printf("  80 km %.1f K (floor %.1f K)\n", at_80km, MARS_LAPSE.floor_k);
+	CHECK(at_80km == MARS_LAPSE.floor_k);
 }
 
 TEST_CASE(pressure_matches_the_profile_integrated_by_steps) {
 	// through the low layer, the high layer, and past the floor
 	for (const double height_m : { 0.0, 3000.0, 7000.0, 20000.0, 60000.0, 100000.0 }) {
-		const double closed = pressure_at_height(GROUND_PA, height_m, GROUND_K, MARS_R_GAS, MARS_GRAVITY);
+		const double closed = pressure_at_height(MARS_LAPSE, GROUND_PA, height_m, GROUND_K, MARS_R_GAS, MARS_GRAVITY);
 		const double stepped = height_m > 0.0 ? pressure_by_steps(height_m) : GROUND_PA;
 		const double error = std::abs(closed - stepped) / stepped;
 		std::printf("  %6.0f m: %.6g Pa, by steps %.6g Pa, relative error %.1e\n", height_m, closed, stepped, error);
@@ -97,11 +99,32 @@ TEST_CASE(pressure_matches_the_profile_integrated_by_steps) {
 TEST_CASE(speed_of_sound_matches_perseverances_240_ms) {
 	// Perseverance heard about 240 m/s near the ground (Maurice et al.
 	// 2022); daytime air there is about 230 to 245 K
-	const double at_235k = speed_of_sound(235.0, MARS_R_GAS);
-	const double expected = std::sqrt(9.0 / 7.0 * MARS_R_GAS * 235.0);
+	const double at_235k = speed_of_sound(235.0, MARS_R_GAS, MARS_GAMMA);
+	const double expected = std::sqrt(MARS_GAMMA * MARS_R_GAS * 235.0);
 	std::printf("  235 K: %.1f m/s (gamma 9/7: %.1f)\n", at_235k, expected);
 	CHECK(std::abs(at_235k - expected) < 1e-9);
 	CHECK(std::abs(at_235k - 240.0) < 5.0);
+}
+
+TEST_CASE(another_bodys_profile_gives_earths_standard_atmosphere) {
+	// ISA: 6.5 K/km from 288.15 K and 101325 Pa to 11 km, isothermal
+	// above; at 11 km it gives 216.65 K and 22632 Pa
+	LapseProfile earth;
+	earth.low_k_per_m = 0.0065;
+	earth.high_k_per_m = 0.0;
+	earth.turn_m = 11000.0;
+	earth.floor_k = 1.0;
+	constexpr double EARTH_R_GAS = 287.053;     // J/(kg K), dry air
+	constexpr double EARTH_GRAVITY = 9.80665;   // m/s2, standard
+	constexpr double ISA_11KM_K = 216.65;
+	constexpr double ISA_11KM_PA = 22632.0;
+	const double t = air_temperature_at_height(earth, 288.15, 11000.0);
+	const double p = pressure_at_height(earth, 101325.0, 11000.0, 288.15, EARTH_R_GAS, EARTH_GRAVITY);
+	const double t_above = air_temperature_at_height(earth, 288.15, 15000.0);
+	std::printf("  11 km: %.2f K (ISA %.2f), %.0f Pa (ISA %.0f); 15 km %.2f K\n", t, ISA_11KM_K, p, ISA_11KM_PA, t_above);
+	CHECK(std::abs(t - ISA_11KM_K) < 1e-9);
+	CHECK(std::abs(p - ISA_11KM_PA) / ISA_11KM_PA < 1e-3);
+	CHECK(t_above == t);
 }
 
 TEST_CASE(air_transmittance_is_zero_into_the_ground) {

@@ -94,6 +94,31 @@ Data: Yale Bright Star Catalogue, 5th ed. (Hoffleit and Warren,
 Visualization Studio, Deep Star Maps 2020. `tools/make_sky_data.gd`
 rebuilds `regolith_stars.res` and `regolith_milkyway.res` from them.
 
+## Weather and clouds
+
+`RegolithWeather` runs a closed-form climate for its body: dust and
+regional storms, winds, ground and air temperatures, seasonal caps
+and frost, water vapour and cloud. Its seasons and hours come from
+the body's own orbit and spin. Everything else is its `config`
+dictionary, and every key left out is Mars's:
+
+- the body and its air: `radius`, `gravity`, `sol_s`,
+  `obliquity_deg`, `eccentricity`, `perihelion_ls`, `solar_flux`,
+  `scale_height`, `datum_pressure`, `r_gas`, `gamma`, and how the
+  air cools with height (`lapse_low`, `lapse_high`, `lapse_turn_m`,
+  `air_floor_k`);
+- the climate model: storm sites and seasons, the winds, the
+  temperatures, the cap tables (`cap_north`, `cap_south`) and the
+  frost point, the vapour columns, the cloud levels and each cloud
+  kind. Every key is a field of `ClimateModel` in
+  `core/include/regolith/climate_model.hpp`, with its unit and its
+  Mars value.
+
+A key of the wrong shape or out of range is reported and keeps
+Mars's value. `RegolithClouds` draws the weather's clouds as
+sheets: `sheet_gap`, `sheet_thickness` and `streak` (3 km, 600 m
+and 6 for Mars's ice clouds) shape them.
+
 ## Example
 
 Open `addons/regolith/example/regolith_example.tscn` and run it:

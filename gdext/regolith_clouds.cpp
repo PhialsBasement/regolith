@@ -50,6 +50,8 @@ namespace {
 constexpr int LIGHT_XY = 96, LIGHT_Z = 32;
 constexpr int SHAPE_N = 128, DETAIL_N = 32;
 constexpr int SHAPE_MIPS = 8, DETAIL_MIPS = 6; // down to 1
+// the cascades' altitudes (m over the datum): down to Z_MIN or the
+// body's lowest ground, whichever is deeper
 constexpr double Z_MIN = -8000.0, Z_MAX = 48000.0;
 // light cascade half widths (m) and re-bake intervals (s)
 constexpr double HALF[RegolithCloudEffect::NC] = { 24e3, 96e3, 384e3, 1536e3 };
@@ -279,7 +281,7 @@ void RegolithCloudEffect::_render_callback(int32_t p_type, RenderData *p_data) {
 		push3(u, c.a, HALF[k]);
 		push3(u, c.e, 2.0 * HALF[k] / LIGHT_XY);
 		push3(u, c.n, c.built ? 1.0 : 0.0);
-		push4(u, Z_MIN, Z_MAX, 0.0, 0.0);
+		push4(u, std::min(Z_MIN, f.lowest), Z_MAX, 0.0, 0.0);
 		push3(u, f.drift - c.drift, 0.0);
 	}
 	push4(u, f.datum, double(frame_index_++ % 1024), double(look.max_steps), double(std::max(job_k, 0)));
@@ -315,6 +317,7 @@ void RegolithCloudEffect::_render_callback(int32_t p_type, RenderData *p_data) {
 	constexpr int CELL[4][2] = { { 0, 0 }, { 1, 1 }, { 1, 0 }, { 0, 1 } };
 	const int *cell = CELL[frame_index_ % 4];
 	push4(u, qsize.x, qsize.y, cell[0], cell[1]);
+	push4(u, look.sheet_gap, look.sheet_thickness, look.streak, 0.0);
 	prev_proj_ = proj;
 	prev_cam_ = cam;
 	prev_eye_ = f.eye;
@@ -417,6 +420,9 @@ void RegolithClouds::_bind_methods() {
 	CLOUD_PROP(detail_period, FLOAT)
 	CLOUD_PROP(phase_g, FLOAT)
 	CLOUD_PROP(resolution_scale, FLOAT)
+	CLOUD_PROP(sheet_gap, FLOAT)
+	CLOUD_PROP(sheet_thickness, FLOAT)
+	CLOUD_PROP(streak, FLOAT)
 	CLOUD_PROP(max_steps, INT)
 #undef CLOUD_PROP
 }
@@ -550,6 +556,7 @@ void RegolithClouds::_process(double p_delta) {
 		radius_ = b->datum_radius(regolith::normalize(f.eye));
 	}
 	f.datum = radius_;
+	f.lowest = b->lowest_radius() > 0.0 ? b->lowest_radius() - radius_ : 0.0;
 	const double now = sys->get_time();
 	f.sun = regolith::to_v(sys->sun_in_body(b));
 	DirectionalLight3D *sun = Object::cast_to<DirectionalLight3D>(get_node_or_null(sun_path_));
@@ -579,7 +586,7 @@ void RegolithClouds::_process(double p_delta) {
 	f.valid = true;
 	RegolithCloudEffect::Field fl;
 	if (w->cloud_field(field_version_, fl.tau, fl.topo, fl.gw, fl.gh)) {
-		fl.edges.assign(std::begin(regolith::Climate::LEVEL_M), std::end(regolith::Climate::LEVEL_M));
+		fl.edges.assign(w->level_edges().begin(), w->level_edges().end());
 		fl.band = cloud_band(fl.tau, fl.gw, fl.gh, fl.edges);
 		effect_->set_field(std::move(fl));
 	}

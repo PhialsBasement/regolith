@@ -48,7 +48,9 @@ public:
 	void set_climatology_path(const String &p_v) { clim_path_ = p_v; }
 	String get_climatology_path() const { return clim_path_; }
 	// body and grid overrides (ClimateConfig's field names)
-	void set_config(const Dictionary &p_v) { config_ = p_v; }
+	void set_config(const Dictionary &p_v);
+	// the cloud levels' edges, m over the ground (the config's level_edges_m)
+	const std::array<double, regolith::CLIMATE_LEVELS + 1> &level_edges() const { return parsed_.model.level_edges_m; }
 	Dictionary get_config() const { return config_; }
 
 	// gameplay queries at a render-space point (main thread)
@@ -106,8 +108,6 @@ private:
 	Vector3 to_render(const regolith::DVec3 &p_dir, double p_east, double p_north) const;
 	double height_over_ground(const Vector3 &p_pos) const;
 	double ground_air_temperature(const Vector3 &p_pos) const;
-	double r_gas() const;
-	double gravity() const;
 	void upload_maps();
 
 	NodePath system_path_;
@@ -116,6 +116,7 @@ private:
 	String albedo_map_path_;
 	String clim_path_;
 	Dictionary config_;
+	regolith::ClimateConfig parsed_; // config_ as read, Mars where it says nothing
 
 	std::unique_ptr<regolith::Climate> climate_;
 	RegolithBody *body_ptr_ = nullptr;

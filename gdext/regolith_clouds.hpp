@@ -4,6 +4,7 @@
 
 #pragma once
 
+#include <algorithm>
 #include <array>
 #include <mutex>
 #include <vector>
@@ -40,6 +41,7 @@ public:
 		Basis to_body; // render vector to body frame
 		regolith::DVec3 eye; // body frame, metres
 		double datum = 0.0;
+		double lowest = 0.0; // the body's lowest ground, m over the datum
 		Vector3 sun; // body frame
 		double sun_energy = 0.0;
 		Color sun_color, ambient;
@@ -53,6 +55,11 @@ public:
 		double shape_period = 36000.0; // m
 		double detail_period = 2000.0; // m
 		double phase_g = 0.8; // ice crystals: strongly forward
+		// the clouds' sheets: their spacing and thickness (m), and how
+		// far they are drawn out east to west. Defaults: Mars's ice clouds
+		double sheet_gap = 3000.0;
+		double sheet_thickness = 600.0;
+		double streak = 6.0;
 		double resolution_scale = 0.5;
 		int max_steps = 192;
 	};
@@ -154,6 +161,13 @@ public:
 	double get_phase_g() const { return look_.phase_g; }
 	void set_resolution_scale(double p_v) { look_.resolution_scale = p_v; }
 	double get_resolution_scale() const { return look_.resolution_scale; }
+	// no thinner, closer or less drawn out than this: the shader divides by them
+	void set_sheet_gap(double p_v) { look_.sheet_gap = std::max(p_v, 1.0); }
+	double get_sheet_gap() const { return look_.sheet_gap; }
+	void set_sheet_thickness(double p_v) { look_.sheet_thickness = std::max(p_v, 1.0); }
+	double get_sheet_thickness() const { return look_.sheet_thickness; }
+	void set_streak(double p_v) { look_.streak = std::max(p_v, 0.01); }
+	double get_streak() const { return look_.streak; }
 	void set_max_steps(int p_v) { look_.max_steps = p_v; }
 	int get_max_steps() const { return look_.max_steps; }
 

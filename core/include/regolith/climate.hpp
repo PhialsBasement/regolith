@@ -8,6 +8,9 @@
 #include <cstdint>
 #include <vector>
 
+#include "regolith/air.hpp"
+#include "regolith/climate_model.hpp"
+#include "regolith/ephemeris.hpp"
 #include "regolith/vec.hpp"
 
 namespace regolith {
@@ -26,6 +29,13 @@ struct ClimateConfig {
 	double scale_height = 10800.0; // m
 	double datum_pressure = 640.0; // Pa, the annual mean
 	double r_gas = 191.8; // J/kg/K
+	LapseProfile lapse; // the air cooling with height
+	double gamma = 9.0 / 7.0; // adiabatic index: CO2 with its bending mode relaxed (Maurice et al. 2022)
+	double mean_air_k = 210.0; // the air before the fields are worked out
+	// the body's path and spin, for its seasons and hours
+	OrbitElements orbit = MARS_ORBIT;
+	Rotation rotation = MARS_ROTATION;
+	ClimateModel model; // its dust, winds, caps, water and clouds
 	int gw = 180;
 	int gh = 90;
 	double px_per_turn = 106496.0;
@@ -36,15 +46,11 @@ struct ClimateConfig {
 // is integrated, so any time can be evaluated directly.
 class Climate {
 public:
-	static constexpr double TAU_FLOOR = 0.10;
-	static constexpr double TAU_PER_DUST = 2.6;
 	static constexpr double PACK_TAU_MAX = 3.0;
 	static constexpr double PACK_DUST_MAX = 2.0;
-	// cloud levels: edges in metres over the ground
-	static constexpr int NL = 8;
-	static constexpr int NL_LOW = 4; // below 14 km
-	static constexpr double LEVEL_M[NL + 1] = { 0.0, 2000.0, 5000.0, 9000.0, 14000.0, 20000.0, 27000.0, 35000.0,
-		45000.0 };
+	// cloud levels (edges: the model's level_edges_m); the lower NL_LOW are the low clouds
+	static constexpr int NL = CLIMATE_LEVELS;
+	static constexpr int NL_LOW = 4;
 
 	using Field = std::vector<float>;
 
@@ -66,11 +72,11 @@ public:
 	// RGBA8 packs the renderer decodes: R low cloud tau, G high
 	// (both over PACK_TAU_MAX), A dust over PACK_DUST_MAX
 	void pack_global(std::vector<uint8_t> &r_out) const;
-	// R CO2 ice / 400, G water ice / 1 (kg/m2), B ground T and
-	// A air T as (T - 140) / 160
+	// R cap ice over the model's cap_pack_kg_m2, G water ice / 1 (kg/m2),
+	// B ground T and A air T over the model's ground_min_k to ground_max_k
 	void pack_surface(std::vector<uint8_t> &r_out) const;
 
-	// dust is (tau - TAU_FLOOR) / TAU_PER_DUST; winds in m/s,
+	// dust is (tau - dust_tau_floor) / tau_per_dust; winds in m/s,
 	// u east, v south (the grid is y-down); su/sv at the
 	// surface, lu/lv aloft
 	Field dust, su, sv, lu, lv, ps, ts, tair, co2, frost, wv;

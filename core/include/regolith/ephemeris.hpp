@@ -38,6 +38,9 @@ DVec3 inertial_to_body(const Rotation &p_rot, double p_seconds, const DVec3 &p_i
 // Solar longitude (deg 0..360): the sun's place on the body's
 // orbit from its northern spring equinox.
 double solar_longitude(const OrbitElements &p_orbit, const Rotation &p_rot, double p_seconds);
+// Unit vector to the sun in the body-fixed coordinates of a body on
+// p_orbit turning as p_rot.
+DVec3 sun_direction(const OrbitElements &p_orbit, const Rotation &p_rot, double p_seconds);
 
 extern const OrbitElements MARS_ORBIT;
 extern const OrbitElements EARTH_ORBIT; // Earth-Moon barycentre

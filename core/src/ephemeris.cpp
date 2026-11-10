@@ -161,8 +161,12 @@ DVec3 mars_inertial_to_body(double p_seconds, const DVec3 &p_inertial) {
 	return inertial_to_body(MARS_ROTATION, p_seconds, p_inertial);
 }
 
+DVec3 sun_direction(const OrbitElements &p_orbit, const Rotation &p_rot, double p_seconds) {
+	return normalize(inertial_to_body(p_rot, p_seconds, heliocentric(p_orbit, p_seconds) * -1.0));
+}
+
 DVec3 mars_sun_direction(double p_seconds) {
-	return normalize(mars_inertial_to_body(p_seconds, mars_heliocentric(p_seconds) * -1.0));
+	return sun_direction(MARS_ORBIT, MARS_ROTATION, p_seconds);
 }
 
 double mars_local_solar_time(double p_seconds, double p_lon_deg) {

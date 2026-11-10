@@ -167,7 +167,7 @@ void main() {
 			}
 			// resolve the sheets along the ray, and near the eye
 			// the detail too: steps grow with the distance
-			float dt = SHEET_THICK * 0.4 / max(abs(cu), 0.03);
+			float dt = p.sheets.y * 0.4 / max(abs(cu), 0.03);
 			dt = clamp(min(dt, max(t * 0.04, 50.0)), 50.0, 8000.0);
 			float foot = t * p.ambient.w;
 			float sigma = cloud_density(pb, foot);

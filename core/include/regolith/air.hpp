@@ -39,28 +39,28 @@ AirModel earth_air(double p_bottom);
 // blue (Wolff et al. 2009): the butterscotch sky and blue dusk.
 AirModel mars_air(double p_bottom, double p_dust_tau);
 
-// Mars's air cooling with height (NASA Glenn's fit to Mars Global
-// Surveyor data): K per metre below and above MARS_LAPSE_TURN_M, down
-// to MARS_AIR_FLOOR_K (the climate's coldest air).
-constexpr double MARS_LAPSE_LOW = 0.000998;
-constexpr double MARS_LAPSE_HIGH = 0.00222;
-constexpr double MARS_LAPSE_TURN_M = 7000.0;
-constexpr double MARS_AIR_FLOOR_K = 140.0;
-// CO2's adiabatic index with its bending mode relaxed, 9/7: the
-// low-frequency value on Mars (Maurice et al. 2022, Nature)
-constexpr double MARS_GAMMA = 9.0 / 7.0;
+// How a body's air cools with height: K per metre below and above
+// turn_m, down to floor_k. Defaults: Mars (NASA Glenn's fit to Mars
+// Global Surveyor data).
+struct LapseProfile {
+	double low_k_per_m = 0.000998;
+	double high_k_per_m = 0.00222;
+	double turn_m = 7000.0;
+	double floor_k = 140.0;
+};
 
 // The air's temperature p_height_m over the ground (K), p_ground_k there.
-double air_temperature_at_height(double p_ground_k, double p_height_m);
+double air_temperature_at_height(const LapseProfile &p_lapse, double p_ground_k, double p_height_m);
 
 // The air's pressure p_height_m over the ground (Pa), from p_ground_pa
-// and p_ground_k there: hydrostatic through air_temperature_at_height's
-// profile, gas constant p_r_gas (J/(kg K)) under p_gravity (m/s2).
-double pressure_at_height(double p_ground_pa, double p_height_m, double p_ground_k, double p_r_gas,
-		double p_gravity);
+// and p_ground_k there: hydrostatic through p_lapse's profile, gas
+// constant p_r_gas (J/(kg K)) under p_gravity (m/s2).
+double pressure_at_height(const LapseProfile &p_lapse, double p_ground_pa, double p_height_m, double p_ground_k,
+		double p_r_gas, double p_gravity);
 
-// The speed of sound (m/s) in Mars's air at p_temperature_k.
-double speed_of_sound(double p_temperature_k, double p_r_gas);
+// The speed of sound (m/s) at p_temperature_k in a gas of adiabatic
+// index p_gamma and gas constant p_r_gas (J/(kg K)).
+double speed_of_sound(double p_temperature_k, double p_r_gas, double p_gamma);
 
 // Transmittance from radius p_r along a ray at cosine p_mu to
 // the local vertical, out of the air; zero if it meets the

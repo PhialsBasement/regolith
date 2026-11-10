@@ -12,10 +12,6 @@ const float PI = 3.14159265358979;
 const ivec3 LIGHT = ivec3(96, 96, 32);
 const int SHAPE_N = 128;
 const int DETAIL_N = 32;
-// Mars's ice clouds: thin sheets every few km, streaked
-const float SHEET_GAP = 3000.0;
-const float SHEET_THICK = 600.0;
-const float STREAK = 6.0;
 
 struct Cascade {
 	vec4 a; // anchor direction, w half width (m)
@@ -44,6 +40,7 @@ layout(set = 0, binding = 0, std140) uniform Params {
 	vec4 prev_x, prev_y, prev_z; // last view axes, w valid
 	vec4 prev_move; // eye's move since last frame (render)
 	vec4 tile; // xy traced size (a quarter), zw this frame's cell
+	vec4 sheets; // x gap between sheets (m), y their thickness (m), z east-west streak
 } p;
 
 // the weather: tau per level (lon, lat, level), the ground,
@@ -118,7 +115,7 @@ float cloud_density(vec3 pb, float foot) {
 	}
 	// squashed along the pole: fibres run east to west
 	vec3 q = (pb - p.drift.xyz) / p.look.w;
-	q.z *= STREAK;
+	q.z *= p.sheets.z;
 	float lod = clamp(log2(foot * float(SHAPE_N) / p.look.w), 0.0, 7.0);
 	vec4 n = textureLod(shape_tex, q, lod);
 	float low = n.g * 0.625 + n.b * 0.25 + n.a * 0.125;
@@ -132,17 +129,17 @@ float cloud_density(vec3 pb, float foot) {
 	}
 	// thin sheets whose heights wander with the noise
 	float wave = textureLod(shape_tex, q * 0.09 + vec3(0.5, 0.2, 0.9), max(lod - 3.0, 0.0)).g;
-	float s = fract(h / SHEET_GAP + wave * 1.6) - 0.5;
-	float sheet = exp(-pow(s * SHEET_GAP / SHEET_THICK, 2.0));
+	float s = fract(h / p.sheets.x + wave * 1.6) - 0.5;
+	float sheet = exp(-pow(s * p.sheets.x / p.sheets.y, 2.0));
 	// streaked detail frays the edges into fibres
 	vec3 dq = (pb - p.drift.xyz) / p.drift.w;
-	dq.z *= STREAK * 0.5;
+	dq.z *= p.sheets.z * 0.5;
 	float dlod = clamp(log2(foot * float(DETAIL_N) / p.drift.w), 0.0, 5.0);
 	vec3 dn = textureLod(detail_tex, dq, dlod).rgb;
 	float det = dn.r * 0.625 + dn.g * 0.25 + dn.b * 0.125;
 	float er = clamp(remap(dd, det * 0.6, 1.0, 0.0, 1.0), 0.0, 1.0);
 	// the column keeps the weather's mean extinction
-	float fill = SHEET_THICK * 1.77 / SHEET_GAP;
+	float fill = p.sheets.y * 1.77 / p.sheets.x;
 	return er * sheet * sb / (max(c2, 0.05) * 0.35 * fill) * p.look.y;
 }
 

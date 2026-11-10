@@ -91,6 +91,7 @@ if(REGOLITH_BUILD_TESTS)
 		tests/test_codec.cpp
 		tests/test_cube.cpp
 		tests/test_air.cpp
+		tests/test_climate.cpp
 		tests/test_ephemeris.cpp
 		tests/test_fold.cpp
 		tests/test_horizon.cpp
@@ -121,6 +122,7 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		gdext/regolith_system.cpp
 		gdext/regolith_vessel.cpp
 		gdext/regolith_weather.cpp
+		gdext/climate_model_config.cpp
 		gdext/rd_util.cpp
 		gdext/regolith_clouds.cpp
 		gdext/regolith_editor.cpp

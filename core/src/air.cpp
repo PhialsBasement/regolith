@@ -94,11 +94,11 @@ RGB air_transmittance(const AirModel &p_air, double p_r, double p_mu) {
 	return { std::exp(-depth[0]), std::exp(-depth[1]), std::exp(-depth[2]) };
 }
 
-double air_temperature_at_height(double p_ground_k, double p_height_m) {
+double air_temperature_at_height(const LapseProfile &p_lapse, double p_ground_k, double p_height_m) {
 	const double h = std::max(p_height_m, 0.0);
-	const double low = std::min(h, MARS_LAPSE_TURN_M);
+	const double low = std::min(h, p_lapse.turn_m);
 	const double high = h - low;
-	return std::max(p_ground_k - MARS_LAPSE_LOW * low - MARS_LAPSE_HIGH * high, MARS_AIR_FLOOR_K);
+	return std::max(p_ground_k - p_lapse.low_k_per_m * low - p_lapse.high_k_per_m * high, p_lapse.floor_k);
 }
 
 namespace {
@@ -114,20 +114,20 @@ double layer_ratio(double p_t0, double p_t1, double p_lapse, double p_dh, double
 
 } // namespace
 
-double pressure_at_height(double p_ground_pa, double p_height_m, double p_ground_k, double p_r_gas,
-		double p_gravity) {
+double pressure_at_height(const LapseProfile &p_lapse, double p_ground_pa, double p_height_m, double p_ground_k,
+		double p_r_gas, double p_gravity) {
 	const double h = std::max(p_height_m, 0.0);
-	const double ground_k = std::max(p_ground_k, MARS_AIR_FLOOR_K);
+	const double ground_k = std::max(p_ground_k, p_lapse.floor_k);
 	// the profile's layers: low lapse, high lapse, then the floor
-	const double edges[] = { 0.0, MARS_LAPSE_TURN_M, INFINITY };
-	const double lapses[] = { MARS_LAPSE_LOW, MARS_LAPSE_HIGH };
+	const double edges[] = { 0.0, p_lapse.turn_m, INFINITY };
+	const double lapses[] = { p_lapse.low_k_per_m, p_lapse.high_k_per_m };
 	double p = p_ground_pa;
 	for (int k = 0; k < 2 && h > edges[k]; ++k) {
 		const double top = std::min(h, edges[k + 1]);
-		const double t0 = air_temperature_at_height(ground_k, edges[k]);
-		const double t1 = air_temperature_at_height(ground_k, top);
+		const double t0 = air_temperature_at_height(p_lapse, ground_k, edges[k]);
+		const double t1 = air_temperature_at_height(p_lapse, ground_k, top);
 		// where this layer reaches the floor, the rest of it is isothermal
-		const double to_floor = (t0 - MARS_AIR_FLOOR_K) / lapses[k];
+		const double to_floor = lapses[k] > 0.0 ? (t0 - p_lapse.floor_k) / lapses[k] : INFINITY;
 		const double cooling = std::min(top - edges[k], to_floor);
 		p *= layer_ratio(t0, t0 - lapses[k] * cooling, lapses[k], cooling, p_r_gas, p_gravity);
 		p *= layer_ratio(t1, t1, 0.0, top - edges[k] - cooling, p_r_gas, p_gravity);
@@ -135,8 +135,8 @@ double pressure_at_height(double p_ground_pa, double p_height_m, double p_ground
 	return p;
 }
 
-double speed_of_sound(double p_temperature_k, double p_r_gas) {
-	return std::sqrt(MARS_GAMMA * p_r_gas * p_temperature_k);
+double speed_of_sound(double p_temperature_k, double p_r_gas, double p_gamma) {
+	return std::sqrt(p_gamma * p_r_gas * p_temperature_k);
 }
 
 } // namespace regolith
