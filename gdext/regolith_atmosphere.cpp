@@ -353,7 +353,7 @@ void RegolithAirEffect::_render_callback(int32_t p_type, RenderData *p_data) {
 	}
 	// one pixel's angle: the stars' point spread
 	const double pixel_angle = 2.0 / (std::fabs(double(proj.columns[1].y)) * size.y);
-	push4(u, pixel_angle, f.star_scale, 0.0, mw_unit_);
+	push4(u, pixel_angle, f.star_scale, f.debug_bad_pixels ? 1.0 : 0.0, mw_unit_);
 	push4(u, f.glow_color.r, f.glow_color.g, f.glow_color.b, 0.0);
 	rd_->buffer_update(params_, 0, uint32_t(u.size() * 4), bytes_of(u.data(), u.size() * 4));
 
@@ -490,6 +490,9 @@ void RegolithAtmosphere::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("set_airglow_color", "color"), &RegolithAtmosphere::set_airglow_color);
 	ClassDB::bind_method(D_METHOD("get_airglow_color"), &RegolithAtmosphere::get_airglow_color);
 	ADD_PROPERTY(PropertyInfo(Variant::COLOR, "airglow_color"), "set_airglow_color", "get_airglow_color");
+	ClassDB::bind_method(D_METHOD("set_debug_bad_pixels", "on"), &RegolithAtmosphere::set_debug_bad_pixels);
+	ClassDB::bind_method(D_METHOD("get_debug_bad_pixels"), &RegolithAtmosphere::get_debug_bad_pixels);
+	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "debug_bad_pixels"), "set_debug_bad_pixels", "get_debug_bad_pixels");
 	ClassDB::bind_method(D_METHOD("set_night_vision", "factor"), &RegolithAtmosphere::set_night_vision);
 	ClassDB::bind_method(D_METHOD("get_night_vision"), &RegolithAtmosphere::get_night_vision);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "night_vision", PROPERTY_HINT_RANGE, "1,10000000,1,exp"), "set_night_vision",
@@ -768,6 +771,7 @@ void RegolithAtmosphere::_process(double p_delta) {
 	f.sun_radius = SUN_RADIUS / std::max(dist, 1e9);
 	f.exposure = exposure_;
 	f.airglow = has_air ? airglow_ : 0.0;
+	f.debug_bad_pixels = debug_bad_pixels_;
 	{
 		const Color c = airglow_color_;
 		const float lum = std::max(0.2126f * c.r + 0.7152f * c.g + 0.0722f * c.b, 1e-4f);

@@ -57,6 +57,7 @@ public:
 		// stars' and the Milky Way's units
 		double star_scale = 0.0;
 		Basis body_to_icrf;
+		bool debug_bad_pixels = false;
 		bool valid = false;
 	};
 
@@ -141,6 +142,11 @@ public:
 	Color get_airglow_color() const { return airglow_color_; }
 	// the most the eye adapts to darkness beyond the camera's own
 	// exposure: the stars' gain in a dark view (1: true to the sun)
+	// debug: pixels that reach the air pass as NaN or infinite drawn
+	// magenta, those it makes so cyan, lone spikes far brighter than
+	// their neighbours yellow, instead of passed on
+	void set_debug_bad_pixels(bool p_v) { debug_bad_pixels_ = p_v; }
+	bool get_debug_bad_pixels() const { return debug_bad_pixels_; }
 	void set_night_vision(double p_v) { night_vision_ = p_v; }
 	double get_night_vision() const { return night_vision_; }
 	double get_eye_gain() const { return eye_gain_; }
@@ -191,6 +197,7 @@ private:
 	Color airglow_color_ = Color(1.0, 0.62, 0.42); // dusty warm
 	// enough to lift a dark sky's band above the tonemapper's toe
 	double night_vision_ = 300000.0;
+	bool debug_bad_pixels_ = false;
 	double eye_gain_ = 1.0; // adapted to the view, up to the above
 	double fog_density_ = 0.0;
 

@@ -12,6 +12,12 @@
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
+const vec4 BAD_IN = vec4(1.0e4, 0.0, 1.0e4, 1.0); // magenta: NaN or infinite as it arrived
+const vec4 BAD_OUT = vec4(0.0, 1.0e4, 1.0e4, 1.0); // cyan: made so here
+const vec4 SPIKE = vec4(1.0e4, 1.0e4, 0.0, 1.0); // yellow: far brighter than every neighbour as it arrived
+const float SPIKE_RATIO = 50.0;
+const float SPIKE_FLOOR = 1e-6; // a black neighbourhood's level: below this nothing is a spike
+
 #define AIR_HAS_LUTS
 #include "regolith_air_common.glsli"
 
@@ -23,6 +29,27 @@ layout(set = 0, binding = 5) uniform sampler2D sv_lut;
 layout(set = 0, binding = 6) uniform sampler3D ap_lut;
 
 #include "regolith_sky_objects.glsli"
+
+float luminance(vec3 p_c) {
+	return dot(p_c, vec3(0.2126, 0.7152, 0.0722));
+}
+
+// Pixel p_px, as it arrived, is SPIKE_RATIO times brighter than all four neighbours.
+bool spike(ivec2 p_px, vec3 p_c) {
+	float brightest = SPIKE_FLOOR;
+	for (int k = 0; k < 4; k++) {
+		ivec2 o = ivec2(k == 0 ? 1 : (k == 1 ? -1 : 0), k == 2 ? 1 : (k == 3 ? -1 : 0));
+		ivec2 q = clamp(p_px + o, ivec2(0), ivec2(a.size.xy) - 1);
+		brightest = max(brightest, luminance(imageLoad(color_image, q).rgb));
+	}
+	return luminance(p_c) > SPIKE_RATIO * brightest;
+}
+
+// The pixel's colour written; debugging, one made NaN or infinite here shows as BAD_OUT.
+void put(ivec2 p_px, vec4 p_col) {
+	bool bad = any(isnan(p_col.rgb)) || any(isinf(p_col.rgb));
+	imageStore(color_image, p_px, a.stars.z > 0.5 && bad ? BAD_OUT : p_col);
+}
 
 // Airglow: the air's own faint light, emitted in proportion to
 // its density, so a ray's glow is the air along it: faint at the
@@ -68,6 +95,14 @@ void main() {
 	bool air = a.radii.w > 0.5;
 	float scale = PI * a.sun.w * a.size.z;
 	vec4 c = imageLoad(color_image, px);
+	if (a.stars.z > 0.5 && (any(isnan(c.rgb)) || any(isinf(c.rgb)))) {
+		imageStore(color_image, px, BAD_IN);
+		return;
+	}
+	if (a.stars.z > 0.5 && spike(px, c.rgb)) {
+		imageStore(color_image, px, SPIKE);
+		return;
+	}
 	if (depth > 0.0) {
 		if (!air) {
 			return;
@@ -86,7 +121,7 @@ void main() {
 				tr = s.T;
 			}
 			vec3 glow_o = a.glow_color.rgb * (airglow(o, d, dist) * a.stars.y);
-			imageStore(color_image, px, vec4(c.rgb * tr + add + glow_o, c.a));
+			put(px, vec4(c.rgb * tr + add + glow_o, c.a));
 			return;
 		}
 		float range = a.eye.w;
@@ -101,7 +136,7 @@ void main() {
 		// the glowing air between the eye and the ground, in the
 		// stars' units (the eye's gain)
 		vec3 glow = a.glow_color.rgb * (airglow(o, d, dist) * a.stars.y);
-		imageStore(color_image, px, vec4(c.rgb * ap.a + ap.rgb * scale + glow, c.a));
+		put(px, vec4(c.rgb * ap.a + ap.rgb * scale + glow, c.a));
 		return;
 	}
 	vec3 L = vec3(0.0);
@@ -143,5 +178,5 @@ void main() {
 	// airglow along this ray, to the ground or out of the air
 	float t_ground = sphere_near(o, d, a.radii.x);
 	col += a.glow_color.rgb * (airglow(o, d, t_ground > 0.0 ? t_ground : 1e30) * a.stars.y);
-	imageStore(color_image, px, vec4(col, c.a));
+	put(px, vec4(col, c.a));
 }
