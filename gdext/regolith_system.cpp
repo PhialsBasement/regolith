@@ -49,6 +49,14 @@ constexpr double DEG = std::numbers::pi / 180.0;
 constexpr double AU = 1.495978707e11;
 constexpr double SUN_RADIUS = 6.957e8;
 constexpr double GM_SUN = 1.32712440018e20; // m^3/s^2 (IAU)
+// tracing a Kepler arc (rails and predictions)
+constexpr double MAX_RELIEF_M = 30000.0; // ground stands no higher than this over a body's reference sphere
+constexpr double MIN_STEP_M = 50.0; // the step near a ground: half the height over it, no less than this
+constexpr int BISECT_STEPS = 40;
+constexpr int CHANGES_MAX = 16; // sphere-of-influence changes in one rails check
+constexpr int RAILS_STEPS_MAX = 20000;
+constexpr int PREDICT_STEPS_MAX = 100000;
+constexpr double OPEN_HORIZON_S = 3.156e8; // an open path about the sun: ten years ahead
 // ecliptic pole of J2000 in ICRF: obliquity 23.4392911 deg
 const DVec3 ECLIPTIC_POLE(0.0, -0.39777715593191, 0.91748206206918);
 // time warp: the largest rate (rails make any rate exact)
@@ -166,6 +174,10 @@ void RegolithSystem::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_body_state", "name"), &RegolithSystem::get_body_state);
 	ClassDB::bind_method(D_METHOD("get_body_state_at", "name", "time"), &RegolithSystem::get_body_state_at);
 	ClassDB::bind_method(D_METHOD("get_soi_radius", "name"), &RegolithSystem::get_soi_radius);
+	ClassDB::bind_method(D_METHOD("get_soi_radius_at", "name", "time"), &RegolithSystem::get_soi_radius_at);
+	ClassDB::bind_method(D_METHOD("get_body_gm", "name"), &RegolithSystem::get_body_gm);
+	ClassDB::bind_method(D_METHOD("get_body_parent", "name"), &RegolithSystem::get_body_parent);
+	ClassDB::bind_method(D_METHOD("predict_path", "state", "time", "patches"), &RegolithSystem::predict_path);
 	ClassDB::bind_method(D_METHOD("set_warp", "rate"), &RegolithSystem::set_warp);
 	ClassDB::bind_method(D_METHOD("get_warp"), &RegolithSystem::get_warp);
 	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "warp", PROPERTY_HINT_NONE, "", PROPERTY_USAGE_NONE), "set_warp", "get_warp");
@@ -774,12 +786,7 @@ RegolithSystem::State RegolithSystem::parked_state_at(const RegolithVessel *p_ve
 		const DVec3 x = bp.position + to_icrf(bp.axes, r);
 		return { x, bp.velocity + regolith::cross(bp.omega, x - bp.position) };
 	}
-	const State origin = p_t == time_ ? (b ? State{ pose_of(b).position, pose_of(b).velocity } : State{ sun_pos_, sun_vel_ })
-									  : body_state_at(b, p_t);
-	const DVec3 v(p_vessel->park_v_[0], p_vessel->park_v_[1], p_vessel->park_v_[2]);
-	DVec3 rr, vv;
-	regolith::kepler_propagate(r, v, gm_of(b), p_t - p_vessel->park_time_, rr, vv);
-	return { origin.x + rr, origin.v + vv };
+	return arc_state(arc_of(p_vessel), p_t);
 }
 
 void RegolithSystem::repark(RegolithVessel *p_vessel, const State &p_s, double p_t, const RegolithBody *p_primary) {
@@ -793,91 +800,218 @@ void RegolithSystem::repark(RegolithVessel *p_vessel, const State &p_s, double p
 	p_vessel->park_time_ = p_t;
 }
 
+// Height of p_x over p_body's ground at time p_t (its reference sphere
+// where no ground is loaded).
+double RegolithSystem::ground_clearance_at(const RegolithBody *p_body, const DVec3 &p_x, double p_t) const {
+	DVec3 pos, vel, axes[3];
+	p_body->pose(p_t, pos, vel, axes);
+	pos = body_state_at(p_body, p_t).x;
+	const DVec3 local = from_icrf(axes, p_x - pos);
+	const double surface = const_cast<RegolithBody *>(p_body)->surface_radius(regolith::normalize(local), false);
+	return regolith::length(local) - (std::isnan(surface) ? p_body->r_ref() : surface);
+}
+
+RegolithSystem::State RegolithSystem::arc_state(const Arc &p_arc, double p_t) const {
+	const State origin = p_t == time_ ? (p_arc.body ? State{ pose_of(p_arc.body).position, pose_of(p_arc.body).velocity }
+													 : State{ sun_pos_, sun_vel_ })
+									  : body_state_at(p_arc.body, p_t);
+	DVec3 rr, vv;
+	regolith::kepler_propagate(p_arc.r, p_arc.v, gm_of(p_arc.body), p_t - p_arc.t0, rr, vv);
+	return { origin.x + rr, origin.v + vv };
+}
+
+// The body whose ground p_x (at p_t) is under, if any.
+const RegolithBody *RegolithSystem::struck(const DVec3 &p_x, double p_t) const {
+	for (const RegolithBody *b : bodies_) {
+		const double rough = regolith::length(p_x - body_state_at(b, p_t).x) - b->r_ref();
+		if (rough < MAX_RELIEF_M && ground_clearance_at(b, p_x, p_t) < 0.0) {
+			return b;
+		}
+	}
+	return nullptr;
+}
+
+// The next step along an arc from p_s at p_t: short enough that no
+// sphere of influence (p_min_soi, the smallest one a ship can be in)
+// and no body's ground is skipped.
+double RegolithSystem::trace_step(const Arc &p_arc, const State &p_s, double p_t, double p_min_soi) const {
+	const DVec3 rel_v = p_s.v - body_state_at(p_arc.body, p_t).v;
+	double step = std::isfinite(p_min_soi) ? 0.1 * p_min_soi / (regolith::length(rel_v) + 1.0) : INFINITY;
+	for (const RegolithBody *b : bodies_) {
+		const State bs = body_state_at(b, p_t);
+		const double above = regolith::length(p_s.x - bs.x) - b->r_ref();
+		step = std::min(step, std::max(0.5 * above, MIN_STEP_M) / (regolith::length(p_s.v - bs.v) + 1.0));
+	}
+	return std::max(step, 1e-3);
+}
+
+RegolithSystem::ArcEnd RegolithSystem::trace_arc(const Arc &p_arc, double p_t0, double p_t1, int p_max_steps) const {
+	double min_soi = INFINITY;
+	for (const RegolithBody *b : bodies_) {
+		const double soi = soi_at(b, p_t0);
+		if (soi > b->r_ref()) {
+			min_soi = std::min(min_soi, soi);
+		}
+	}
+	double t = p_t0;
+	State s_prev = arc_state(p_arc, t);
+	for (int iter = 0; iter < p_max_steps && t < p_t1; ++iter) {
+		const double t_next = std::min(p_t1, t + trace_step(p_arc, s_prev, t, min_soi));
+		const State s = arc_state(p_arc, t_next);
+		if (const RegolithBody *hit = struck(s.x, t_next)) {
+			double lo = t, hi = t_next;
+			for (int k = 0; k < BISECT_STEPS; ++k) {
+				const double mid = 0.5 * (lo + hi);
+				(ground_clearance_at(hit, arc_state(p_arc, mid).x, mid) < 0.0 ? hi : lo) = mid;
+			}
+			return { ArcEnd::IMPACT, lo, hit };
+		}
+		if (primary_at(s.x, t_next) != p_arc.body) {
+			double lo = t, hi = t_next;
+			for (int k = 0; k < BISECT_STEPS; ++k) {
+				const double mid = 0.5 * (lo + hi);
+				(primary_at(arc_state(p_arc, mid).x, mid) != p_arc.body ? hi : lo) = mid;
+			}
+			return { ArcEnd::CHANGE, hi, primary_at(arc_state(p_arc, hi).x, hi) };
+		}
+		s_prev = s;
+		t = t_next;
+	}
+	return { ArcEnd::RUNS_ON, t, nullptr };
+}
+
+RegolithSystem::Arc RegolithSystem::arc_of(const RegolithVessel *p_vessel) const {
+	return { Object::cast_to<RegolithBody>(const_cast<Node *>(p_vessel->park_body_)),
+		DVec3(p_vessel->park_r_[0], p_vessel->park_r_[1], p_vessel->park_r_[2]),
+		DVec3(p_vessel->park_v_[0], p_vessel->park_v_[1], p_vessel->park_v_[2]), p_vessel->park_time_ };
+}
+
+// The vessel's arc struck p_body at p_t: landed there, where it struck,
+// its attitude kept in that body's axes.
+void RegolithSystem::land_parked(RegolithVessel *p_vessel, const RegolithBody *p_body, double p_t) {
+	const State si = parked_state_at(p_vessel, p_t);
+	DVec3 bpos, bvel, axes[3];
+	p_body->pose(p_t, bpos, bvel, axes);
+	const State bs = body_state_at(p_body, p_t);
+	const DVec3 dir = regolith::normalize(from_icrf(axes, si.x - bs.x));
+	double surf = const_cast<RegolithBody *>(p_body)->surface_radius(dir, false);
+	surf = std::isnan(surf) ? p_body->r_ref() : surf;
+	const DVec3 v_surf = bs.v + regolith::cross(pose_of(p_body).omega, si.x - bs.x);
+	const double hit_speed = regolith::length(si.v - v_surf);
+	Basis stored;
+	for (int c = 0; c < 3; ++c) {
+		stored.set_column(c, Vector3(real_t(p_vessel->park_basis_[c * 3]), real_t(p_vessel->park_basis_[c * 3 + 1]),
+									 real_t(p_vessel->park_basis_[c * 3 + 2])));
+	}
+	stored = basis_from(axes[0], axes[1], axes[2]).transposed() * stored;
+	for (int c = 0; c < 3; ++c) {
+		const Vector3 col = stored.get_column(c);
+		p_vessel->park_basis_[c * 3 + 0] = col.x;
+		p_vessel->park_basis_[c * 3 + 1] = col.y;
+		p_vessel->park_basis_[c * 3 + 2] = col.z;
+	}
+	const DVec3 r = dir * (surf + 1.0);
+	p_vessel->park_r_[0] = r.x;
+	p_vessel->park_r_[1] = r.y;
+	p_vessel->park_r_[2] = r.z;
+	p_vessel->landed_ = true;
+	p_vessel->park_body_ = p_body;
+	p_vessel->park_time_ = p_t;
+	emit_signal("vessel_impact", p_vessel->get_parent(), String(p_body->get_name()), hit_speed);
+}
+
+// Patched conics since the last check: each arc traced until it strikes
+// a body's ground (landed there) or changes sphere of influence
+// (re-parked about the new primary).
 void RegolithSystem::advance_parked(RegolithVessel *p_vessel) {
 	const double t0 = p_vessel->park_check_time_, t1 = time_;
 	p_vessel->park_check_time_ = t1;
 	if (p_vessel->landed_ || t1 <= t0) {
 		return;
 	}
-	// steps short enough that no sphere of influence (the
-	// smallest one a ship can be in) is crossed within one
-	double min_soi = INFINITY;
-	for (const RegolithBody *b : bodies_) {
-		const double soi = soi_at(b, t0);
-		if (soi > b->r_ref()) {
-			min_soi = std::min(min_soi, soi);
-		}
-	}
-	// height over the ground of a point near p_body at time p_t
-	auto ground_clearance = [&](const RegolithBody *p_body, const DVec3 &p_x, double p_t) {
-		DVec3 pos, vel, axes[3];
-		p_body->pose(p_t, pos, vel, axes);
-		pos = body_state_at(p_body, p_t).x;
-		const DVec3 local = from_icrf(axes, p_x - pos);
-		const double surface = const_cast<RegolithBody *>(p_body)->surface_radius(regolith::normalize(local), false);
-		return regolith::length(local) - (std::isnan(surface) ? p_body->r_ref() : surface);
-	};
 	double t = t0;
-	State s_prev = parked_state_at(p_vessel, t0);
-	for (int iter = 0; iter < 20000 && t < t1; ++iter) {
-		const RegolithBody *pb = Object::cast_to<RegolithBody>(const_cast<Node *>(p_vessel->park_body_));
-		const DVec3 rel_v = s_prev.v - body_state_at(pb, t).v;
-		const double speed = regolith::length(rel_v) + 1.0;
-		double step = std::isfinite(min_soi) ? 0.1 * min_soi / speed : t1 - t;
-		// near the ground of the body it orbits: finer, so no
-		// pass through the planet slips between two steps
-		if (pb) {
-			const double h = ground_clearance(pb, s_prev.x, t);
-			step = std::min(step, std::max(0.5 * h, 50.0) / speed);
-		}
-		const double t_next = std::min(t1, t + std::max(step, 1e-3));
-		const State s = parked_state_at(p_vessel, t_next);
-		if (pb && ground_clearance(pb, s.x, t_next) < 0.0) {
-			// the impact: its moment by bisection, then set down
-			double lo = t, hi = t_next;
-			for (int k = 0; k < 40; ++k) {
-				const double mid = 0.5 * (lo + hi);
-				(ground_clearance(pb, parked_state_at(p_vessel, mid).x, mid) < 0.0 ? hi : lo) = mid;
-			}
-			const State si = parked_state_at(p_vessel, lo);
-			DVec3 bpos, bvel, axes[3];
-			pb->pose(lo, bpos, bvel, axes);
-			const State bs = body_state_at(pb, lo);
-			const DVec3 dir = regolith::normalize(from_icrf(axes, si.x - bs.x));
-			double surf = const_cast<RegolithBody *>(pb)->surface_radius(dir, false);
-			surf = std::isnan(surf) ? pb->r_ref() : surf;
-			const DVec3 v_surf = bs.v + regolith::cross(pose_of(pb).omega, si.x - bs.x);
-			const double hit_speed = regolith::length(si.v - v_surf);
-			// landed where it struck, its attitude in body axes
-			Basis stored;
-			for (int c = 0; c < 3; ++c) {
-				stored.set_column(c, Vector3(real_t(p_vessel->park_basis_[c * 3]), real_t(p_vessel->park_basis_[c * 3 + 1]),
-											 real_t(p_vessel->park_basis_[c * 3 + 2])));
-			}
-			stored = basis_from(axes[0], axes[1], axes[2]).transposed() * stored;
-			for (int c = 0; c < 3; ++c) {
-				const Vector3 col = stored.get_column(c);
-				p_vessel->park_basis_[c * 3 + 0] = col.x;
-				p_vessel->park_basis_[c * 3 + 1] = col.y;
-				p_vessel->park_basis_[c * 3 + 2] = col.z;
-			}
-			const DVec3 r = dir * (surf + 1.0);
-			p_vessel->park_r_[0] = r.x;
-			p_vessel->park_r_[1] = r.y;
-			p_vessel->park_r_[2] = r.z;
-			p_vessel->landed_ = true;
-			p_vessel->park_body_ = pb;
-			p_vessel->park_time_ = lo;
-			emit_signal("vessel_impact", p_vessel->get_parent(), String(pb->get_name()), hit_speed);
+	for (int k = 0; k < CHANGES_MAX && t < t1; ++k) {
+		const Arc arc = arc_of(p_vessel);
+		const ArcEnd end = trace_arc(arc, t, t1, RAILS_STEPS_MAX);
+		if (end.kind == ArcEnd::IMPACT) {
+			land_parked(p_vessel, end.body, end.t);
 			return;
 		}
-		const RegolithBody *p = primary_at(s.x, t_next);
-		if (p != p_vessel->park_body_) {
-			repark(p_vessel, s, t_next, p);
+		if (end.kind != ArcEnd::CHANGE) {
+			return;
 		}
-		s_prev = s;
-		t = t_next;
+		repark(p_vessel, arc_state(arc, end.t), end.t, end.body);
+		t = end.t;
 	}
+}
+
+// The path ahead of p_state (ICRF) at p_time as patched conics, up to
+// p_patches of them: each a Kepler arc about one body, from its start
+// to where it strikes a ground, leaves for another sphere of influence,
+// or (none of those) after one orbit.
+Array RegolithSystem::predict_path(const PackedFloat64Array &p_state, double p_time, int p_patches) const {
+	Array out;
+	if (!anchored_ || p_state.size() < 6 || p_patches < 1) {
+		return out;
+	}
+	State s{ DVec3(p_state[0], p_state[1], p_state[2]), DVec3(p_state[3], p_state[4], p_state[5]) };
+	const RegolithBody *body = primary_at(s.x, p_time);
+	double t = p_time;
+	for (int k = 0; k < p_patches; ++k) {
+		const State o = body_state_at(body, t);
+		const Arc arc{ body, s.x - o.x, s.v - o.v, t };
+		const regolith::OrbitShape shape = regolith::orbit_shape(arc.r, arc.v, gm_of(body), DVec3(0, 0, 1));
+		const double horizon = std::isfinite(shape.period) ? shape.period : OPEN_HORIZON_S;
+		const ArcEnd end = trace_arc(arc, t, t + horizon, PREDICT_STEPS_MAX);
+		Dictionary d;
+		d["body"] = body_name(body);
+		d["start"] = t;
+		d["end"] = end.t;
+		d["state"] = PackedFloat64Array({ arc.r.x, arc.r.y, arc.r.z, arc.v.x, arc.v.y, arc.v.z });
+		d["next"] = end.body ? body_name(end.body) : String();
+		if (end.kind == ArcEnd::IMPACT) {
+			d["how"] = "impact";
+		} else if (end.kind == ArcEnd::CHANGE) {
+			d["how"] = parent_of(end.body) == body ? "encounter" : "escape";
+		} else {
+			d["how"] = std::isfinite(shape.period) ? "orbit" : "runs_on";
+		}
+		out.push_back(d);
+		if (end.kind != ArcEnd::CHANGE) {
+			break;
+		}
+		s = arc_state(arc, end.t);
+		body = end.body;
+		t = end.t;
+	}
+	return out;
+}
+
+// The body p_body orbits: the central planet for its moons, else the sun (null).
+const RegolithBody *RegolithSystem::parent_of(const RegolithBody *p_body) const {
+	return p_body && p_body != central_ && p_body->has_orbit_table() ? central_ : nullptr;
+}
+
+String RegolithSystem::body_name(const RegolithBody *p_body) {
+	return p_body ? String(p_body->get_name()) : String("Sun");
+}
+
+double RegolithSystem::get_body_gm(const String &p_name) const {
+	const RegolithBody *b = find_body(p_name);
+	return b || p_name == String("Sun") ? gm_of(b) : 0.0;
+}
+
+String RegolithSystem::get_body_parent(const String &p_name) const {
+	const RegolithBody *b = find_body(p_name);
+	return b ? body_name(parent_of(b)) : String();
+}
+
+double RegolithSystem::get_soi_radius_at(const String &p_name, double p_time) const {
+	if (p_name == String("Sun")) {
+		return INFINITY;
+	}
+	const RegolithBody *b = find_body(p_name);
+	return b && anchored_ ? soi_at(b, p_time) : 0.0;
 }
 
 void RegolithSystem::park(RegolithVessel *p_vessel, Node3D *p_node) {

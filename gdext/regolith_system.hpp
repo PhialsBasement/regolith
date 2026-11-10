@@ -145,6 +145,17 @@ public:
 	// Sphere of influence radius (m): a (m / M)^0.4 about its
 	// parent; INF for "Sun"
 	double get_soi_radius(const String &p_name) const;
+	// the same at any time
+	double get_soi_radius_at(const String &p_name, double p_time) const;
+	// A body's (or "Sun"'s) gravitational parameter, m3/s2; 0 if unknown
+	double get_body_gm(const String &p_name) const;
+	// The body a body orbits ("Sun" for a planet); "" for the sun or unknown
+	String get_body_parent(const String &p_name) const;
+	// The path ahead of an ICRF state at a time as patched conics, at
+	// most p_patches: [{"body", "start", "end" (TT s), "state" (relative
+	// to the body at the start, as get_inertial_state), "how" ("orbit",
+	// "runs_on", "impact", "encounter", "escape"), "next" (the body met)}]
+	Array predict_path(const PackedFloat64Array &p_state, double p_time, int p_patches) const;
 	// Time warp: above 1 every vessel, the focus included, rides
 	// on rails (Kepler orbits, patched at spheres of influence)
 	void set_warp(double p_rate);
@@ -205,6 +216,28 @@ private:
 	State parked_state(const RegolithVessel *p_vessel) const;
 	State parked_state_at(const RegolithVessel *p_vessel, double p_t) const;
 	void place_parked(RegolithVessel *p_vessel, Node3D *p_node);
+	// A Kepler arc about body (null: the sun): its state relative to the body at t0.
+	struct Arc {
+		const RegolithBody *body = nullptr;
+		regolith::DVec3 r, v;
+		double t0 = 0.0;
+	};
+	// What an arc runs into first: a body's ground, or another sphere
+	// of influence (body: the one struck, or the new primary).
+	struct ArcEnd {
+		enum Kind { RUNS_ON, IMPACT, CHANGE } kind = RUNS_ON;
+		double t = 0.0;
+		const RegolithBody *body = nullptr;
+	};
+	State arc_state(const Arc &p_arc, double p_t) const;
+	Arc arc_of(const RegolithVessel *p_vessel) const;
+	ArcEnd trace_arc(const Arc &p_arc, double p_t0, double p_t1, int p_max_steps) const;
+	double trace_step(const Arc &p_arc, const State &p_s, double p_t, double p_min_soi) const;
+	const RegolithBody *struck(const regolith::DVec3 &p_x, double p_t) const;
+	double ground_clearance_at(const RegolithBody *p_body, const regolith::DVec3 &p_x, double p_t) const;
+	const RegolithBody *parent_of(const RegolithBody *p_body) const;
+	static String body_name(const RegolithBody *p_body);
+	void land_parked(RegolithVessel *p_vessel, const RegolithBody *p_body, double p_t);
 	// patched conics: re-park at each sphere-of-influence change
 	// since the last check, in steps no ship can skip one in
 	void advance_parked(RegolithVessel *p_vessel);
