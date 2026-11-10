@@ -116,6 +116,8 @@ struct TerrainSurface {
 };
 
 const float QP = 0.7853981633974483;
+// ground facing the eye less than this (cos) is turned away from it
+const float BACK_FACE_COS = 0.0;
 // regolith/cube.cpp's face axes: f normal, u x v == f
 const ivec3 FA_F[6] = { ivec3(1, 0, 0), ivec3(-1, 0, 0), ivec3(0, 1, 0), ivec3(0, -1, 0), ivec3(0, 0, 1), ivec3(0, 0, -1) };
 const ivec3 FA_U[6] = { ivec3(0, 1, 0), ivec3(0, -1, 0), ivec3(-1, 0, 0), ivec3(1, 0, 0), ivec3(0, 1, 0), ivec3(0, 1, 0) };
@@ -463,6 +465,12 @@ void fragment() {
 	vec3 n = normalize(cross(v_ts + up * (0.5 * hx), v_tt + up * (0.5 * hy)));
 	mat3 to_world = mat3(MODEL_MATRIX);
 	vec3 n_view = normalize((VIEW_MATRIX * vec4(to_world * n, 0.0)).xyz);
+	// cull_disabled draws the ground's underside too: through a gap
+	// between rings it would show the far hemisphere from inside, lit
+	// as day. Ground turned away from the eye is never seen otherwise.
+	if (dot(n_view, VIEW) < BACK_FACE_COS) {
+		discard;
+	}
 	// depth, normal-roughness and shadow passes: the ground's shape
 	// is all SSAO and shadows read, so no surface work there
 	if (IN_DEPTH_PREPASS && (prof_skip & 2048) == 0) {
