@@ -32,6 +32,11 @@ vessels on rails when far away or under time warp (`set_warp`, up to
 10,000,000x), and an impact (`vessel_impact`) when a coasting vessel meets
 the ground. Plan transfers with `get_body_state_at` (where a body will be)
 and fly them with thrust on any `RigidBody3D` carrying a `RegolithVessel`.
+A vessel put on rails while at rest against the ground (under 2 m/s) is
+landed, pinned to its body, when it is near the terrain or rests on a body
+Regolith does not fly (a building, a deck) or on a landed vessel; otherwise
+it coasts on its orbit. A `RigidBody3D` reports what it rests on only with
+`max_contacts_reported` above 0.
 
 ## The engine
 

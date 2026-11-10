@@ -18,6 +18,8 @@
 #include "regolith_engine.hpp"
 #include <godot_cpp/classes/character_body3d.hpp>
 #include <godot_cpp/classes/collision_object3d.hpp>
+#include <godot_cpp/classes/kinematic_collision3d.hpp>
+#include <godot_cpp/classes/physics_direct_body_state3d.hpp>
 #include <godot_cpp/classes/physics_server3d.hpp>
 #include <godot_cpp/classes/directional_light3d.hpp>
 #include <godot_cpp/classes/engine.hpp>
@@ -74,6 +76,9 @@ constexpr double SHIFT_LOW = 30.0;
 // Above this render speed an unparked rigid body would be
 // clamped by Jolt, so it stays on rails.
 constexpr double UNPARK_MAX_SPEED = 400.0;
+constexpr double LANDED_CLEARANCE_M = 20.0; // this near the ground at rest: landed
+constexpr double LANDED_SPEED_MS = 2.0; // slower than this against the ground: at rest
+constexpr int SUPPORT_DEPTH_MAX = 4; // vessels stacked on vessels followed down this far
 constexpr double OMEGA_STEP = 20.0;
 
 DVec3 to_icrf(const DVec3 p_axes[3], const DVec3 &p_v) {
@@ -1014,6 +1019,62 @@ double RegolithSystem::get_soi_radius_at(const String &p_name, double p_time) co
 	return b && anchored_ ? soi_at(b, p_time) : 0.0;
 }
 
+// What p_node touches: a character's last slide collisions, a rigid
+// body's contacts (reported only with max_contacts_reported > 0). A
+// collider without a node (a server-side body) is a nullptr entry.
+static std::vector<Object *> touching(Node3D *p_node) {
+	std::vector<Object *> out;
+	if (CharacterBody3D *cb = Object::cast_to<CharacterBody3D>(p_node)) {
+		for (int i = 0; i < cb->get_slide_collision_count(); ++i) {
+			Ref<KinematicCollision3D> c = cb->get_slide_collision(i);
+			out.push_back(c.is_valid() ? c->get_collider() : nullptr);
+		}
+		return out;
+	}
+	RigidBody3D *rb = Object::cast_to<RigidBody3D>(p_node);
+	PhysicsDirectBodyState3D *state = rb ? PhysicsServer3D::get_singleton()->body_get_direct_state(rb->get_rid()) : nullptr;
+	if (!state) {
+		return out;
+	}
+	for (int i = 0; i < state->get_contact_count(); ++i) {
+		out.push_back(state->get_contact_collider_object(i));
+	}
+	return out;
+}
+
+// Landed: at rest against the ground and near its terrain, or resting
+// on a body Regolith does not move (fixed to the planet: a building, a
+// deck), or on a vessel that is itself landed.
+bool RegolithSystem::rests_landed(Node3D *p_node, int p_depth) {
+	if (RegolithVessel *v = vessel_of(p_node); v && v->parked_) {
+		return v->landed_;
+	}
+	State s;
+	node_state(p_node, s);
+	RegolithBody *ground = nearest_surface(s.x);
+	const Pose &gp = pose_of(ground);
+	const DVec3 v_ground = s.v - gp.velocity - regolith::cross(gp.omega, s.x - gp.position);
+	if (regolith::length(v_ground) >= LANDED_SPEED_MS) {
+		return false;
+	}
+	if (clearance(ground, s.x) < LANDED_CLEARANCE_M) {
+		return true;
+	}
+	if (p_depth >= SUPPORT_DEPTH_MAX) {
+		return false;
+	}
+	for (Object *o : touching(p_node)) {
+		Node3D *support = Object::cast_to<Node3D>(o);
+		if (!vessel_of(support)) {
+			return true;
+		}
+		if (rests_landed(support, p_depth + 1)) {
+			return true;
+		}
+	}
+	return false;
+}
+
 void RegolithSystem::park(RegolithVessel *p_vessel, Node3D *p_node) {
 	State s;
 	node_state(p_node, s);
@@ -1022,8 +1083,7 @@ void RegolithSystem::park(RegolithVessel *p_vessel, Node3D *p_node) {
 	// Kepler orbit around the strongest pull.
 	RegolithBody *ground = nearest_surface(s.x);
 	const Pose &gp = pose_of(ground);
-	const DVec3 v_ground = s.v - gp.velocity - regolith::cross(gp.omega, s.x - gp.position);
-	p_vessel->landed_ = clearance(ground, s.x) < 20.0 && regolith::length(v_ground) < 2.0;
+	p_vessel->landed_ = rests_landed(p_node, 0);
 	const RegolithBody *primary = ground;
 	if (p_vessel->landed_) {
 		const DVec3 r = from_icrf(gp.axes, s.x - gp.position);
