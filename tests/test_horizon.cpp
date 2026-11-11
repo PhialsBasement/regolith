@@ -78,3 +78,55 @@ TEST_CASE(horizon_sees_a_wall_beyond_its_tile) {
 	// the curvature dip over a few km is under one step
 	CHECK(away <= HORIZON_SPAN / 255.0);
 }
+
+namespace {
+
+// The viewer of the sun tests: sample (56, 32), 18 samples short of the
+// wall, whose top stands about 0.1 rad above it (the case above).
+constexpr int VIEWER_I = 56;
+constexpr int VIEWER_J = 32;
+constexpr double LOW_SUN_RAD = 0.05;          // under the wall's top
+constexpr double HIGH_SUN_RAD = 0.2;          // well over it
+
+// Toward the sun at p_elevation, its bearing along the grid's +i (toward
+// the wall) or -i.
+DVec3 sun_at(const DVec3 &p_up, const DVec3 &p_ti, double p_elevation, double p_toward) {
+	const DVec3 east = normalize(p_ti - p_up * dot(p_ti, p_up)) * p_toward;
+	return p_up * std::sin(p_elevation) + east * std::cos(p_elevation);
+}
+
+} // namespace
+
+TEST_CASE(a_wall_hides_a_low_sun_behind_it_only) {
+	const TileKey key = TileKey::make(0, 9, 100, 100);
+	std::vector<uint8_t> page;
+	compute_horizon(sphere_with_wall(key, LAYOUT.intervals + WALL_PAST_EDGE), key, LAYOUT, nullptr, page);
+	const DVec3 up = Synth::sample_dir(key, LAYOUT, VIEWER_I, VIEWER_J);
+	const DVec3 ti = Synth::sample_dir(key, LAYOUT, VIEWER_I + 1, VIEWER_J) - up;
+	const DVec3 tj = Synth::sample_dir(key, LAYOUT, VIEWER_I, VIEWER_J + 1) - up;
+	auto seen = [&](double p_elevation, double p_toward) {
+		return sun_visibility(page, LAYOUT, VIEWER_I, VIEWER_J, up, ti, tj, sun_at(up, ti, p_elevation, p_toward));
+	};
+	const double low_behind = seen(LOW_SUN_RAD, 1.0);
+	const double low_opposite = seen(LOW_SUN_RAD, -1.0);
+	const double high_behind = seen(HIGH_SUN_RAD, 1.0);
+	std::printf("  sun visibility: low behind the wall %.3f, low opposite %.3f, high behind %.3f\n", low_behind, low_opposite,
+			high_behind);
+	CHECK(low_behind == 0.0);
+	CHECK(low_opposite == 1.0);
+	CHECK(high_behind == 1.0);
+}
+
+TEST_CASE(the_sun_fades_over_its_disc_at_the_horizon) {
+	const TileKey key = TileKey::make(0, 9, 100, 100);
+	std::vector<uint8_t> page;
+	compute_horizon(sphere_with_wall(key, LAYOUT.intervals + WALL_PAST_EDGE), key, LAYOUT, nullptr, page);
+	const DVec3 up = Synth::sample_dir(key, LAYOUT, VIEWER_I, VIEWER_J);
+	const DVec3 ti = Synth::sample_dir(key, LAYOUT, VIEWER_I + 1, VIEWER_J) - up;
+	const DVec3 tj = Synth::sample_dir(key, LAYOUT, VIEWER_I, VIEWER_J + 1) - up;
+	// the sun's centre exactly on the stored horizon: half its disc shows
+	const double horizon = horizon_angle(page, LAYOUT, VIEWER_I, VIEWER_J, TOWARD_WALL);
+	const double half = sun_visibility(page, LAYOUT, VIEWER_I, VIEWER_J, up, ti, tj, sun_at(up, ti, horizon, 1.0));
+	std::printf("  sun centred on a %.4f rad horizon: %.3f visible\n", horizon, half);
+	CHECK(std::fabs(half - 0.5) < 0.01);
+}

@@ -35,6 +35,7 @@
 #include "convert.hpp"
 #include "regolith/body_presets.hpp"
 #include "regolith/cube.hpp"
+#include "regolith/horizon.hpp"
 #include "regolith/ephemeris.hpp"
 #include "regolith_collider.hpp"
 #include "regolith_engine.hpp"
@@ -564,6 +565,32 @@ double RegolithBody::surface_radius(const DVec3 &p_dir, bool p_exact) {
 		return std::numeric_limits<double>::quiet_NaN();
 	}
 	return source_.r_ref() + sample_tile(*tile, source_.layout(), fc);
+}
+
+double RegolithBody::sun_visibility(const DVec3 &p_dir, const DVec3 &p_sun) {
+	if (!ensure_open()) {
+		return std::numeric_limits<double>::quiet_NaN();
+	}
+	const regolith::FaceCoord fc = regolith::dir_to_face(p_dir);
+	const regolith::TileLayout lay = source_.layout();
+	for (int level = collision_level_; level >= 0; --level) {
+		const TileKey key = key_at(fc, level);
+		const auto page = loader_->horizon_ready(key);
+		if (!page) {
+			continue;
+		}
+		const double tiles = double(uint64_t(1) << level);
+		const double gi = std::clamp((fc.s + 1.0) * 0.5 * tiles * lay.intervals - double(key.x()) * lay.intervals, 0.0,
+				double(lay.intervals));
+		const double gj = std::clamp((fc.t + 1.0) * 0.5 * tiles * lay.intervals - double(key.y()) * lay.intervals, 0.0,
+				double(lay.intervals));
+		const int i0 = std::min(int(gi), lay.intervals - 1), j0 = std::min(int(gj), lay.intervals - 1);
+		const DVec3 here = regolith::Synth::sample_dir(key, lay, i0, j0);
+		const DVec3 ti = regolith::Synth::sample_dir(key, lay, i0 + 1, j0) - here;
+		const DVec3 tj = regolith::Synth::sample_dir(key, lay, i0, j0 + 1) - here;
+		return regolith::sun_visibility(*page, lay, gi, gj, p_dir, ti, tj, p_sun);
+	}
+	return std::numeric_limits<double>::quiet_NaN();
 }
 
 void RegolithBody::height_grid(int p_w, int p_h, int p_level, std::vector<float> &r_out) {

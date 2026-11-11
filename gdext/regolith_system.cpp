@@ -172,6 +172,7 @@ void RegolithSystem::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_sun_direction"), &RegolithSystem::get_sun_direction);
 	ClassDB::bind_method(D_METHOD("get_sun_scale"), &RegolithSystem::get_sun_scale);
 	ClassDB::bind_method(D_METHOD("get_sun_visible"), &RegolithSystem::get_sun_visible);
+	ClassDB::bind_method(D_METHOD("get_sun_visibility", "position"), &RegolithSystem::get_sun_visibility);
 	ClassDB::bind_method(D_METHOD("get_dominant_name"), &RegolithSystem::get_dominant_name);
 	ClassDB::bind_method(D_METHOD("get_frame_rotating"), &RegolithSystem::get_frame_rotating);
 	ClassDB::bind_method(D_METHOD("get_frame_velocity"), &RegolithSystem::get_frame_velocity);
@@ -1592,6 +1593,18 @@ double RegolithSystem::get_ground_clearance(const Vector3 &p_pos) const {
 	}
 	const DVec3 x = body_point(dominant_, p_pos);
 	return regolith::length(x) - dominant_->surface_radius(regolith::normalize(x), false);
+}
+
+double RegolithSystem::get_sun_visibility(const Vector3 &p_pos) const {
+	if (!dominant_ || !anchored_) {
+		return std::nan("");
+	}
+	const DVec3 x = body_point(dominant_, p_pos);
+	// the sun in the body's axes, as the atmosphere takes it
+	const DVec3 to_sun = regolith::normalize(camera_heliocentric() * -1.0);
+	const DVec3 *ax = pose_of(dominant_).axes;
+	const DVec3 sun(regolith::dot(to_sun, ax[0]), regolith::dot(to_sun, ax[1]), regolith::dot(to_sun, ax[2]));
+	return dominant_->sun_visibility(regolith::normalize(x), sun);
 }
 
 String RegolithSystem::get_dominant_name() const {

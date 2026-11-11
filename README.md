@@ -109,6 +109,13 @@ Data: Yale Bright Star Catalogue, 5th ed. (Hoffleit and Warren,
 Visualization Studio, Deep Star Maps 2020. `tools/make_sky_data.gd`
 rebuilds `regolith_stars.res` and `regolith_milkyway.res` from them.
 
+`RegolithSystem.get_sun_visibility(position)` says how much of the
+sun's disc clears the terrain at a point, 0 to 1, from the same
+horizon maps the terrain's shadows are drawn from: a point is dark
+exactly where its ground is drawn in shadow. Near the camera it sees
+every ridge; elsewhere the always-loaded coarse levels see the large
+relief (about 13 km apart on Mars). Eclipses are `get_sun_visible`.
+
 ## Weather and clouds
 
 `RegolithWeather` runs a closed-form climate for its body: dust and

@@ -128,6 +128,9 @@ public:
 	Vector2 get_latlon(const Vector3 &p_pos) const;
 	double get_altitude(const Vector3 &p_pos) const;
 	double get_ground_clearance(const Vector3 &p_pos) const;
+	// How much of the sun's disc clears the terrain at p_pos, 0..1
+	// (terrain only: eclipses are get_sun_visible); NaN without a body.
+	double get_sun_visibility(const Vector3 &p_pos) const;
 	double get_radius(const Vector3 &p_pos) const;
 	String get_dominant_name() const;
 	bool get_frame_rotating() const { return rotating_; }

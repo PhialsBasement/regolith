@@ -23,6 +23,9 @@ constexpr double HORIZON_MIN = -0.25; // radians, byte 0
 constexpr double HORIZON_SPAN = 1.25; // radians over 0..255
 // Near march length in samples; each parent covers twice as far.
 constexpr int HORIZON_PAD = 32;
+// The sun fades out over this much elevation (rad) either side of
+// the horizon: about its disc on Mars, as the terrain shader takes it.
+constexpr double SUN_EDGE_RAD = 0.006;
 
 inline int horizon_side(const TileLayout &p_lay) {
 	return p_lay.intervals / 4 + 3;
@@ -37,5 +40,12 @@ void compute_horizon(const std::vector<DVec3> &p_pos, TileKey p_key, const TileL
 // The horizon angle (rad) toward grid direction p_dir at tile sample
 // (p_i, p_j), bilinear between the page's points.
 double horizon_angle(const std::vector<uint8_t> &p_page, const TileLayout &p_lay, double p_i, double p_j, int p_dir);
+
+// How much of the sun's disc clears the terrain at tile sample
+// (p_i, p_j), 0..1: the terrain shader's sun_visibility. All body-fixed:
+// p_up the local up, p_ti and p_tj the tile's +i and +j grid steps
+// there, p_sun toward the sun.
+double sun_visibility(const std::vector<uint8_t> &p_page, const TileLayout &p_lay, double p_i, double p_j,
+		const DVec3 &p_up, const DVec3 &p_ti, const DVec3 &p_tj, const DVec3 &p_sun);
 
 } // namespace regolith

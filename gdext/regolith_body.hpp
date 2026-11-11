@@ -83,6 +83,10 @@ public:
 	// Surface radius under a direction; p_exact produces the
 	// finest tile synchronously, otherwise the deepest cached.
 	double surface_radius(const regolith::DVec3 &p_dir, bool p_exact);
+	// How much of the sun's disc (p_sun, body-fixed) clears the terrain
+	// at p_dir, 0..1, from the finest horizon page a worker has made
+	// there (levels 0-3 always have one); NaN before the pack opens.
+	double sun_visibility(const regolith::DVec3 &p_dir, const regolith::DVec3 &p_sun);
 	// Areoid (datum) radius under a direction.
 	double datum_radius(const regolith::DVec3 &p_dir) const;
 	// the lowest ground anywhere on the body (m from its centre),
