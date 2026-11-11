@@ -38,6 +38,14 @@ Regolith does not fly (a building, a deck) or on a landed vessel; otherwise
 it coasts on its orbit. A `RigidBody3D` reports what it rests on only with
 `max_contacts_reported` above 0.
 
+Near a body the render frame turns with it, so its ground stands still;
+above `rotating_altitude` (in orbit) it does not, and the ground moves
+through it. In a double-precision build nothing is ever moved to switch
+frames: changing focus, crossing `rotating_altitude` or entering another
+sphere of influence keeps every position (`frame_shifted` still fires,
+with an identity transform). A single-precision build re-centres the
+frame on its focus instead (`floating_origin`).
+
 ## The engine
 
 Regolith is made for Godot 4.7.2 with a few renderer patches and

@@ -680,6 +680,13 @@ void RegolithSystem::rebuild_frame(RegolithBody *p_body, bool p_rotating, const 
 	if (is_parked(p_focus_node)) {
 		old_focus_vel = Vector3();
 	}
+	// the frame as it stands in space, to keep when the origin does not follow the focus
+	const Pose &o_old = pose_of(dominant_);
+	const DVec3 *a_old = ref_axes();
+	const DVec3 anchor_icrf = o_old.position + to_icrf(a_old, frame_.anchor);
+	const DVec3 east_icrf = to_icrf(a_old, frame_.east);
+	const DVec3 up_icrf = to_icrf(a_old, frame_.up);
+	const DVec3 south_icrf = to_icrf(a_old, frame_.south);
 
 	dominant_ = p_body;
 	rotating_ = p_rotating;
@@ -691,7 +698,15 @@ void RegolithSystem::rebuild_frame(RegolithBody *p_body, bool p_rotating, const 
 	}
 	const DVec3 *a = ref_axes();
 	const DVec3 r = p_focus.x - o.position;
-	frame_ = regolith::RenderFrame::at(from_icrf(a, r));
+	if (floating_origin_) {
+		frame_ = regolith::RenderFrame::at(from_icrf(a, r)); // re-centred on the focus, its up as +Y
+	} else {
+		// every render position stays as it was: only what the frame turns with changes
+		frame_.anchor = from_icrf(a, anchor_icrf - o.position);
+		frame_.east = from_icrf(a, east_icrf);
+		frame_.up = from_icrf(a, up_icrf);
+		frame_.south = from_icrf(a, south_icrf);
+	}
 	frame_velocity_ = DVec3();
 	// Keep the focus's small render velocity: the rest of its
 	// true velocity becomes the frame's.
@@ -706,7 +721,9 @@ void RegolithSystem::rebuild_frame(RegolithBody *p_body, bool p_rotating, const 
 
 	Vector3 c, unused;
 	from_state(origin_before, c, unused);
-	Transform3D t(render_to_icrf().transposed() * old_ra, c);
+	// a frame kept in place moves nothing: exactly the identity, so
+	// handlers can tell there is nothing to do
+	const Transform3D t = floating_origin_ ? Transform3D(render_to_icrf().transposed() * old_ra, c) : Transform3D();
 	++rebases_;
 	emit_signal("frame_shifted", t);
 }
@@ -741,7 +758,8 @@ void RegolithSystem::manage_frame(Node3D *p_focus) {
 	const double r = body->r_ref();
 	const double leash = std::fmax(std::fmin(2000.0, 0.02 * r), 0.05 * std::fabs(alt));
 	const bool strayed = floating_origin_ && local.length() > leash;
-	if (body != dominant_ || rotating != rotating_ || switched_focus || strayed) {
+	// a new focus re-centres only a frame that follows its focus
+	if (body != dominant_ || rotating != rotating_ || (switched_focus && floating_origin_) || strayed) {
 		rebuild_frame(body, rotating, s, p_focus);
 	}
 	if (RegolithVessel *v = vessel_of(p_focus); v && v->parked_ && warp_ <= 1.0) {

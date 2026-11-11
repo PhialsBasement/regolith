@@ -268,9 +268,10 @@ private:
 	bool manage_camera_ = true;
 	// Near/far camera pair; off renders the whole range in one.
 	bool split_passes_ = false;
-	// Only single-precision builds need the 2 km leash; double
-	// builds are exact at planet scale. Floating velocity stays
-	// on in both: Jolt keeps velocities in float32.
+	// Only single-precision builds need the frame to follow its focus
+	// (re-centred at each rebuild and on a 2 km leash); double builds
+	// are exact at planet scale and never move a position. Floating
+	// velocity stays on in both: Jolt keeps velocities in float32.
 #ifdef REAL_T_IS_DOUBLE
 	bool floating_origin_ = false;
 #else
