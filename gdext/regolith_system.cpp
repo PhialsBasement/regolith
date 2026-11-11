@@ -226,6 +226,9 @@ void RegolithSystem::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_floating_velocity"), &RegolithSystem::get_floating_velocity);
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "floating_origin"), "set_floating_origin", "get_floating_origin");
 	ADD_PROPERTY(PropertyInfo(Variant::BOOL, "floating_velocity"), "set_floating_velocity", "get_floating_velocity");
+	ClassDB::bind_method(D_METHOD("set_fixed_range", "metres"), &RegolithSystem::set_fixed_range);
+	ClassDB::bind_method(D_METHOD("get_fixed_range"), &RegolithSystem::get_fixed_range);
+	ADD_PROPERTY(PropertyInfo(Variant::FLOAT, "fixed_range"), "set_fixed_range", "get_fixed_range");
 	ADD_SIGNAL(MethodInfo("frame_shifted", PropertyInfo(Variant::TRANSFORM3D, "transform")));
 	// a vessel on rails struck a body: now landed there
 	ADD_SIGNAL(MethodInfo("vessel_impact", PropertyInfo(Variant::OBJECT, "node"), PropertyInfo(Variant::STRING, "body"),
@@ -1270,6 +1273,28 @@ void RegolithSystem::place_all_parked() {
 	}
 }
 
+// The game's planet-fixed roots near the camera or any vessel under
+// physics (the focus among them), on their spot.
+void RegolithSystem::carry_fixed() {
+	if (!frame_moving()) {
+		stats_["fixed_carried"] = 0;
+		return;
+	}
+	std::vector<Vector3> near;
+	if (Camera3D *cam = get_viewport() ? get_viewport()->get_camera_3d() : nullptr) {
+		near.push_back(cam->get_global_position());
+	}
+	TypedArray<Node> vessels = get_tree()->get_nodes_in_group("regolith_vessel");
+	for (int i = 0; i < vessels.size(); ++i) {
+		Node *v = Object::cast_to<Node>(vessels[i]);
+		Node3D *node = v ? Object::cast_to<Node3D>(v->get_parent()) : nullptr;
+		if (node && !is_parked(node)) {
+			near.push_back(node->get_global_position());
+		}
+	}
+	stats_["fixed_carried"] = fixed_.carry(*this, get_tree(), near, fixed_range_m_);
+}
+
 void RegolithSystem::_physics_process(double p_delta) {
 	if (!anchored_) {
 		return;
@@ -1285,6 +1310,7 @@ void RegolithSystem::_physics_process(double p_delta) {
 			floating_velocity(focus);
 		}
 	}
+	fixed_.note(*this, get_tree());
 	const uint64_t t1 = clock->get_ticks_usec();
 	// Forces use the state at time t; then the frame and the
 	// bodies advance, and Jolt moves everything by its v dt.
@@ -1296,6 +1322,7 @@ void RegolithSystem::_physics_process(double p_delta) {
 	frame_.anchor = frame_.anchor + frame_velocity_ * dt;
 	update_poses();
 	place_all_parked();
+	carry_fixed();
 	const uint64_t t3 = clock->get_ticks_usec();
 	stats_["frame_ms"] = double(t1 - t0) * 1e-3;
 	stats_["vessels_ms"] = double(t2 - t1) * 1e-3;

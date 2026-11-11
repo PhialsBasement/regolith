@@ -123,6 +123,7 @@ if(REGOLITH_BUILD_GDEXTENSION)
 		gdext/regolith_vessel.cpp
 		gdext/regolith_weather.cpp
 		gdext/climate_model_config.cpp
+		gdext/fixed_carrier.cpp
 		gdext/rd_util.cpp
 		gdext/regolith_clouds.cpp
 		gdext/regolith_editor.cpp

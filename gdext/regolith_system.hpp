@@ -18,6 +18,7 @@
 #include <godot_cpp/variant/vector2.hpp>
 #include <godot_cpp/variant/vector3.hpp>
 
+#include "fixed_carrier.hpp"
 #include "regolith/patch.hpp"
 
 namespace godot {
@@ -113,6 +114,8 @@ public:
 	void set_floating_origin(bool p_v) { floating_origin_ = p_v; }
 	bool get_floating_origin() const { return floating_origin_; }
 	void set_floating_velocity(bool p_v) { floating_velocity_enabled_ = p_v; }
+	void set_fixed_range(double p_v) { fixed_range_m_ = p_v; }
+	double get_fixed_range() const { return fixed_range_m_; }
 	bool get_floating_velocity() const { return floating_velocity_enabled_; }
 
 	double get_time() const { return time_; }
@@ -205,6 +208,7 @@ private:
 	Node3D *focus_node() const;
 	bool node_state(Node3D *p_node, State &r_s) const;
 	void rebuild_frame(RegolithBody *p_body, bool p_rotating, const State &p_focus, Node3D *p_focus_node);
+	void carry_fixed();
 	std::vector<Live> capture_live() const;
 	void restore_live(const std::vector<Live> &p_live);
 	void manage_frame(Node3D *p_focus);
@@ -295,6 +299,8 @@ private:
 	int rebases_ = 0;
 	int shifts_ = 0;
 	Dictionary stats_;
+	FixedCarrier fixed_; // the game's planet-fixed roots, kept on their spots
+	double fixed_range_m_ = 2500.0; // roots this near the focus or the camera are carried every tick
 	Node3D *last_focus_ = nullptr;
 
 	SubViewport *far_view_ = nullptr;
