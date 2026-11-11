@@ -24,11 +24,17 @@ uint8_t encode(double p_angle) {
 // Parent page, bilinear, at child sample (i, j).
 double parent_horizon(const std::vector<uint8_t> &p_page, const TileLayout &p_lay, int p_quadrant, double p_i, double p_j,
 		int p_dir) {
-	const int side = horizon_side(p_lay);
 	const double pi = ((p_quadrant & 1) * p_lay.intervals + p_i) * 0.5;
 	const double pj = ((p_quadrant >> 1) * p_lay.intervals + p_j) * 0.5;
-	const double gx = std::clamp(pi / 4.0 + 1.0, 0.0, double(side - 1));
-	const double gy = std::clamp(pj / 4.0 + 1.0, 0.0, double(side - 1));
+	return horizon_angle(p_page, p_lay, pi, pj, p_dir);
+}
+
+} // namespace
+
+double horizon_angle(const std::vector<uint8_t> &p_page, const TileLayout &p_lay, double p_i, double p_j, int p_dir) {
+	const int side = horizon_side(p_lay);
+	const double gx = std::clamp(p_i / 4.0 + 1.0, 0.0, double(side - 1));
+	const double gy = std::clamp(p_j / 4.0 + 1.0, 0.0, double(side - 1));
 	const int x0 = std::min(int(gx), side - 2), y0 = std::min(int(gy), side - 2);
 	const double tx = gx - x0, ty = gy - y0;
 	const int layer = p_dir / 4, ch = p_dir % 4;
@@ -37,8 +43,6 @@ double parent_horizon(const std::vector<uint8_t> &p_page, const TileLayout &p_la
 	};
 	return (at(x0, y0) * (1 - tx) + at(x0 + 1, y0) * tx) * (1 - ty) + (at(x0, y0 + 1) * (1 - tx) + at(x0 + 1, y0 + 1) * tx) * ty;
 }
-
-} // namespace
 
 void compute_horizon(const std::vector<DVec3> &p_pos, TileKey p_key, const TileLayout &p_lay,
 		const std::vector<uint8_t> *p_parent, std::vector<uint8_t> &r_page) {

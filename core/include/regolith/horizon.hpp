@@ -34,4 +34,8 @@ inline int horizon_side(const TileLayout &p_lay) {
 void compute_horizon(const std::vector<DVec3> &p_pos, TileKey p_key, const TileLayout &p_lay,
 		const std::vector<uint8_t> *p_parent, std::vector<uint8_t> &r_page);
 
+// The horizon angle (rad) toward grid direction p_dir at tile sample
+// (p_i, p_j), bilinear between the page's points.
+double horizon_angle(const std::vector<uint8_t> &p_page, const TileLayout &p_lay, double p_i, double p_j, int p_dir);
+
 } // namespace regolith
