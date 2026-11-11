@@ -19,6 +19,9 @@ difference between a smooth frame rate and a slideshow.
 
 ## Build it
 
+Needs git, Python 3, SCons and Godot's own build dependencies:
+https://docs.godotengine.org/en/stable/engine_details/development/compiling/
+
 Linux or macOS:
 
 ```

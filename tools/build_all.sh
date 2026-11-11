@@ -5,13 +5,11 @@
 
 # Every library regolith.gdextension lists: Linux and Windows,
 # debug (editor) and release (exports), double and single.
-# Windows cross-compiles with MinGW-w64 and needs zstd sources.
+# Windows cross-compiles with MinGW-w64 (zstd comes from its submodule).
 set -euo pipefail
 
 root="$(cd "$(dirname "$0")/.." && pwd)"
 jobs="${JOBS:-$(nproc)}"
-# zstd for Windows: Godot's own copy (build_godot.sh clones it)
-zstd_src="${ZSTD_SRC:-$root/engine/godot/thirdparty/zstd}"
 platforms="${PLATFORMS:-linux windows}"
 
 configure_and_build() {
@@ -19,11 +17,7 @@ configure_and_build() {
 	local dir="$root/build-$platform-$target-$precision"
 	local extra=()
 	if [ "$platform" = windows ]; then
-		if [ ! -d "$zstd_src" ]; then
-			echo "no zstd sources at $zstd_src: set ZSTD_SRC" >&2
-			exit 1
-		fi
-		extra=(-DCMAKE_TOOLCHAIN_FILE="$root/cmake/mingw-w64.cmake" -DREGOLITH_ZSTD_SOURCE="$zstd_src"
+		extra=(-DCMAKE_TOOLCHAIN_FILE="$root/cmake/mingw-w64.cmake"
 			-DREGOLITH_BUILD_TESTS=OFF -DREGOLITH_BUILD_BAKER=OFF)
 	fi
 	echo "== $platform $target $precision"

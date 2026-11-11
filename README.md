@@ -216,6 +216,23 @@ gravity, all of which can then be set by hand.
 
 ## Build (Linux)
 
+Needs git, CMake 3.20+, Ninja, GCC or Clang with C++20, and Python 3
+(godot-cpp generates its bindings with it). zstd and godot-cpp are
+submodules and compiled in; nothing else is needed.
+
+```
+# Ubuntu / Debian
+sudo apt install git cmake ninja-build g++ python3
+# Arch
+sudo pacman -S git cmake ninja gcc python
+```
+
+The Windows libraries cross-compile with MinGW-w64
+(`x86_64-w64-mingw32-gcc`): `mingw-w64` on Ubuntu, `mingw-w64-gcc`
+on Arch. `tools/package_release.sh` also needs `strip` (binutils).
+
+Clone with `--recursive`, or fetch the submodules afterwards:
+
 ```
 git submodule update --init
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -247,8 +264,7 @@ Godot's own licence (MIT) is in the editor downloads.
 
 Build every library first: `tools/build_all.sh` makes Linux and
 Windows, debug (editor) and release (exports), double and single
-(Windows cross-compiles with MinGW-w64; set `ZSTD_SRC` to a zstd
-`lib/` tree, Godot's `thirdparty/zstd` will do). Export with the
+(Windows cross-compiles with MinGW-w64, see Build). Export with the
 double-precision templates `engine/build_godot` builds.
 
 Regolith reads its packs (`.rgp`, `.rge`) and maps with plain file
