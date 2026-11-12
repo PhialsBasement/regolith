@@ -46,12 +46,16 @@ sphere of influence keeps every position (`frame_shifted` still fires,
 with an identity transform). A single-precision build re-centres the
 frame on its focus instead (`floating_origin`). While the ground moves
 through the frame, Regolith keeps its own terrain and landed vessels on
-it; put the roots of your own planet-fixed nodes (a base, a grid of
-structures) in the group `regolith_fixed` and those within `fixed_range`
-(2.5 km by default) of the camera or of any vessel under physics are kept
-on their spot every tick, the rest put back once when they come near or
-the frame turns with the body again (`get_stats()["fixed_carried"]` counts
-the roots moved each tick).
+it; put the roots of your own body-fixed nodes (a base, a grid of
+structures) in the group `regolith_fixed`, with the meta `regolith_body`
+naming their body (without it, the dominant body when the root joins).
+Roots on another body than the dominant one move through the frame
+always and are kept on their spot every tick. Roots on the dominant
+body stand still while the frame turns with it; while it does not, those
+within `fixed_range` (2.5 km by default) of the camera or of any vessel
+under physics are kept on their spot every tick, the rest put back once
+when they come near or the frame turns with the body again
+(`get_stats()["fixed_carried"]` counts the roots moved each tick).
 
 ## The engine
 

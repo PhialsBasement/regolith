@@ -18,14 +18,18 @@ class RegolithSystem;
 class SceneTree;
 
 // Nodes fixed to a body that a game puts in the group "regolith_fixed"
-// (a few roots, each carrying many children). While the render frame
-// turns with their body they stay put by themselves; while it does not
-// (in orbit), the ground moves through it, so the roots near the focus
-// or the camera are put back on their spot every tick, and the others
-// once, when they come near or the frame turns with the body again.
+// (a few roots, each carrying many children), on the body named by
+// their meta BODY_META, or the dominant one. While the render frame
+// turns with their body they stay put by themselves. While it does not,
+// their ground moves through the frame: roots on another body than the
+// dominant one are put back on their spot every tick (they are what is
+// seen across space); roots on the dominant body are put back every
+// tick near the focus or the camera, and the others once, when they
+// come near or the frame turns with the body again.
 class FixedCarrier {
 public:
 	static constexpr const char *GROUP = "regolith_fixed";
+	static constexpr const char *BODY_META = "regolith_body";
 
 	// Start of a tick, before time moves on: the spots of roots the frame
 	// carries now, and of roots new to the group; once the frame turns
@@ -42,7 +46,10 @@ private:
 		regolith::DVec3 origin, x, y, z; // body-fixed: position and basis columns
 		bool stale = false; // not put back since the ground moved
 	};
-	static Spot spot_of(const RegolithSystem &p_sys, const class Node3D *p_node);
+	static const class RegolithBody *body_of(const RegolithSystem &p_sys, const class Node3D *p_node);
+	// the frame turns with p_body: what stands on it stays put
+	static bool held(const RegolithSystem &p_sys, const class RegolithBody *p_body);
+	static Spot spot_of(const RegolithSystem &p_sys, const class Node3D *p_node, const class RegolithBody *p_body);
 	static void put_back(const RegolithSystem &p_sys, class Node3D *p_node, const Spot &p_spot);
 
 	std::unordered_map<uint64_t, Spot> spots_; // node instance id -> its spot

@@ -16,12 +16,27 @@
 
 using namespace godot;
 
-FixedCarrier::Spot FixedCarrier::spot_of(const RegolithSystem &p_sys, const Node3D *p_node) {
-	const RegolithBody *body = p_sys.dominant();
-	const regolith::RenderFrame f = p_sys.frame_for(body);
+const RegolithBody *FixedCarrier::body_of(const RegolithSystem &p_sys, const Node3D *p_node) {
+	if (!p_node->has_meta(BODY_META)) {
+		return p_sys.dominant();
+	}
+	const RegolithBody *body = p_sys.find_body(String(p_node->get_meta(BODY_META)));
+	if (!body) {
+		WARN_PRINT_ONCE("regolith_fixed: no body named by a root's regolith_body meta; it stays on the dominant one");
+		return p_sys.dominant();
+	}
+	return body;
+}
+
+bool FixedCarrier::held(const RegolithSystem &p_sys, const RegolithBody *p_body) {
+	return p_body == p_sys.dominant() && !p_sys.frame_moving();
+}
+
+FixedCarrier::Spot FixedCarrier::spot_of(const RegolithSystem &p_sys, const Node3D *p_node, const RegolithBody *p_body) {
+	const regolith::RenderFrame f = p_sys.frame_for(p_body);
 	const Transform3D xf = p_node->get_global_transform();
 	Spot s;
-	s.body_id = body->get_instance_id();
+	s.body_id = p_body->get_instance_id();
 	s.origin = regolith::to_body_point(f, regolith::to_d(xf.origin));
 	s.x = regolith::to_body_vec(f, regolith::to_d(xf.basis.get_column(0)));
 	s.y = regolith::to_body_vec(f, regolith::to_d(xf.basis.get_column(1)));
@@ -46,7 +61,6 @@ void FixedCarrier::note(const RegolithSystem &p_sys, SceneTree *p_tree) {
 	if (!p_tree || !p_sys.dominant()) {
 		return;
 	}
-	const bool carried = !p_sys.frame_moving(); // the frame turns with the body: what stands there stays
 	TypedArray<Node> roots = p_tree->get_nodes_in_group(GROUP);
 	std::unordered_set<uint64_t> here;
 	for (int i = 0; i < roots.size(); ++i) {
@@ -56,12 +70,15 @@ void FixedCarrier::note(const RegolithSystem &p_sys, SceneTree *p_tree) {
 		}
 		const uint64_t id = n->get_instance_id();
 		here.insert(id);
+		const RegolithBody *body = body_of(p_sys, n);
+		const bool carried = held(p_sys, body);
 		auto it = spots_.find(id);
-		if (it != spots_.end() && it->second.stale && carried) {
+		const bool moved_body = it != spots_.end() && it->second.body_id != body->get_instance_id();
+		if (it != spots_.end() && it->second.stale && carried && !moved_body) {
 			put_back(p_sys, n, it->second); // the frame turns with the body again: back once, then it stays
 		}
-		if (carried || it == spots_.end()) {
-			spots_[id] = spot_of(p_sys, n); // where the game has it now is its spot
+		if (carried || it == spots_.end() || moved_body) {
+			spots_[id] = spot_of(p_sys, n, body); // where the game has it now is its spot
 		}
 	}
 	for (auto it = spots_.begin(); it != spots_.end();) {
@@ -72,7 +89,7 @@ void FixedCarrier::note(const RegolithSystem &p_sys, SceneTree *p_tree) {
 int FixedCarrier::carry(const RegolithSystem &p_sys, SceneTree *p_tree, const std::vector<Vector3> &p_near,
 		double p_range_m) {
 	int moved = 0;
-	if (!p_tree || !p_sys.frame_moving() || spots_.empty()) {
+	if (!p_tree || spots_.empty()) {
 		return moved;
 	}
 	TypedArray<Node> roots = p_tree->get_nodes_in_group(GROUP);
@@ -83,11 +100,11 @@ int FixedCarrier::carry(const RegolithSystem &p_sys, SceneTree *p_tree, const st
 			continue;
 		}
 		const RegolithBody *body = Object::cast_to<RegolithBody>(ObjectDB::get_instance(it->second.body_id));
-		if (!body) {
+		if (!body || held(p_sys, body)) {
 			continue;
 		}
 		const Vector3 at = regolith::to_v(p_sys.frame_for(body).to_local_point(it->second.origin));
-		bool near = false;
+		bool near = body != p_sys.dominant();
 		for (const Vector3 &p : p_near) {
 			near = near || at.distance_to(p) < p_range_m;
 		}
