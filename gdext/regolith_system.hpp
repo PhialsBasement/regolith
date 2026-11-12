@@ -91,6 +91,9 @@ public:
 	Basis icrf_to_render() const { return render_to_icrf().transposed(); }
 	bool is_anchored() const { return anchored_; }
 	RegolithBody *find_body(const String &p_name) const;
+	// the body a point query is about: p_name, or the dominant one when
+	// it is empty; null (warned once) for an unknown name
+	RegolithBody *query_body(const String &p_name) const;
 	// A render-space point in p_body's fixed frame (m).
 	regolith::DVec3 body_point(const RegolithBody *p_body, const Vector3 &p_pos) const;
 
@@ -119,19 +122,24 @@ public:
 	bool get_floating_velocity() const { return floating_velocity_enabled_; }
 
 	double get_time() const { return time_; }
-	double get_local_solar_time(const Vector3 &p_pos) const;
+	double get_local_solar_time(const Vector3 &p_pos, const String &p_body = String()) const;
 	Vector3 get_sun_direction() const;
 	double get_sun_visible() const { return sun_visible_; }
+	// How much of the sun's disc the bodies leave visible at p_pos
+	// (eclipses and transits; the body p_pos stands on is its night,
+	// not an eclipse), 0..1; 1 without a body.
+	double get_eclipse_visibility(const Vector3 &p_pos) const;
 	Vector3 get_gravity(const Vector3 &p_pos) const;
 	Vector3 get_acceleration(const Vector3 &p_pos, const Vector3 &p_vel) const;
 	Vector3 get_up(const Vector3 &p_pos) const;
-	Vector2 get_latlon(const Vector3 &p_pos) const;
-	double get_altitude(const Vector3 &p_pos) const;
-	double get_ground_clearance(const Vector3 &p_pos) const;
+	// p_body names the body asked about; empty: the dominant one
+	Vector2 get_latlon(const Vector3 &p_pos, const String &p_body = String()) const;
+	double get_altitude(const Vector3 &p_pos, const String &p_body = String()) const;
+	double get_ground_clearance(const Vector3 &p_pos, const String &p_body = String()) const;
 	// How much of the sun's disc clears the terrain at p_pos, 0..1
-	// (terrain only: eclipses are get_sun_visible); NaN without a body.
-	double get_sun_visibility(const Vector3 &p_pos) const;
-	double get_radius(const Vector3 &p_pos) const;
+	// (terrain only: eclipses are get_eclipse_visibility); NaN without a body.
+	double get_sun_visibility(const Vector3 &p_pos, const String &p_body = String()) const;
+	double get_radius(const Vector3 &p_pos, const String &p_body = String()) const;
 	String get_dominant_name() const;
 	bool get_frame_rotating() const { return rotating_; }
 	// True while the dominant body's ground moves in render space.

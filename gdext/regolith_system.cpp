@@ -159,21 +159,26 @@ void RegolithSystem::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_gravity", "position"), &RegolithSystem::get_gravity);
 	ClassDB::bind_method(D_METHOD("get_acceleration", "position", "velocity"), &RegolithSystem::get_acceleration);
 	ClassDB::bind_method(D_METHOD("get_up", "position"), &RegolithSystem::get_up);
-	ClassDB::bind_method(D_METHOD("get_latlon", "position"), &RegolithSystem::get_latlon);
-	ClassDB::bind_method(D_METHOD("get_altitude", "position"), &RegolithSystem::get_altitude);
-	ClassDB::bind_method(D_METHOD("get_ground_clearance", "position"), &RegolithSystem::get_ground_clearance);
-	ClassDB::bind_method(D_METHOD("get_radius", "position"), &RegolithSystem::get_radius);
+	ClassDB::bind_method(D_METHOD("get_latlon", "position", "body"), &RegolithSystem::get_latlon, DEFVAL(String()));
+	ClassDB::bind_method(D_METHOD("get_altitude", "position", "body"), &RegolithSystem::get_altitude, DEFVAL(String()));
+	ClassDB::bind_method(D_METHOD("get_ground_clearance", "position", "body"), &RegolithSystem::get_ground_clearance,
+			DEFVAL(String()));
+	ClassDB::bind_method(D_METHOD("get_radius", "position", "body"), &RegolithSystem::get_radius, DEFVAL(String()));
 	ClassDB::bind_method(D_METHOD("get_rebase_count"), &RegolithSystem::get_rebase_count);
 	ClassDB::bind_method(D_METHOD("get_shift_count"), &RegolithSystem::get_shift_count);
 	ClassDB::bind_method(D_METHOD("get_stats"), &RegolithSystem::get_stats);
 	ClassDB::bind_method(D_METHOD("get_time"), &RegolithSystem::get_time);
 	ClassDB::bind_method(D_METHOD("is_anchored"), &RegolithSystem::is_anchored);
-	ClassDB::bind_method(D_METHOD("get_local_solar_time", "position"), &RegolithSystem::get_local_solar_time);
+	ClassDB::bind_method(D_METHOD("get_local_solar_time", "position", "body"), &RegolithSystem::get_local_solar_time,
+			DEFVAL(String()));
 	ClassDB::bind_method(D_METHOD("get_sun_direction"), &RegolithSystem::get_sun_direction);
 	ClassDB::bind_method(D_METHOD("get_sun_scale"), &RegolithSystem::get_sun_scale);
 	ClassDB::bind_method(D_METHOD("get_sun_visible"), &RegolithSystem::get_sun_visible);
-	ClassDB::bind_method(D_METHOD("get_sun_visibility", "position"), &RegolithSystem::get_sun_visibility);
+	ClassDB::bind_method(D_METHOD("get_eclipse_visibility", "position"), &RegolithSystem::get_eclipse_visibility);
+	ClassDB::bind_method(D_METHOD("get_sun_visibility", "position", "body"), &RegolithSystem::get_sun_visibility,
+			DEFVAL(String()));
 	ClassDB::bind_method(D_METHOD("get_dominant_name"), &RegolithSystem::get_dominant_name);
+	ClassDB::bind_method(D_METHOD("find_body", "name"), &RegolithSystem::find_body);
 	ClassDB::bind_method(D_METHOD("get_frame_rotating"), &RegolithSystem::get_frame_rotating);
 	ClassDB::bind_method(D_METHOD("get_frame_velocity"), &RegolithSystem::get_frame_velocity);
 	ClassDB::bind_method(D_METHOD("get_bodies_info", "position"), &RegolithSystem::get_bodies_info);
@@ -1277,10 +1282,6 @@ void RegolithSystem::place_all_parked() {
 // The game's planet-fixed roots near the camera or any vessel under
 // physics (the focus among them), on their spot.
 void RegolithSystem::carry_fixed() {
-	if (!frame_moving()) {
-		stats_["fixed_carried"] = 0;
-		return;
-	}
 	std::vector<Vector3> near;
 	if (Camera3D *cam = get_viewport() ? get_viewport()->get_camera_3d() : nullptr) {
 		near.push_back(cam->get_global_position());
@@ -1444,28 +1445,33 @@ void RegolithSystem::update_sun() {
 	const Vector3 helper = std::fabs(dir.y) < 0.99 ? Vector3(0, 1, 0) : Vector3(1, 0, 0);
 	sun->set_global_basis(Basis::looking_at(-dir, helper));
 
-	// Eclipses and transits: how much of the solar disc the
-	// other bodies leave visible from the camera.
+	// Eclipses and transits seen from the camera.
 	Camera3D *cam = get_viewport() ? get_viewport()->get_camera_3d() : nullptr;
-	sun_visible_ = 1.0;
-	if (cam) {
-		const DVec3 x = to_state(cam->get_global_position(), Vector3()).x;
-		const DVec3 sun_pos = central_heliocentric(time_) * (-AU);
-		const DVec3 to_sun = sun_pos - x;
-		const double sun_r = std::asin(SUN_RADIUS / regolith::length(to_sun));
-		for (const RegolithBody *b : bodies_) {
-			const DVec3 to_body = pose_of(b).position - x;
-			if (regolith::length(to_body) < b->r_ref() * 1.5) {
-				continue; // standing on it: that is night, not eclipse
-			}
-			const double body_r = std::asin(std::fmin(1.0, b->r_ref() / regolith::length(to_body)));
-			const double sep = std::acos(std::clamp(regolith::dot(regolith::normalize(to_sun), regolith::normalize(to_body)), -1.0, 1.0));
-			const double covered = std::clamp((body_r + sun_r - sep) / (2.0 * sun_r), 0.0, 1.0);
-			const double area = std::fmin(1.0, (body_r * body_r) / (sun_r * sun_r));
-			sun_visible_ = std::fmin(sun_visible_, 1.0 - covered * area);
-		}
-	}
+	sun_visible_ = cam ? get_eclipse_visibility(cam->get_global_position()) : 1.0;
 	sun->set_param(Light3D::PARAM_ENERGY, real_t(sun_energy_ * sun_visible_ * get_sun_scale()));
+}
+
+double RegolithSystem::get_eclipse_visibility(const Vector3 &p_pos) const {
+	if (!anchored_) {
+		return 1.0;
+	}
+	const DVec3 x = to_state(p_pos, Vector3()).x;
+	const DVec3 sun_pos = central_heliocentric(time_) * (-AU);
+	const DVec3 to_sun = sun_pos - x;
+	const double sun_r = std::asin(SUN_RADIUS / regolith::length(to_sun));
+	double visible = 1.0;
+	for (const RegolithBody *b : bodies_) {
+		const DVec3 to_body = pose_of(b).position - x;
+		if (regolith::length(to_body) < b->r_ref() * 1.5) {
+			continue; // standing on it: that is night, not eclipse
+		}
+		const double body_r = std::asin(std::fmin(1.0, b->r_ref() / regolith::length(to_body)));
+		const double sep = std::acos(std::clamp(regolith::dot(regolith::normalize(to_sun), regolith::normalize(to_body)), -1.0, 1.0));
+		const double covered = std::clamp((body_r + sun_r - sep) / (2.0 * sun_r), 0.0, 1.0);
+		const double area = std::fmin(1.0, (body_r * body_r) / (sun_r * sun_r));
+		visible = std::fmin(visible, 1.0 - covered * area);
+	}
+	return visible;
 }
 
 DVec3 RegolithSystem::camera_heliocentric() const {
@@ -1528,12 +1534,13 @@ DVec3 RegolithSystem::sun_in_body_at(const RegolithBody *p_body, double p_t) con
 	return sun_in_axes(central_heliocentric(p_t), position, axes, AU);
 }
 
-double RegolithSystem::get_local_solar_time(const Vector3 &p_pos) const {
-	if (!anchored_) {
+double RegolithSystem::get_local_solar_time(const Vector3 &p_pos, const String &p_body) const {
+	const RegolithBody *body = query_body(p_body);
+	if (!anchored_ || !body) {
 		return 0.0;
 	}
-	const Vector2 ll = get_latlon(p_pos);
-	return regolith::local_solar_time(sun_in_body(dominant_), double(ll.y));
+	const Vector2 ll = get_latlon(p_pos, p_body);
+	return regolith::local_solar_time(sun_in_body(body), double(ll.y));
 }
 
 Vector3 RegolithSystem::get_acceleration(const Vector3 &p_pos, const Vector3 &p_vel) const {
@@ -1564,47 +1571,63 @@ Vector3 RegolithSystem::get_frame_velocity() const {
 	return regolith::to_v(frame_.to_local_vec(frame_velocity_));
 }
 
-Vector2 RegolithSystem::get_latlon(const Vector3 &p_pos) const {
-	if (!anchored_) {
+RegolithBody *RegolithSystem::query_body(const String &p_name) const {
+	if (p_name.is_empty()) {
+		return dominant_;
+	}
+	RegolithBody *b = find_body(p_name);
+	if (!b) {
+		WARN_PRINT_ONCE("RegolithSystem: a point query names no body of the system");
+	}
+	return b;
+}
+
+Vector2 RegolithSystem::get_latlon(const Vector3 &p_pos, const String &p_body) const {
+	RegolithBody *body = query_body(p_body);
+	if (!anchored_ || !body) {
 		return Vector2();
 	}
-	const DVec3 x = body_point(dominant_, p_pos);
+	const DVec3 x = body_point(body, p_pos);
 	return Vector2(real_t(std::atan2(x.z, std::hypot(x.x, x.y)) / DEG), real_t(std::atan2(x.y, x.x) / DEG));
 }
 
-double RegolithSystem::get_radius(const Vector3 &p_pos) const {
-	if (!anchored_) {
+double RegolithSystem::get_radius(const Vector3 &p_pos, const String &p_body) const {
+	const RegolithBody *body = query_body(p_body);
+	if (!anchored_ || !body) {
 		return 0.0;
 	}
-	return regolith::length(body_point(dominant_, p_pos));
+	return regolith::length(body_point(body, p_pos));
 }
 
-double RegolithSystem::get_altitude(const Vector3 &p_pos) const {
-	if (!dominant_ || !anchored_) {
+double RegolithSystem::get_altitude(const Vector3 &p_pos, const String &p_body) const {
+	RegolithBody *body = query_body(p_body);
+	if (!body || !anchored_) {
 		return 0.0;
 	}
-	const DVec3 x = body_point(dominant_, p_pos);
-	return regolith::length(x) - dominant_->datum_radius(regolith::normalize(x));
+	const DVec3 x = body_point(body, p_pos);
+	return regolith::length(x) - body->datum_radius(regolith::normalize(x));
 }
 
-double RegolithSystem::get_ground_clearance(const Vector3 &p_pos) const {
-	if (!dominant_ || !anchored_) {
+double RegolithSystem::get_ground_clearance(const Vector3 &p_pos, const String &p_body) const {
+	RegolithBody *body = query_body(p_body);
+	if (!body || !anchored_) {
 		return std::nan("");
 	}
-	const DVec3 x = body_point(dominant_, p_pos);
-	return regolith::length(x) - dominant_->surface_radius(regolith::normalize(x), false);
+	const DVec3 x = body_point(body, p_pos);
+	return regolith::length(x) - body->surface_radius(regolith::normalize(x), false);
 }
 
-double RegolithSystem::get_sun_visibility(const Vector3 &p_pos) const {
-	if (!dominant_ || !anchored_) {
+double RegolithSystem::get_sun_visibility(const Vector3 &p_pos, const String &p_body) const {
+	RegolithBody *body = query_body(p_body);
+	if (!body || !anchored_) {
 		return std::nan("");
 	}
-	const DVec3 x = body_point(dominant_, p_pos);
+	const DVec3 x = body_point(body, p_pos);
 	// the sun in the body's axes, as the atmosphere takes it
 	const DVec3 to_sun = regolith::normalize(camera_heliocentric() * -1.0);
-	const DVec3 *ax = pose_of(dominant_).axes;
+	const DVec3 *ax = pose_of(body).axes;
 	const DVec3 sun(regolith::dot(to_sun, ax[0]), regolith::dot(to_sun, ax[1]), regolith::dot(to_sun, ax[2]));
-	return dominant_->sun_visibility(regolith::normalize(x), sun);
+	return body->sun_visibility(regolith::normalize(x), sun);
 }
 
 String RegolithSystem::get_dominant_name() const {

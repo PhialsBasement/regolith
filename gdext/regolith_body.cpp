@@ -393,6 +393,7 @@ void RegolithBody::_bind_methods() {
 	ClassDB::bind_method(D_METHOD("get_debug_mode"), &RegolithBody::get_debug_mode);
 	ClassDB::bind_method(D_METHOD("get_stats"), &RegolithBody::get_stats);
 	ClassDB::bind_method(D_METHOD("get_geology", "lat_deg", "lon_deg"), &RegolithBody::get_geology);
+	ClassDB::bind_method(D_METHOD("r_ref"), &RegolithBody::r_ref);
 	ClassDB::bind_method(D_METHOD("set_synthesis", "profile"), &RegolithBody::set_synthesis);
 	ClassDB::bind_method(D_METHOD("get_synthesis"), &RegolithBody::get_synthesis);
 	ClassDB::bind_method(D_METHOD("set_dark_map_path", "path"), &RegolithBody::set_dark_map_path);
