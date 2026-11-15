@@ -76,6 +76,7 @@ varying vec3 v_sun_t; // the sun's colour through the air here
 
 varying vec2 v_g; // data units from the ring's min corner
 varying vec2 v_local; // face metres from the ring centre
+varying vec2 v_past; // face0 grid steps past face0's edges per axis: > 0 outside
 varying float v_rho;
 varying vec3 v_ts; // position per data unit along grid x
 varying vec3 v_tt; // and along grid y
@@ -284,6 +285,7 @@ void vertex() {
 		VERTEX = vec3(0.0);
 		NORMAL = vec3(0.0, 1.0, 0.0);
 		v_g = vec2(0.0);
+		v_past = vec2(-1.0);
 	} else {
 		ivec2 k = ivec2(VERTEX.xz);
 		bool skirt = VERTEX.y < -0.5;
@@ -307,6 +309,8 @@ void vertex() {
 		vec3 ex;
 		vec3 ey;
 		fold_grid(gi_u, gf_u, m, face0, pi, pf, ex, ey);
+		// in ints first: exact near the edges, where it is tested
+		v_past = max(-(vec2(gi_u) + gf_u), vec2(gi_u - ivec2(m)) + gf_u);
 		profile_add(0, t_fold);
 		uint t_h = profile_clock(1);
 		// this ring's height, morphing toward the next ring's
@@ -427,6 +431,12 @@ float domain_scale(int id) {
 // @surface
 
 void fragment() {
+	// Past a cube corner (both axes off face0) there is no face:
+	// fold_grid squashes it onto the cube edge, a false wall. The
+	// strips past one edge each already cover the faces there.
+	if (v_past.x > 0.0 && v_past.y > 0.0) {
+		discard;
+	}
 	// profiler sections: 0 page lookup, 1 heights normal, 2 sun,
 	// 3 the surface
 	uint t_page = profile_clock(0);
